@@ -1,0 +1,44 @@
+# AVIF decoder repo (.gitignore)
+
+# --- OS / macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- C/C++ build artifacts ---
+/build/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.d
+*.pdb
+*.dSYM/
+core
+core.*
+
+# --- Python tooling ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env/
+
+# --- Project outputs ---
+*.avif.png
+
+# --- Test assets (DO NOT COMMIT) ---
+/testFiles/
