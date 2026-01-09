@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Extract Default_Coeff_Br_Cdf initializer from local av1bitstream.html.
 
-Outputs a C initializer for luma only:
-  static const uint16_t kDefaultCoeffBrCdfLuma[4][TX][21][5] = { ... };
+Outputs a C initializer for a selected plane type:
+    static const uint16_t kDefaultCoeffBrCdfLuma[4][TX][21][5] = { ... };
+    static const uint16_t kDefaultCoeffBrCdfChroma[4][TX][21][5] = { ... };
 
 Where TX is typically 4 (4x4..32x32). The extractor auto-detects TX dimension
 (4 or 5) based on integer count.
@@ -15,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import argparse
 from typing import List, Optional, Tuple
 
 
@@ -48,6 +50,10 @@ def try_dims(nums: List[int], dims: List[int]) -> Optional[object]:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--plane", choices=["luma", "chroma"], default="luma")
+    args = ap.parse_args()
+
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     html_path = os.path.join(repo_root, "av1bitstream.html")
 
@@ -108,21 +114,23 @@ def main() -> None:
             f"got {len(nums)} ints, expected one of {[4*4*2*21*5, 4*5*2*21*5]}"
         )
 
-    # Select PLANE_TYPES==0 (luma).
-    luma = []
+    ptype = 0 if args.plane == "luma" else 1
+    suffix = "Luma" if ptype == 0 else "Chroma"
+
+    sel = []
     for qctx in range(4):
         q_list = []
         for tx in range(tx_dim):
-            q_list.append(arr[qctx][tx][0])  # ptype=0
-        luma.append(q_list)
+            q_list.append(arr[qctx][tx][ptype])
+        sel.append(q_list)
 
-    print(f"static const uint16_t kDefaultCoeffBrCdfLuma[4][{tx_dim}][21][5] = {{")
+    print(f"static const uint16_t kDefaultCoeffBrCdf{suffix}[4][{tx_dim}][21][5] = {{")
     for qctx in range(4):
         print("   {")
         for tx in range(tx_dim):
             print("      {")
             for ctx in range(21):
-                cdf = luma[qctx][tx][ctx]
+                cdf = sel[qctx][tx][ctx]
                 print(f"         {{{cdf[0]}, {cdf[1]}, {cdf[2]}, {cdf[3]}, {cdf[4]}}},")
             print("      },")
         print("   },")

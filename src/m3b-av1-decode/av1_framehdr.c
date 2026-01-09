@@ -17,7 +17,7 @@
 
 static void usage(FILE *out) {
     fprintf(out,
-            "Usage: av1_framehdr [--dump-tiles DIR] [--check-tile-trailing] [--check-tile-trailing-strict] [--tile-consume-bools N] [--check-tile-trailingbits] [--check-tile-trailingbits-strict] [--decode-tile-syntax] [--decode-tile-syntax-strict] <in.av1>\n"
+            "Usage: av1_framehdr [--dump-tiles DIR] [--check-tile-trailing] [--check-tile-trailing-strict] [--tile-consume-bools N] [--check-tile-trailingbits] [--check-tile-trailingbits-strict] [--decode-tile-syntax] [--decode-tile-syntax-strict] [--decode-tile-syntax-try-eot] <in.av1>\n"
             "\n"
             "Parses a size-delimited AV1 OBU stream and prints basic frame header info.\n"
             "Current scope: still_picture=1 (reduced-still or non-reduced keyframe).\n"
@@ -32,7 +32,9 @@ static void usage(FILE *out) {
             "  --check-tile-trailingbits      Check tile trailing bits pattern (meaningful without tile decode)\n"
             "  --check-tile-trailingbits-strict   Same as above, but fails on first violation\n"
             "  --decode-tile-syntax    Call the m3b tile syntax probe (currently expected to report UNSUPPORTED)\n"
-            "  --decode-tile-syntax-strict   Same as above, but fails on first UNSUPPORTED/ERROR\n");
+            "  --decode-tile-syntax-strict   Same as above, but fails on first UNSUPPORTED/ERROR\n"
+            "  --decode-tile-syntax-try-eot  Attempt to traverse more of the tile and run exit_symbol() at the end (experimental)\n");
+
 }
 static const char *tx_size_name(uint32_t tx_size) {
     // Matches common AV1 TxSize ordering (see m3b tile probe).
@@ -1851,6 +1853,7 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                                            bool check_trailingbits_strict,
                                            bool decode_tile_syntax,
                                            bool decode_tile_syntax_strict,
+                                           bool decode_tile_syntax_try_eot,
                                            char *err,
                                            size_t err_cap) {
     uint32_t NumTiles = ti->tile_cols * ti->tile_rows;
@@ -2012,6 +2015,7 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                 p.base_q_idx = fh->base_q_idx;
                 p.tx_mode = fh->tx_mode;
                 p.reduced_tx_set = fh->reduced_tx_set;
+                p.probe_try_exit_symbol = decode_tile_syntax_try_eot ? 1u : 0u;
                 Av1TileSyntaxProbeStats st;
                 Av1TileSyntaxProbeStatus s = av1_tile_syntax_probe(payload + cur,
                                                                    (size_t)tileSize,
@@ -2885,6 +2889,7 @@ int main(int argc, char **argv) {
     bool check_tile_trailingbits_strict = false;
     bool decode_tile_syntax = false;
     bool decode_tile_syntax_strict = false;
+    bool decode_tile_syntax_try_eot = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
@@ -2938,6 +2943,11 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--decode-tile-syntax-strict")) {
             decode_tile_syntax = true;
             decode_tile_syntax_strict = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--decode-tile-syntax-try-eot")) {
+            decode_tile_syntax = true;
+            decode_tile_syntax_try_eot = true;
             continue;
         }
         if (!path) {
@@ -3107,6 +3117,7 @@ int main(int argc, char **argv) {
                                             check_tile_trailingbits_strict,
                                             decode_tile_syntax,
                                             decode_tile_syntax_strict,
+                                            decode_tile_syntax_try_eot,
                                             err,
                                             sizeof(err))) {
             fprintf(stderr, "Embedded tile group parse failed: %s\n", err);
@@ -3181,6 +3192,7 @@ int main(int argc, char **argv) {
                                                     check_tile_trailingbits_strict,
                                                     decode_tile_syntax,
                                                     decode_tile_syntax_strict,
+                                                    decode_tile_syntax_try_eot,
                                                     err,
                                                     sizeof(err))) {
                     fprintf(stderr, "Tile group parse failed: %s\n", err);

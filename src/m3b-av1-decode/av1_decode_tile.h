@@ -53,6 +53,11 @@ typedef struct {
     // reduced_tx_set (from the frame header).
     // Used by get_tx_set(txSz) when decoding intra_tx_type.
     uint32_t reduced_tx_set;
+
+    // Probe-only behavior toggle:
+    // 0 (default): keep the lightweight "stop early" probe behavior (expected UNSUPPORTED).
+    // 1: attempt full tile traversal and call exit_symbol() at the true end-of-tile.
+    uint32_t probe_try_exit_symbol;
 } Av1TileDecodeParams;
 
 typedef struct {

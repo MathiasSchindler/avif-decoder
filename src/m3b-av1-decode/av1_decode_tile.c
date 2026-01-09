@@ -11,12 +11,22 @@
 // Spec default CDF initializers extracted from the local av1bitstream.html.
 #include "av1_default_cdfs_intra_tx_type.inc"
 #include "av1_default_cdfs_coeff_base_luma.inc"
+#include "av1_default_cdfs_coeff_base_chroma.inc"
 #include "av1_default_cdfs_coeff_br_luma.inc"
+#include "av1_default_cdfs_coeff_br_chroma.inc"
 #include "av1_default_cdfs_dc_sign_luma.inc"
+#include "av1_default_cdfs_dc_sign_chroma.inc"
+
+// Additional chroma-only default coefficient CDF initializers (luma variants are currently embedded below).
+#include "av1_default_cdfs_eob_chroma.inc"
+#include "av1_default_cdfs_eob_extra_chroma.inc"
+#include "av1_default_cdfs_coeff_base_eob_chroma.inc"
 
 static uint32_t u32_ceil_div(uint32_t a, uint32_t b) {
    return (a + b - 1u) / b;
 }
+
+static bool mi_size_index_from_wlog2_hlog2(uint32_t wlog2, uint32_t hlog2, uint32_t *out_mi_size);
 
 #define AV1_PARTITION_CONTEXTS 4u
 
@@ -53,6 +63,8 @@ static uint32_t u32_ceil_div(uint32_t a, uint32_t b) {
 #define AV1_COEFF_CDF_Q_CTXS 4u
 #define AV1_COEFF_TX_SIZES 5u
 #define AV1_COEFF_BR_TX_SIZES 4u
+#define AV1_PLANE_TYPES 2u
+#define AV1_MAX_PLANES 3u
 #define AV1_TXB_SKIP_CONTEXTS 13u
 #define AV1_EOB_COEF_CONTEXTS 9u
 #define AV1_SIG_COEF_CONTEXTS 42u
@@ -323,79 +335,99 @@ typedef struct {
    // Only txb_skip is needed for the first coeff symbol (all_zero).
    uint16_t txb_skip[AV1_COEFF_TX_SIZES][AV1_TXB_SKIP_CONTEXTS][3];
 
-   // Mutable per-tile CDF copies: eob_pt_* (luma only for now).
-   uint16_t eob_pt_16[2][6];
-   uint16_t eob_pt_32[2][7];
-   uint16_t eob_pt_64[2][8];
-   uint16_t eob_pt_128[2][9];
-   uint16_t eob_pt_256[2][10];
-   uint16_t eob_pt_512[11];
-   uint16_t eob_pt_1024[12];
+   // Mutable per-tile CDF copies: eob_pt_* (ptype: 0=luma, 1=chroma).
+   uint16_t eob_pt_16[AV1_PLANE_TYPES][2][6];
+   uint16_t eob_pt_32[AV1_PLANE_TYPES][2][7];
+   uint16_t eob_pt_64[AV1_PLANE_TYPES][2][8];
+   uint16_t eob_pt_128[AV1_PLANE_TYPES][2][9];
+   uint16_t eob_pt_256[AV1_PLANE_TYPES][2][10];
+   uint16_t eob_pt_512[AV1_PLANE_TYPES][11];
+   uint16_t eob_pt_1024[AV1_PLANE_TYPES][12];
 
-   // Mutable per-tile CDF copies: eob_extra (luma only for now).
+   // Mutable per-tile CDF copies: eob_extra.
    // Spec: TileEobExtraCdf[ txSzCtx ][ ptype ][ eobPt - 3 ].
-   uint16_t eob_extra[AV1_COEFF_TX_SIZES][AV1_EOB_COEF_CONTEXTS][3];
+   uint16_t eob_extra[AV1_COEFF_TX_SIZES][AV1_PLANE_TYPES][AV1_EOB_COEF_CONTEXTS][3];
 
-   // Mutable per-tile CDF copies: coeff_base_eob (luma only for now).
+   // Mutable per-tile CDF copies: coeff_base_eob.
    // Spec: TileCoeffBaseEobCdf[ txSzCtx ][ ptype ][ ctx ].
-   uint16_t coeff_base_eob[AV1_COEFF_TX_SIZES][AV1_SIG_COEF_CONTEXTS_EOB][4];
+   uint16_t coeff_base_eob[AV1_COEFF_TX_SIZES][AV1_PLANE_TYPES][AV1_SIG_COEF_CONTEXTS_EOB][4];
 
-   // Mutable per-tile CDF copies: coeff_base (luma only for now).
+   // Mutable per-tile CDF copies: coeff_base.
    // Spec: TileCoeffBaseCdf[ txSzCtx ][ ptype ][ ctx ].
-   uint16_t coeff_base[AV1_COEFF_TX_SIZES][AV1_SIG_COEF_CONTEXTS][5];
+   uint16_t coeff_base[AV1_COEFF_TX_SIZES][AV1_PLANE_TYPES][AV1_SIG_COEF_CONTEXTS][5];
 
-   // Mutable per-tile CDF copies: coeff_br (luma only for now).
+   // Mutable per-tile CDF copies: coeff_br.
    // Spec: TileCoeffBrCdf[ Min(txSzCtx, TX_32X32) ][ ptype ][ ctx ].
-   uint16_t coeff_br[AV1_COEFF_BR_TX_SIZES][AV1_LEVEL_CONTEXTS][AV1_BR_CDF_SIZE + 1u];
+   uint16_t coeff_br[AV1_COEFF_BR_TX_SIZES][AV1_PLANE_TYPES][AV1_LEVEL_CONTEXTS][AV1_BR_CDF_SIZE + 1u];
 
-   // Mutable per-tile CDF copies: dc_sign (luma only for now).
+   // Mutable per-tile CDF copies: dc_sign.
    // Spec: TileDcSignCdf[ ptype ][ ctx ].
-   uint16_t dc_sign[AV1_DC_SIGN_CONTEXTS][3];
+   uint16_t dc_sign[AV1_PLANE_TYPES][AV1_DC_SIGN_CONTEXTS][3];
 } Av1TileCoeffCdfs;
 
 typedef struct {
-   // Spec-style coefficient contexts for plane 0 (luma) only.
-   // Indexed by x4 (columns) or y4 (rows) in MI units.
-   uint8_t *above_level;
-   uint8_t *left_level;
-   uint8_t *above_dc;
-   uint8_t *left_dc;
-   uint32_t cols;
-   uint32_t rows;
+   // Spec-style coefficient contexts, per plane.
+   // Indexed by x4 (columns) or y4 (rows) in *that plane's* MI units.
+   uint8_t *above_level[AV1_MAX_PLANES];
+   uint8_t *left_level[AV1_MAX_PLANES];
+   uint8_t *above_dc[AV1_MAX_PLANES];
+   uint8_t *left_dc[AV1_MAX_PLANES];
+   uint32_t cols[AV1_MAX_PLANES];
+   uint32_t rows[AV1_MAX_PLANES];
 } Av1TileCoeffCtx;
 
 static void tile_coeff_ctx_free(Av1TileCoeffCtx *ctx);
 
-static bool tile_coeff_ctx_init(Av1TileCoeffCtx *ctx, uint32_t cols, uint32_t rows, char *err, size_t err_cap) {
+static bool tile_coeff_ctx_init(Av1TileCoeffCtx *ctx,
+                                uint32_t tile_mi_cols,
+                                uint32_t tile_mi_rows,
+                                uint32_t mono_chrome,
+                                uint32_t subsampling_x,
+                                uint32_t subsampling_y,
+                                char *err,
+                                size_t err_cap) {
    if (!ctx) {
       snprintf(err, err_cap, "invalid coeff ctx");
       return false;
    }
    memset(ctx, 0, sizeof(*ctx));
-   ctx->cols = cols;
-   ctx->rows = rows;
 
-   if (cols == 0u && rows == 0u) {
-      return true;
+   // Plane 0 always present.
+   ctx->cols[0] = tile_mi_cols;
+   ctx->rows[0] = tile_mi_rows;
+   // Planes 1/2 only present when chroma exists.
+   if (!mono_chrome) {
+      ctx->cols[1] = tile_mi_cols >> subsampling_x;
+      ctx->rows[1] = tile_mi_rows >> subsampling_y;
+      ctx->cols[2] = ctx->cols[1];
+      ctx->rows[2] = ctx->rows[1];
    }
 
-   if (cols > 0u) {
-      ctx->above_level = (uint8_t *)calloc((size_t)cols, sizeof(uint8_t));
-      ctx->above_dc = (uint8_t *)calloc((size_t)cols, sizeof(uint8_t));
-      if (!ctx->above_level || !ctx->above_dc) {
-         snprintf(err, err_cap, "out of memory allocating coeff above ctx (cols=%u)", cols);
-         tile_coeff_ctx_free(ctx);
-         return false;
+   for (uint32_t plane = 0; plane < AV1_MAX_PLANES; plane++) {
+      const uint32_t cols = ctx->cols[plane];
+      const uint32_t rows = ctx->rows[plane];
+      if (cols == 0u && rows == 0u) {
+         continue;
       }
-   }
 
-   if (rows > 0u) {
-      ctx->left_level = (uint8_t *)calloc((size_t)rows, sizeof(uint8_t));
-      ctx->left_dc = (uint8_t *)calloc((size_t)rows, sizeof(uint8_t));
-      if (!ctx->left_level || !ctx->left_dc) {
-         snprintf(err, err_cap, "out of memory allocating coeff left ctx (rows=%u)", rows);
-         tile_coeff_ctx_free(ctx);
-         return false;
+      if (cols > 0u) {
+         ctx->above_level[plane] = (uint8_t *)calloc((size_t)cols, sizeof(uint8_t));
+         ctx->above_dc[plane] = (uint8_t *)calloc((size_t)cols, sizeof(uint8_t));
+         if (!ctx->above_level[plane] || !ctx->above_dc[plane]) {
+            snprintf(err, err_cap, "out of memory allocating coeff above ctx (plane=%u cols=%u)", plane, cols);
+            tile_coeff_ctx_free(ctx);
+            return false;
+         }
+      }
+
+      if (rows > 0u) {
+         ctx->left_level[plane] = (uint8_t *)calloc((size_t)rows, sizeof(uint8_t));
+         ctx->left_dc[plane] = (uint8_t *)calloc((size_t)rows, sizeof(uint8_t));
+         if (!ctx->left_level[plane] || !ctx->left_dc[plane]) {
+            snprintf(err, err_cap, "out of memory allocating coeff left ctx (plane=%u rows=%u)", plane, rows);
+            tile_coeff_ctx_free(ctx);
+            return false;
+         }
       }
    }
    return true;
@@ -403,23 +435,33 @@ static bool tile_coeff_ctx_init(Av1TileCoeffCtx *ctx, uint32_t cols, uint32_t ro
 
 static void tile_coeff_ctx_free(Av1TileCoeffCtx *ctx) {
    if (!ctx) return;
-   free(ctx->above_level);
-   free(ctx->left_level);
-   free(ctx->above_dc);
-   free(ctx->left_dc);
+   for (uint32_t plane = 0; plane < AV1_MAX_PLANES; plane++) {
+      free(ctx->above_level[plane]);
+      free(ctx->left_level[plane]);
+      free(ctx->above_dc[plane]);
+      free(ctx->left_dc[plane]);
+   }
    memset(ctx, 0, sizeof(*ctx));
 }
 
-static uint32_t dc_sign_ctx_luma(const Av1TileCoeffCtx *ctx, uint32_t x4, uint32_t y4, uint32_t w4, uint32_t h4) {
-   if (!ctx || (!ctx->above_dc && !ctx->left_dc)) {
+static uint32_t dc_sign_ctx(const Av1TileCoeffCtx *ctx, uint32_t plane, uint32_t x4, uint32_t y4, uint32_t w4, uint32_t h4) {
+   if (!ctx || plane >= AV1_MAX_PLANES) {
+      return 0u;
+   }
+
+   const uint8_t *above_dc = ctx->above_dc[plane];
+   const uint8_t *left_dc = ctx->left_dc[plane];
+   const uint32_t cols = ctx->cols[plane];
+   const uint32_t rows = ctx->rows[plane];
+   if (!above_dc && !left_dc) {
       return 0u;
    }
 
    int32_t dcSign = 0;
    for (uint32_t k = 0u; k < w4; k++) {
       const uint32_t x = x4 + k;
-      if (ctx->above_dc && x < ctx->cols) {
-         const uint8_t sign = ctx->above_dc[x];
+      if (above_dc && x < cols) {
+         const uint8_t sign = above_dc[x];
          if (sign == 1u) {
             dcSign--;
          } else if (sign == 2u) {
@@ -429,8 +471,8 @@ static uint32_t dc_sign_ctx_luma(const Av1TileCoeffCtx *ctx, uint32_t x4, uint32
    }
    for (uint32_t k = 0u; k < h4; k++) {
       const uint32_t y = y4 + k;
-      if (ctx->left_dc && y < ctx->rows) {
-         const uint8_t sign = ctx->left_dc[y];
+      if (left_dc && y < rows) {
+         const uint8_t sign = left_dc[y];
          if (sign == 1u) {
             dcSign--;
          } else if (sign == 2u) {
@@ -444,57 +486,91 @@ static uint32_t dc_sign_ctx_luma(const Av1TileCoeffCtx *ctx, uint32_t x4, uint32
    return 0u;
 }
 
-static uint32_t txb_skip_ctx_luma(const Av1TileCoeffCtx *ctx,
-                                 uint32_t x4,
-                                 uint32_t y4,
-                                 uint32_t w4,
-                                 uint32_t h4,
-                                 uint32_t bw_px,
-                                 uint32_t bh_px,
-                                 uint32_t tx_w_px,
-                                 uint32_t tx_h_px) {
+static uint32_t txb_skip_ctx(const Av1TileCoeffCtx *ctx,
+                             uint32_t plane,
+                             uint32_t x4,
+                             uint32_t y4,
+                             uint32_t w4,
+                             uint32_t h4,
+                             uint32_t bw_px,
+                             uint32_t bh_px,
+                             uint32_t tx_size) {
    // Spec ctx computation for all_zero / txb_skip (see local av1bitstream.html).
-   // This implements the plane==0 branch only.
-   if (!ctx) return 0u;
+   if (!ctx || plane >= AV1_MAX_PLANES || tx_size >= AV1_TX_SIZES_ALL) return 0u;
 
-   // If transform covers the whole residual plane block, ctx is forced to 0.
-   if (bw_px == tx_w_px && bh_px == tx_h_px) {
-      return 0u;
+   const uint32_t tx_w_px = 1u << kTxWidthLog2[tx_size];
+   const uint32_t tx_h_px = 1u << kTxHeightLog2[tx_size];
+
+   const uint8_t *above_level = ctx->above_level[plane];
+   const uint8_t *left_level = ctx->left_level[plane];
+   const uint8_t *above_dc = ctx->above_dc[plane];
+   const uint8_t *left_dc = ctx->left_dc[plane];
+   const uint32_t cols = ctx->cols[plane];
+   const uint32_t rows = ctx->rows[plane];
+
+   if (plane == 0u) {
+      uint32_t top = 0u;
+      uint32_t left = 0u;
+      for (uint32_t k = 0u; k < w4; k++) {
+         const uint32_t x = x4 + k;
+         if (above_level && x < cols) {
+            if (above_level[x] > top) top = above_level[x];
+         }
+      }
+      for (uint32_t k = 0u; k < h4; k++) {
+         const uint32_t y = y4 + k;
+         if (left_level && y < rows) {
+            if (left_level[y] > left) left = left_level[y];
+         }
+      }
+
+      if (top > 255u) top = 255u;
+      if (left > 255u) left = 255u;
+
+      // If transform covers the whole residual plane block, ctx is forced to 0.
+      if (bw_px == tx_w_px && bh_px == tx_h_px) {
+         return 0u;
+      }
+
+      if (top == 0u && left == 0u) {
+         return 1u;
+      }
+      if (top == 0u || left == 0u) {
+         return 2u + ((top > 3u || left > 3u) ? 1u : 0u);
+      }
+      if ((top <= 3u) && (left <= 3u)) {
+         return 4u;
+      }
+      if ((top <= 3u) || (left <= 3u)) {
+         return 5u;
+      }
+      return 6u;
    }
 
-   uint32_t top = 0u;
+   // plane > 0
+   uint32_t above = 0u;
    uint32_t left = 0u;
-   for (uint32_t k = 0u; k < w4; k++) {
-      const uint32_t x = x4 + k;
-      if (ctx->above_level && x < ctx->cols) {
-         if (ctx->above_level[x] > top) top = ctx->above_level[x];
+   for (uint32_t i = 0u; i < w4; i++) {
+      const uint32_t x = x4 + i;
+      if (x < cols) {
+         if (above_level) above |= above_level[x];
+         if (above_dc) above |= above_dc[x];
       }
    }
-   for (uint32_t k = 0u; k < h4; k++) {
-      const uint32_t y = y4 + k;
-      if (ctx->left_level && y < ctx->rows) {
-         if (ctx->left_level[y] > left) left = ctx->left_level[y];
+   for (uint32_t i = 0u; i < h4; i++) {
+      const uint32_t y = y4 + i;
+      if (y < rows) {
+         if (left_level) left |= left_level[y];
+         if (left_dc) left |= left_dc[y];
       }
    }
 
-   if (top > 255u) top = 255u;
-   if (left > 255u) left = 255u;
-
-   const uint32_t maxv = (top > left) ? top : left;
-   const uint32_t minv = (top < left) ? top : left;
-   if (top == 0u && left == 0u) {
-      return 1u;
+   uint32_t ctxv = ((above != 0u) ? 1u : 0u) + ((left != 0u) ? 1u : 0u);
+   ctxv += 7u;
+   if (bw_px * bh_px > tx_w_px * tx_h_px) {
+      ctxv += 3u;
    }
-   if (top == 0u || left == 0u) {
-      return 2u + (maxv > 3u);
-   }
-   if (maxv <= 3u) {
-      return 4u;
-   }
-   if (minv <= 3u) {
-      return 5u;
-   }
-   return 6u;
+   return ctxv;
 }
 
 static void cdf_copy_u16(uint16_t *dst, const uint16_t *src, size_t n) {
@@ -1480,6 +1556,84 @@ static bool max_tx_size_rect_from_mi_size(uint32_t mi_size, uint32_t *out_tx_siz
    return true;
 }
 
+static bool get_plane_residual_mi_size(uint32_t luma_wlog2,
+                                      uint32_t luma_hlog2,
+                                      uint32_t plane,
+                                      uint32_t subsampling_x,
+                                      uint32_t subsampling_y,
+                                      uint32_t *out_mi_size) {
+   if (!out_mi_size) {
+      return false;
+   }
+   if (plane == 0u) {
+      return mi_size_index_from_wlog2_hlog2(luma_wlog2, luma_hlog2, out_mi_size);
+   }
+   const uint32_t wlog2 = (luma_wlog2 > subsampling_x) ? (luma_wlog2 - subsampling_x) : 0u;
+   const uint32_t hlog2 = (luma_hlog2 > subsampling_y) ? (luma_hlog2 - subsampling_y) : 0u;
+   return mi_size_index_from_wlog2_hlog2(wlog2, hlog2, out_mi_size);
+}
+
+static bool get_tx_size_for_plane(uint32_t plane,
+                                 uint32_t tx_size,
+                                 uint32_t luma_wlog2,
+                                 uint32_t luma_hlog2,
+                                 uint32_t subsampling_x,
+                                 uint32_t subsampling_y,
+                                 uint32_t *out_tx_size) {
+   // Spec get_tx_size(plane, txSz):
+   // - plane==0 => txSz
+   // - plane>0  => uvTx = Max_Tx_Size_Rect[get_plane_residual_size(MiSize,plane)] with 64x* capped.
+   if (!out_tx_size || tx_size >= AV1_TX_SIZES_ALL) {
+      return false;
+   }
+   if (plane == 0u) {
+      *out_tx_size = tx_size;
+      return true;
+   }
+
+   uint32_t residual_mi_size = 0u;
+   if (!get_plane_residual_mi_size(luma_wlog2, luma_hlog2, plane, subsampling_x, subsampling_y, &residual_mi_size)) {
+      return false;
+   }
+
+   uint32_t uvTx = AV1_TX_4X4;
+   if (!max_tx_size_rect_from_mi_size(residual_mi_size, &uvTx) || uvTx >= AV1_TX_SIZES_ALL) {
+      return false;
+   }
+
+   const uint32_t w_px = 1u << kTxWidthLog2[uvTx];
+   const uint32_t h_px = 1u << kTxHeightLog2[uvTx];
+   if (w_px == 64u || h_px == 64u) {
+      if (w_px == 16u) {
+         *out_tx_size = AV1_TX_16X32;
+         return true;
+      }
+      if (h_px == 16u) {
+         *out_tx_size = AV1_TX_32X16;
+         return true;
+      }
+      *out_tx_size = AV1_TX_32X32;
+      return true;
+   }
+
+   *out_tx_size = uvTx;
+   return true;
+}
+
+static bool is_tx_type_in_set_intra(uint32_t tx_set, uint32_t tx_type) {
+   // Minimal spec behavior for intra transform-set membership.
+   // - DCTONLY: only DCT_DCT
+   // - INTRA_1: all of our supported intra tx types
+   // - INTRA_2: does not include V_DCT / H_DCT
+   if (tx_set == AV1_TX_SET_DCTONLY) {
+      return tx_type == AV1_TX_TYPE_DCT_DCT;
+   }
+   if (tx_set == AV1_TX_SET_INTRA_2) {
+      return (tx_type != AV1_TX_TYPE_V_DCT) && (tx_type != AV1_TX_TYPE_H_DCT);
+   }
+   return true;
+}
+
 static void tile_coeff_cdfs_init(Av1TileCoeffCdfs *out, uint32_t base_q_idx) {
    if (!out) return;
    const uint32_t qctx = coeff_cdf_q_ctx_from_base_q_idx(base_q_idx);
@@ -1489,42 +1643,59 @@ static void tile_coeff_cdfs_init(Av1TileCoeffCdfs *out, uint32_t base_q_idx) {
       }
    }
 
-   for (uint32_t ctx = 0; ctx < 2u; ctx++) {
-      cdf_copy_u16(out->eob_pt_16[ctx], kDefaultEobPt16CdfLuma[qctx][ctx], 6u);
-      cdf_copy_u16(out->eob_pt_32[ctx], kDefaultEobPt32CdfLuma[qctx][ctx], 7u);
-      cdf_copy_u16(out->eob_pt_64[ctx], kDefaultEobPt64CdfLuma[qctx][ctx], 8u);
-      cdf_copy_u16(out->eob_pt_128[ctx], kDefaultEobPt128CdfLuma[qctx][ctx], 9u);
-      cdf_copy_u16(out->eob_pt_256[ctx], kDefaultEobPt256CdfLuma[qctx][ctx], 10u);
-   }
-   cdf_copy_u16(out->eob_pt_512, kDefaultEobPt512CdfLuma[qctx], 11u);
-   cdf_copy_u16(out->eob_pt_1024, kDefaultEobPt1024CdfLuma[qctx], 12u);
+   for (uint32_t ptype = 0; ptype < AV1_PLANE_TYPES; ptype++) {
+      const uint16_t (*eob16)[2][6] = (ptype == 0u) ? kDefaultEobPt16CdfLuma : kDefaultEobPt16CdfChroma;
+      const uint16_t (*eob32)[2][7] = (ptype == 0u) ? kDefaultEobPt32CdfLuma : kDefaultEobPt32CdfChroma;
+      const uint16_t (*eob64)[2][8] = (ptype == 0u) ? kDefaultEobPt64CdfLuma : kDefaultEobPt64CdfChroma;
+      const uint16_t (*eob128)[2][9] = (ptype == 0u) ? kDefaultEobPt128CdfLuma : kDefaultEobPt128CdfChroma;
+      const uint16_t (*eob256)[2][10] = (ptype == 0u) ? kDefaultEobPt256CdfLuma : kDefaultEobPt256CdfChroma;
+      const uint16_t (*eob512)[11] = (ptype == 0u) ? kDefaultEobPt512CdfLuma : kDefaultEobPt512CdfChroma;
+      const uint16_t (*eob1024)[12] = (ptype == 0u) ? kDefaultEobPt1024CdfLuma : kDefaultEobPt1024CdfChroma;
 
-   for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
-      for (uint32_t ctx = 0; ctx < AV1_EOB_COEF_CONTEXTS; ctx++) {
-         cdf_copy_u16(out->eob_extra[tx][ctx], kDefaultEobExtraCdfLuma[qctx][tx][ctx], 3u);
+      const uint16_t (*eob_extra)[5][9][3] = (ptype == 0u) ? kDefaultEobExtraCdfLuma : kDefaultEobExtraCdfChroma;
+      const uint16_t (*coeff_base_eob)[5][4][4] = (ptype == 0u) ? kDefaultCoeffBaseEobCdfLuma : kDefaultCoeffBaseEobCdfChroma;
+
+      const uint16_t (*coeff_base)[5][42][5] = (ptype == 0u) ? kDefaultCoeffBaseCdfLuma : kDefaultCoeffBaseCdfChroma;
+      const uint16_t (*coeff_br)[5][21][5] = (ptype == 0u) ? kDefaultCoeffBrCdfLuma : kDefaultCoeffBrCdfChroma;
+      const uint16_t (*dc_sign)[3][3] = (ptype == 0u) ? kDefaultDcSignCdfLuma : kDefaultDcSignCdfChroma;
+
+      for (uint32_t ctx = 0; ctx < 2u; ctx++) {
+         cdf_copy_u16(out->eob_pt_16[ptype][ctx], eob16[qctx][ctx], 6u);
+         cdf_copy_u16(out->eob_pt_32[ptype][ctx], eob32[qctx][ctx], 7u);
+         cdf_copy_u16(out->eob_pt_64[ptype][ctx], eob64[qctx][ctx], 8u);
+         cdf_copy_u16(out->eob_pt_128[ptype][ctx], eob128[qctx][ctx], 9u);
+         cdf_copy_u16(out->eob_pt_256[ptype][ctx], eob256[qctx][ctx], 10u);
       }
-   }
+      cdf_copy_u16(out->eob_pt_512[ptype], eob512[qctx], 11u);
+      cdf_copy_u16(out->eob_pt_1024[ptype], eob1024[qctx], 12u);
 
-   for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
-      for (uint32_t ctx = 0; ctx < AV1_SIG_COEF_CONTEXTS_EOB; ctx++) {
-         cdf_copy_u16(out->coeff_base_eob[tx][ctx], kDefaultCoeffBaseEobCdfLuma[qctx][tx][ctx], 4u);
+      for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
+         for (uint32_t ctx = 0; ctx < AV1_EOB_COEF_CONTEXTS; ctx++) {
+            cdf_copy_u16(out->eob_extra[tx][ptype][ctx], eob_extra[qctx][tx][ctx], 3u);
+         }
       }
-   }
 
-   for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
-      for (uint32_t ctx = 0; ctx < AV1_SIG_COEF_CONTEXTS; ctx++) {
-         cdf_copy_u16(out->coeff_base[tx][ctx], kDefaultCoeffBaseCdfLuma[qctx][tx][ctx], 5u);
+      for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
+         for (uint32_t ctx = 0; ctx < AV1_SIG_COEF_CONTEXTS_EOB; ctx++) {
+            cdf_copy_u16(out->coeff_base_eob[tx][ptype][ctx], coeff_base_eob[qctx][tx][ctx], 4u);
+         }
       }
-   }
 
-   for (uint32_t tx = 0; tx < AV1_COEFF_BR_TX_SIZES; tx++) {
-      for (uint32_t ctx = 0; ctx < AV1_LEVEL_CONTEXTS; ctx++) {
-         cdf_copy_u16(out->coeff_br[tx][ctx], kDefaultCoeffBrCdfLuma[qctx][tx][ctx], AV1_BR_CDF_SIZE + 1u);
+      for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
+         for (uint32_t ctx = 0; ctx < AV1_SIG_COEF_CONTEXTS; ctx++) {
+            cdf_copy_u16(out->coeff_base[tx][ptype][ctx], coeff_base[qctx][tx][ctx], 5u);
+         }
       }
-   }
 
-   for (uint32_t ctx = 0; ctx < AV1_DC_SIGN_CONTEXTS; ctx++) {
-      cdf_copy_u16(out->dc_sign[ctx], kDefaultDcSignCdfLuma[qctx][ctx], 3u);
+      for (uint32_t tx = 0; tx < AV1_COEFF_BR_TX_SIZES; tx++) {
+         for (uint32_t ctx = 0; ctx < AV1_LEVEL_CONTEXTS; ctx++) {
+            cdf_copy_u16(out->coeff_br[tx][ptype][ctx], coeff_br[qctx][tx][ctx], AV1_BR_CDF_SIZE + 1u);
+         }
+      }
+
+      for (uint32_t ctx = 0; ctx < AV1_DC_SIGN_CONTEXTS; ctx++) {
+         cdf_copy_u16(out->dc_sign[ptype][ctx], dc_sign[qctx][ctx], 3u);
+      }
    }
 }
 
@@ -2129,6 +2300,7 @@ static uint32_t skip_ctx_from_mi_grid(const Av1MiSize *mi_grid,
 static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                                            Av1TileCoeffCdfs *coeff_cdfs,
                                            Av1TileCoeffCtx *coeff_ctx,
+                                           uint32_t plane,
                                            uint32_t block_index,
                                            uint32_t block_r,
                                            uint32_t block_c,
@@ -2139,6 +2311,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                                            uint32_t bh_px,
                                            uint32_t tx_size,
                                            uint32_t tx_type,
+                                           bool probe_try_exit_symbol,
                                            Av1TileSyntaxProbeStats *st,
                                            bool *out_stop_now,
                                            char *err,
@@ -2147,31 +2320,31 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
       *out_stop_now = false;
    }
 
+   const uint32_t ptype = (plane == 0u) ? 0u : 1u;
+
    // coeffs() (spec): first symbol is all_zero (aka txb_skip).
    const uint32_t txSzCtx = tx_sz_ctx_from_tx_size(tx_size);
-   const uint32_t tx_w_px = 1u << kTxWidthLog2[tx_size];
-   const uint32_t tx_h_px = 1u << kTxHeightLog2[tx_size];
    const uint32_t w4 = 1u << (kTxWidthLog2[tx_size] - 2u);
    const uint32_t h4 = 1u << (kTxHeightLog2[tx_size] - 2u);
-   const uint32_t ctx = txb_skip_ctx_luma(coeff_ctx, x4, y4, w4, h4, bw_px, bh_px, tx_w_px, tx_h_px);
+   const uint32_t ctx = txb_skip_ctx(coeff_ctx, plane, x4, y4, w4, h4, bw_px, bh_px, tx_size);
    uint32_t all_zero = 0u;
    uint16_t *cdf = coeff_cdfs->txb_skip[txSzCtx][ctx];
    if (!av1_symbol_read_symbol(sd, cdf, 2u, &all_zero, err, err_cap)) {
       return false;
    }
-   if (st && block_index == 0u && tx_index == 0u && !st->block0_txb_skip_decoded) {
+   if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_txb_skip_decoded) {
       st->block0_txb_skip_decoded = true;
       st->block0_txb_skip_ctx = ctx;
       st->block0_txb_skip = all_zero;
    }
-   if (st && block_index == 0u && tx_index == 1u && !st->block0_tx1_txb_skip_decoded) {
+   if (st && plane == 0u && block_index == 0u && tx_index == 1u && !st->block0_tx1_txb_skip_decoded) {
       st->block0_tx1_txb_skip_decoded = true;
       st->block0_tx1_x4 = x4;
       st->block0_tx1_y4 = y4;
       st->block0_tx1_txb_skip_ctx = ctx;
       st->block0_tx1_txb_skip = all_zero;
    }
-   if (st && block_index == 1u && tx_index == 0u && !st->block1_txb_skip_decoded) {
+   if (st && plane == 0u && block_index == 1u && tx_index == 0u && !st->block1_txb_skip_decoded) {
       st->block1_txb_skip_decoded = true;
       st->block1_r_mi = block_r;
       st->block1_c_mi = block_c;
@@ -2196,25 +2369,25 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
       uint32_t eob_nsyms = 0u;
 
       if (eobMultisize == 0u) {
-         eob_cdf = coeff_cdfs->eob_pt_16[eob_ctx];
+         eob_cdf = coeff_cdfs->eob_pt_16[ptype][eob_ctx];
          eob_nsyms = 5u;
       } else if (eobMultisize == 1u) {
-         eob_cdf = coeff_cdfs->eob_pt_32[eob_ctx];
+         eob_cdf = coeff_cdfs->eob_pt_32[ptype][eob_ctx];
          eob_nsyms = 6u;
       } else if (eobMultisize == 2u) {
-         eob_cdf = coeff_cdfs->eob_pt_64[eob_ctx];
+         eob_cdf = coeff_cdfs->eob_pt_64[ptype][eob_ctx];
          eob_nsyms = 7u;
       } else if (eobMultisize == 3u) {
-         eob_cdf = coeff_cdfs->eob_pt_128[eob_ctx];
+         eob_cdf = coeff_cdfs->eob_pt_128[ptype][eob_ctx];
          eob_nsyms = 8u;
       } else if (eobMultisize == 4u) {
-         eob_cdf = coeff_cdfs->eob_pt_256[eob_ctx];
+         eob_cdf = coeff_cdfs->eob_pt_256[ptype][eob_ctx];
          eob_nsyms = 9u;
       } else if (eobMultisize == 5u) {
-         eob_cdf = coeff_cdfs->eob_pt_512;
+         eob_cdf = coeff_cdfs->eob_pt_512[ptype];
          eob_nsyms = 10u;
       } else {
-         eob_cdf = (eobMultisize == 6u) ? coeff_cdfs->eob_pt_1024 : coeff_cdfs->eob_pt_1024;
+         eob_cdf = coeff_cdfs->eob_pt_1024[ptype];
          eob_nsyms = 11u;
       }
 
@@ -2225,11 +2398,11 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
 
       const uint32_t eobPt = eob_pt_sym + 1u;
 
-      if (st && block_index == 0u && tx_index == 0u && !st->block0_eob_pt_decoded) {
+      if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_eob_pt_decoded) {
          st->block0_eob_pt_decoded = true;
          st->block0_eob_pt = eobPt;
       }
-      if (st && block_index == 1u && tx_index == 0u && !st->block1_eob_pt_decoded) {
+      if (st && plane == 0u && block_index == 1u && tx_index == 0u && !st->block1_eob_pt_decoded) {
          st->block1_eob_pt_decoded = true;
          st->block1_eob_pt_ctx = eob_ctx;
          st->block1_eob_pt = eobPt;
@@ -2246,7 +2419,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
          }
 
          uint32_t eob_extra = 0u;
-         uint16_t *eob_extra_cdf = coeff_cdfs->eob_extra[txSzCtx][ctxIdx];
+         uint16_t *eob_extra_cdf = coeff_cdfs->eob_extra[txSzCtx][ptype][ctxIdx];
          if (!av1_symbol_read_symbol(sd, eob_extra_cdf, 2u, &eob_extra, err, err_cap)) {
             return false;
          }
@@ -2282,11 +2455,11 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
          return false;
       }
 
-      if (st && block_index == 0u && tx_index == 0u && !st->block0_eob_decoded) {
+      if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_eob_decoded) {
          st->block0_eob_decoded = true;
          st->block0_eob = eob;
       }
-      if (st && block_index == 1u && tx_index == 0u && !st->block1_eob_decoded) {
+      if (st && plane == 0u && block_index == 1u && tx_index == 0u && !st->block1_eob_decoded) {
          st->block1_eob_decoded = true;
          st->block1_eob = eob;
       }
@@ -2301,7 +2474,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
             return false;
          }
          uint32_t cb_sym = 0u;
-         uint16_t *cb_cdf = coeff_cdfs->coeff_base_eob[txSzCtx][cb_ctx];
+         uint16_t *cb_cdf = coeff_cdfs->coeff_base_eob[txSzCtx][ptype][cb_ctx];
          if (!av1_symbol_read_symbol(sd, cb_cdf, 3u, &cb_sym, err, err_cap)) {
             return false;
          }
@@ -2311,22 +2484,32 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
             return false;
          }
          coeff_base_eob_level = level;
-         if (st && block_index == 0u && tx_index == 0u && !st->block0_coeff_base_eob_decoded) {
+         if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_coeff_base_eob_decoded) {
             st->block0_coeff_base_eob_decoded = true;
             st->block0_coeff_base_eob_ctx = cb_ctx;
             st->block0_coeff_base_eob_level = level;
          }
-         if (st && block_index == 1u && tx_index == 0u && !st->block1_coeff_base_eob_decoded) {
+         if (st && plane == 0u && block_index == 1u && tx_index == 0u && !st->block1_coeff_base_eob_decoded) {
             st->block1_coeff_base_eob_decoded = true;
             st->block1_coeff_base_eob_ctx = cb_ctx;
             st->block1_coeff_base_eob_level = level;
          }
+
+      }
+
+      // For chroma planes, stop after the same stable prefix (txb_skip,eob_pt,eob,coeff_base_eob)
+      // to keep the probe lightweight. The caller may still invoke coeffs() for both U and V.
+      if (plane != 0u && !probe_try_exit_symbol) {
+         if (out_stop_now) {
+            *out_stop_now = true;
+         }
+         return true;
       }
 
       // For block1, try to reach the next milestone (coeff_base for c==0) when possible.
       // If eob==1, there are no coeff_base symbols (only the eob coefficient exists), so
       // stop after coeff_base_eob.
-      if (st && block_index == 1u && tx_index == 0u && eob <= 1u) {
+      if (!probe_try_exit_symbol && st && plane == 0u && block_index == 1u && tx_index == 0u && eob <= 1u) {
          if (out_stop_now) {
             *out_stop_now = true;
          }
@@ -2369,7 +2552,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                   uint32_t br_sym = 0u;
                   uint32_t br_tx = txSzCtx;
                   if (br_tx >= AV1_COEFF_BR_TX_SIZES) br_tx = AV1_COEFF_BR_TX_SIZES - 1u;
-                  uint16_t *br_cdf = coeff_cdfs->coeff_br[br_tx][br_ctx];
+                  uint16_t *br_cdf = coeff_cdfs->coeff_br[br_tx][ptype][br_ctx];
                   if (!av1_symbol_read_symbol(sd, br_cdf, AV1_BR_CDF_SIZE, &br_sym, err, err_cap)) {
                      return false;
                   }
@@ -2378,7 +2561,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                      return false;
                   }
                   level += br_sym;
-                  if (st && block_index == 0u && tx_index == 0u && !st->block0_coeff_br_decoded) {
+                  if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_coeff_br_decoded) {
                      st->block0_coeff_br_decoded = true;
                      st->block0_coeff_br_ctx = br_ctx;
                      st->block0_coeff_br_sym = br_sym;
@@ -2405,7 +2588,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                return false;
             }
             uint32_t cb_sym = 0u;
-            uint16_t *cb_cdf = coeff_cdfs->coeff_base[txSzCtx][cb_ctx];
+            uint16_t *cb_cdf = coeff_cdfs->coeff_base[txSzCtx][ptype][cb_ctx];
             if (!av1_symbol_read_symbol(sd, cb_cdf, 4u, &cb_sym, err, err_cap)) {
                return false;
             }
@@ -2421,7 +2604,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                   uint32_t br_sym = 0u;
                   uint32_t br_tx = txSzCtx;
                   if (br_tx >= AV1_COEFF_BR_TX_SIZES) br_tx = AV1_COEFF_BR_TX_SIZES - 1u;
-                  uint16_t *br_cdf = coeff_cdfs->coeff_br[br_tx][br_ctx];
+                  uint16_t *br_cdf = coeff_cdfs->coeff_br[br_tx][ptype][br_ctx];
                   if (!av1_symbol_read_symbol(sd, br_cdf, AV1_BR_CDF_SIZE, &br_sym, err, err_cap)) {
                      return false;
                   }
@@ -2430,7 +2613,7 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
                      return false;
                   }
                   level += br_sym;
-                  if (st && block_index == 0u && tx_index == 0u && !st->block0_coeff_br_decoded) {
+                  if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_coeff_br_decoded) {
                      st->block0_coeff_br_decoded = true;
                      st->block0_coeff_br_ctx = br_ctx;
                      st->block0_coeff_br_sym = br_sym;
@@ -2443,14 +2626,14 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
             quant[pos] = (int32_t)level;
 
             // Keep reporting the c==0 coeff_base symbol as the stable milestone.
-            if (coef_c == 0u && st && block_index == 0u && tx_index == 0u && !st->block0_coeff_base_decoded) {
+            if (plane == 0u && coef_c == 0u && st && block_index == 0u && tx_index == 0u && !st->block0_coeff_base_decoded) {
                st->block0_coeff_base_decoded = true;
                st->block0_coeff_base_ctx = cb_ctx;
                st->block0_coeff_base_level = cb_sym;
             }
 
             // For block1, stop once we've reached the c==0 coeff_base milestone.
-            if (coef_c == 0u && st && block_index == 1u && tx_index == 0u && !st->block1_coeff_base_decoded) {
+            if (!probe_try_exit_symbol && plane == 0u && coef_c == 0u && st && block_index == 1u && tx_index == 0u && !st->block1_coeff_base_decoded) {
                st->block1_coeff_base_decoded = true;
                st->block1_coeff_base_ctx = cb_ctx;
                st->block1_coeff_base_level = cb_sym;
@@ -2470,14 +2653,14 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
             uint32_t sign = 0u;
             if (quant[pos] != 0) {
                if (coef_idx == 0u) {
-                  const uint32_t dc_ctx = dc_sign_ctx_luma(coeff_ctx, x4, y4, w4, h4);
+                  const uint32_t dc_ctx = dc_sign_ctx(coeff_ctx, plane, x4, y4, w4, h4);
                   uint32_t dc_sym = 0u;
-                  uint16_t *dc_cdf = coeff_cdfs->dc_sign[dc_ctx];
+                  uint16_t *dc_cdf = coeff_cdfs->dc_sign[ptype][dc_ctx];
                   if (!av1_symbol_read_symbol(sd, dc_cdf, 2u, &dc_sym, err, err_cap)) {
                      return false;
                   }
                   sign = dc_sym;
-                  if (st && block_index == 0u && tx_index == 0u && !st->block0_dc_sign_decoded) {
+                  if (st && plane == 0u && block_index == 0u && tx_index == 0u && !st->block0_dc_sign_decoded) {
                      st->block0_dc_sign_decoded = true;
                      st->block0_dc_sign_ctx = dc_ctx;
                      st->block0_dc_sign = dc_sym;
@@ -2534,16 +2717,16 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
          if (coeff_ctx) {
             for (uint32_t i = 0u; i < w4; i++) {
                const uint32_t x = x4 + i;
-               if (x < coeff_ctx->cols) {
-                  if (coeff_ctx->above_level) coeff_ctx->above_level[x] = (uint8_t)culLevel;
-                  if (coeff_ctx->above_dc) coeff_ctx->above_dc[x] = (uint8_t)dcCategory;
+               if (x < coeff_ctx->cols[plane]) {
+                  if (coeff_ctx->above_level[plane]) coeff_ctx->above_level[plane][x] = (uint8_t)culLevel;
+                  if (coeff_ctx->above_dc[plane]) coeff_ctx->above_dc[plane][x] = (uint8_t)dcCategory;
                }
             }
             for (uint32_t i = 0u; i < h4; i++) {
                const uint32_t y = y4 + i;
-               if (y < coeff_ctx->rows) {
-                  if (coeff_ctx->left_level) coeff_ctx->left_level[y] = (uint8_t)culLevel;
-                  if (coeff_ctx->left_dc) coeff_ctx->left_dc[y] = (uint8_t)dcCategory;
+               if (y < coeff_ctx->rows[plane]) {
+                  if (coeff_ctx->left_level[plane]) coeff_ctx->left_level[plane][y] = (uint8_t)culLevel;
+                  if (coeff_ctx->left_dc[plane]) coeff_ctx->left_dc[plane][y] = (uint8_t)dcCategory;
                }
             }
          }
@@ -2609,6 +2792,12 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
       st->block0_y_mode_decoded = true;
       st->block0_y_mode_ctx = y_mode_ctx;
       st->block0_y_mode = y_mode;
+   }
+
+   // Spec: when skip==1, there are no residual coefficients for the block.
+   // Our probe still decodes mode info for milestones, but must not consume coeffs().
+   if (skip) {
+      goto block_done;
    }
 
    // Optional intra angle deltas for luma (only for directional intra modes).
@@ -2995,6 +3184,9 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
       if (st && block_index == 0u) {
          max_tx = (total_tx >= 2u) ? 2u : total_tx;
       }
+      if (params->probe_try_exit_symbol) {
+         max_tx = total_tx;
+      }
 
       for (uint32_t tx_index = 0u; tx_index < max_tx; tx_index++) {
          const uint32_t tx = (tx_cols == 0u) ? 0u : (tx_index % tx_cols);
@@ -3006,6 +3198,7 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
          if (!decode_coeffs_luma_one_tx_block(sd,
                                               coeff_cdfs,
                                               coeff_ctx,
+                                              0u,
                                               block_index,
                                               r,
                                               c,
@@ -3016,6 +3209,7 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
                                               bh_px,
                                               tx_size,
                                               tx_type,
+                                              params->probe_try_exit_symbol,
                                               st,
                                               &stop_now,
                                               err,
@@ -3033,18 +3227,146 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
       }
    }
 
+   // coeffs() (spec): for chroma planes, use get_tx_size(plane,txSz) and compute_tx_type().
+   // We only decode a lightweight, stable prefix for one tx block per chroma plane.
+   if (!params->mono_chrome) {
+      static const uint8_t kModeToTxfmUv[AV1_UV_INTRA_MODES_CFL_ALLOWED] = {
+          AV1_TX_TYPE_DCT_DCT,   // DC_PRED
+          AV1_TX_TYPE_ADST_DCT,  // V_PRED
+          AV1_TX_TYPE_DCT_ADST,  // H_PRED
+          AV1_TX_TYPE_DCT_DCT,   // D45_PRED
+          AV1_TX_TYPE_ADST_ADST, // D135_PRED
+          AV1_TX_TYPE_ADST_DCT,  // D113_PRED
+          AV1_TX_TYPE_DCT_ADST,  // D157_PRED
+          AV1_TX_TYPE_DCT_ADST,  // D203_PRED
+          AV1_TX_TYPE_ADST_DCT,  // D67_PRED
+          AV1_TX_TYPE_ADST_ADST, // SMOOTH_PRED
+          AV1_TX_TYPE_ADST_DCT,  // SMOOTH_V_PRED
+          AV1_TX_TYPE_DCT_ADST,  // SMOOTH_H_PRED
+          AV1_TX_TYPE_ADST_ADST, // PAETH_PRED
+          AV1_TX_TYPE_DCT_DCT,   // UV_CFL_PRED
+      };
+
+      for (uint32_t plane = 1u; plane <= 2u; plane++) {
+         const uint32_t subx = params->subsampling_x;
+         const uint32_t suby = params->subsampling_y;
+         const uint32_t pwlog2 = (wlog2 > subx) ? (wlog2 - subx) : 0u;
+         const uint32_t phlog2 = (hlog2 > suby) ? (hlog2 - suby) : 0u;
+         const uint32_t bw_px = (1u << pwlog2) * 4u;
+         const uint32_t bh_px = (1u << phlog2) * 4u;
+         const uint32_t bw4 = 1u << pwlog2;
+         const uint32_t bh4 = 1u << phlog2;
+
+         uint32_t plane_tx_size = AV1_TX_4X4;
+         if (!get_tx_size_for_plane(plane, tx_size, wlog2, hlog2, subx, suby, &plane_tx_size)) {
+            snprintf(err, err_cap, "failed get_tx_size_for_plane(plane=%u,tx_size=%u)", plane, tx_size);
+            return false;
+         }
+         if (plane_tx_size >= AV1_TX_SIZES_ALL) {
+            snprintf(err, err_cap, "invalid plane_tx_size=%u", plane_tx_size);
+            return false;
+         }
+
+         uint32_t plane_tx_type = AV1_TX_TYPE_DCT_DCT;
+         if (!params->coded_lossless) {
+            if (uv_mode < AV1_UV_INTRA_MODES_CFL_ALLOWED) {
+               plane_tx_type = (uint32_t)kModeToTxfmUv[uv_mode];
+            }
+            const uint32_t set = get_tx_set_intra(plane_tx_size, params->reduced_tx_set);
+            if (!is_tx_type_in_set_intra(set, plane_tx_type)) {
+               plane_tx_type = AV1_TX_TYPE_DCT_DCT;
+            }
+         }
+
+         const uint32_t tx_w4 = 1u << (kTxWidthLog2[plane_tx_size] - 2u);
+         const uint32_t tx_h4 = 1u << (kTxHeightLog2[plane_tx_size] - 2u);
+         if (tx_w4 == 0u || tx_h4 == 0u) {
+            snprintf(err, err_cap, "invalid chroma tx dims");
+            return false;
+         }
+         if ((bw4 % tx_w4) != 0u || (bh4 % tx_h4) != 0u) {
+            snprintf(err,
+                     err_cap,
+                     "unsupported chroma tx tiling (plane=%u block=%ux%u 4x4, tx=%ux%u 4x4)",
+                     plane,
+                     bw4,
+                     bh4,
+                     tx_w4,
+                     tx_h4);
+            return false;
+         }
+
+         const uint32_t tx_cols = bw4 / tx_w4;
+         const uint32_t tx_rows = bh4 / tx_h4;
+         if (tx_cols == 0u || tx_rows == 0u) {
+            continue;
+         }
+
+         const uint32_t base_x4 = c >> subx;
+         const uint32_t base_y4 = r >> suby;
+         uint32_t max_plane_tx = 1u;
+         if (params->probe_try_exit_symbol) {
+            max_plane_tx = tx_cols * tx_rows;
+         }
+
+         for (uint32_t tx_index = 0u; tx_index < max_plane_tx; tx_index++) {
+            const uint32_t tx = (tx_cols == 0u) ? 0u : (tx_index % tx_cols);
+            const uint32_t ty = (tx_cols == 0u) ? 0u : (tx_index / tx_cols);
+            const uint32_t x4 = base_x4 + tx * tx_w4;
+            const uint32_t y4 = base_y4 + ty * tx_h4;
+
+            bool stop_now = false;
+            if (!decode_coeffs_luma_one_tx_block(sd,
+                                                 coeff_cdfs,
+                                                 coeff_ctx,
+                                                 plane,
+                                                 block_index,
+                                                 r,
+                                                 c,
+                                                 tx_index,
+                                                 x4,
+                                                 y4,
+                                                 bw_px,
+                                                 bh_px,
+                                                 plane_tx_size,
+                                                 plane_tx_type,
+                                                 params->probe_try_exit_symbol,
+                                                 st,
+                                                 &stop_now,
+                                                 err,
+                                                 err_cap)) {
+               return false;
+            }
+
+            if (stop_now) {
+               break;
+            }
+
+            if (!params->probe_try_exit_symbol) {
+               // Default probe mode: only decode the first transform block per chroma plane.
+               break;
+            }
+         }
+      }
+   }
+
 block_done:
 
    if (st) {
       st->blocks_decoded++;
    }
    if (out_stop) {
-      // If caller isn't collecting stats, keep the legacy behavior: stop after one block.
-      // Otherwise stop after decoding two blocks.
-      if (!st) {
-         *out_stop = true;
+      if (params->probe_try_exit_symbol) {
+         // Experimental mode: keep traversing leaf blocks.
+         *out_stop = false;
       } else {
-         *out_stop = (st->blocks_decoded >= 2u);
+         // If caller isn't collecting stats, keep the legacy behavior: stop after one block.
+         // Otherwise stop after decoding two blocks.
+         if (!st) {
+            *out_stop = true;
+         } else {
+            *out_stop = (st->blocks_decoded >= 2u);
+         }
       }
    }
    return true;
@@ -3215,14 +3537,38 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_HORZ:
-         // First decode_block would be the top half.
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the top half.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
+            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+         }
+         // Two leaf blocks: top half then bottom half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st);
+         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_VERT:
-         // First decode_block would be the left half.
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the left half.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
+            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
+         }
+         // Two leaf blocks: left half then right half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st);
+         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_SPLIT:
          // Recurse into 4 sub-blocks.
@@ -3317,64 +3663,176 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
       // traversal progress without needing full decode_block() parsing.
       // This is sufficient for ctx derivation consistency in later traversal steps.
       case AV1_PARTITION_HORZ_A:
-         // First decode_block would be the top-left quarter.
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the top-left quarter.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
+            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+         }
+         // Leaf blocks: top-left quarter, top-right quarter, then bottom half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st);
+         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_HORZ_B:
-         // First decode_block would be the top half.
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the top half.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
+            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+         }
+         // Leaf blocks: top half, then bottom-left quarter, then bottom-right quarter.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st);
+         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_VERT_A:
-         // First decode_block would be the top-left quarter.
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the top-left quarter.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
+            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+         }
+         // Leaf blocks: top-left quarter, bottom-left quarter, then right half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st);
+         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_VERT_B:
-         // First decode_block would be the left half.
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the left half.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
+            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
+         }
+         // Leaf blocks: left half, then top-right quarter, then bottom-right quarter.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st);
+         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+            return false;
+         }
+         if (out_stop && *out_stop) {
+            return true;
+         }
+         mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st);
+         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_HORZ_4:
-         // First decode_block would be the first stripe.
-         mi_fill_block(mi_grid, mi_rows, mi_cols, r + 0u * quarter, c, bsl, bsl - 2u, st);
-         return decode_block_stub(sd,
-                                 params,
-                                 skip_cdfs,
-                                 coeff_cdfs,
-                                 coeff_ctx,
-                                  mi_grid,
-                                  mi_rows,
-                                  mi_cols,
-                                  r + 0u * quarter,
-                                  c,
-                                  bsl,
-                                  bsl - 2u,
-                                  st,
-                                  out_stop,
-                                  err,
-                                  err_cap);
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the first stripe.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r + 0u * quarter, c, bsl, bsl - 2u, st);
+            return decode_block_stub(sd,
+                                    params,
+                                    skip_cdfs,
+                                    coeff_cdfs,
+                                    coeff_ctx,
+                                     mi_grid,
+                                     mi_rows,
+                                     mi_cols,
+                                     r + 0u * quarter,
+                                     c,
+                                     bsl,
+                                     bsl - 2u,
+                                     st,
+                                     out_stop,
+                                     err,
+                                     err_cap);
+         }
+         if (bsl < 2u) {
+            snprintf(err, err_cap, "invalid HORZ_4 bsl=%u", bsl);
+            return false;
+         }
+         // Four leaf stripes in raster order.
+         for (uint32_t i = 0; i < 4u; i++) {
+            const uint32_t rr = r + i * quarter;
+            mi_fill_block(mi_grid, mi_rows, mi_cols, rr, c, bsl, bsl - 2u, st);
+            if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, rr, c, bsl, bsl - 2u, st, out_stop, err, err_cap)) {
+               return false;
+            }
+            if (out_stop && *out_stop) {
+               return true;
+            }
+         }
+         return true;
 
       case AV1_PARTITION_VERT_4:
-         // First decode_block would be the first stripe.
-         mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + 0u * quarter, bsl - 2u, bsl, st);
-         return decode_block_stub(sd,
-                                 params,
-                                 skip_cdfs,
-                                 coeff_cdfs,
-                                 coeff_ctx,
-                                  mi_grid,
-                                  mi_rows,
-                                  mi_cols,
-                                  r,
-                                  c + 0u * quarter,
-                                  bsl - 2u,
-                                  bsl,
-                                  st,
-                                  out_stop,
-                                  err,
-                                  err_cap);
+         if (!params->probe_try_exit_symbol) {
+            // First decode_block would be the first stripe.
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + 0u * quarter, bsl - 2u, bsl, st);
+            return decode_block_stub(sd,
+                                    params,
+                                    skip_cdfs,
+                                    coeff_cdfs,
+                                    coeff_ctx,
+                                     mi_grid,
+                                     mi_rows,
+                                     mi_cols,
+                                     r,
+                                     c + 0u * quarter,
+                                     bsl - 2u,
+                                     bsl,
+                                     st,
+                                     out_stop,
+                                     err,
+                                     err_cap);
+         }
+         if (bsl < 2u) {
+            snprintf(err, err_cap, "invalid VERT_4 bsl=%u", bsl);
+            return false;
+         }
+         // Four leaf stripes in raster order.
+         for (uint32_t i = 0; i < 4u; i++) {
+            const uint32_t cc = c + i * quarter;
+            mi_fill_block(mi_grid, mi_rows, mi_cols, r, cc, bsl - 2u, bsl, st);
+            if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, cc, bsl - 2u, bsl, st, out_stop, err, err_cap)) {
+               return false;
+            }
+            if (out_stop && *out_stop) {
+               return true;
+            }
+         }
+         return true;
 
       default:
          snprintf(err, err_cap, "unsupported partition=%u", (uint32_t)partition);
@@ -3471,38 +3929,122 @@ Av1TileSyntaxProbeStatus av1_tile_syntax_probe(const uint8_t *tile_data,
    tile_coeff_cdfs_init(&coeff_cdfs, params->base_q_idx);
 
    Av1TileCoeffCtx coeff_ctx;
-   if (!tile_coeff_ctx_init(&coeff_ctx, tile_mi_cols, tile_mi_rows, err, err_cap)) {
+   if (!tile_coeff_ctx_init(&coeff_ctx,
+                            tile_mi_cols,
+                            tile_mi_rows,
+                            params->mono_chrome,
+                            params->subsampling_x,
+                            params->subsampling_y,
+                            err,
+                            err_cap)) {
       free(mi_grid);
       return AV1_TILE_SYNTAX_PROBE_ERROR;
    }
 
    bool stop = false;
    if (mi_grid_count > 0) {
-      if (!decode_partition_rec(&sd,
-                                &cdfs,
-                                params,
-                                &skip_cdfs,
-                                &coeff_cdfs,
-                                &coeff_ctx,
-                                mi_grid,
-                                tile_mi_rows,
-                                tile_mi_cols,
-                                0,
-                                0,
-                                sb_bsl,
-                                sb_bsl,
-                                out_stats,
-                                &stop,
-                                err,
-                                err_cap)) {
-            tile_coeff_ctx_free(&coeff_ctx);
-            free(mi_grid);
-         return AV1_TILE_SYNTAX_PROBE_ERROR;
+      if (!params->probe_try_exit_symbol) {
+         // Default probe mode: only traverse starting at the first superblock.
+         if (!decode_partition_rec(&sd,
+                                   &cdfs,
+                                   params,
+                                   &skip_cdfs,
+                                   &coeff_cdfs,
+                                   &coeff_ctx,
+                                   mi_grid,
+                                   tile_mi_rows,
+                                   tile_mi_cols,
+                                   0,
+                                   0,
+                                   sb_bsl,
+                                   sb_bsl,
+                                   out_stats,
+                                   &stop,
+                                   err,
+                                   err_cap)) {
+               tile_coeff_ctx_free(&coeff_ctx);
+               free(mi_grid);
+            return AV1_TILE_SYNTAX_PROBE_ERROR;
+         }
+      } else {
+         // try-EOT mode: traverse all superblocks in raster order.
+         for (uint32_t sb_r = 0; sb_r < sb_rows; sb_r++) {
+            for (uint32_t sb_c = 0; sb_c < sb_cols; sb_c++) {
+               const uint32_t r0 = sb_r * sb_mi_size;
+               const uint32_t c0 = sb_c * sb_mi_size;
+               if (!decode_partition_rec(&sd,
+                                         &cdfs,
+                                         params,
+                                         &skip_cdfs,
+                                         &coeff_cdfs,
+                                         &coeff_ctx,
+                                         mi_grid,
+                                         tile_mi_rows,
+                                         tile_mi_cols,
+                                         r0,
+                                         c0,
+                                         sb_bsl,
+                                         sb_bsl,
+                                         out_stats,
+                                         &stop,
+                                         err,
+                                         err_cap)) {
+                  tile_coeff_ctx_free(&coeff_ctx);
+                  free(mi_grid);
+                  return AV1_TILE_SYNTAX_PROBE_ERROR;
+               }
+               if (stop) {
+                  break;
+               }
+            }
+            if (stop) {
+               break;
+            }
+         }
       }
    }
 
          tile_coeff_ctx_free(&coeff_ctx);
    free(mi_grid);
+
+   if (params->probe_try_exit_symbol) {
+      // In try-EOT mode, attempt to validate that we reached the end of the coded tile by
+      // running exit_symbol(). This will typically fail until full tile syntax decode exists,
+      // but is still useful as a correctness check.
+      if (stop) {
+         // stop==true is only used for early-exit cases like palette (unsupported) at the moment.
+         if (err && err_cap > 0 && err[0] == 0) {
+            snprintf(err, err_cap, "unsupported: probe stopped before end-of-tile");
+         }
+         return AV1_TILE_SYNTAX_PROBE_UNSUPPORTED;
+      }
+      const uint64_t pre_bitpos = sd.br.bitpos;
+      const int32_t pre_smb = sd.symbol_max_bits;
+      const uint64_t total_bits = (uint64_t)sd.br.size * 8u;
+
+      if (!av1_symbol_exit(&sd, err, err_cap)) {
+         if (err && err_cap > 0) {
+            char tmp[256];
+            tmp[0] = 0;
+            if (err[0]) {
+               // Preserve the original error message (best-effort).
+               snprintf(tmp, sizeof(tmp), "%s", err);
+            }
+            snprintf(err,
+                     err_cap,
+                     "exit_symbol failed: %s (bitpos=%llu/%llu smb=%d)",
+                     tmp[0] ? tmp : "(unknown)",
+                     (unsigned long long)pre_bitpos,
+                     (unsigned long long)total_bits,
+                     (int)pre_smb);
+         }
+         return AV1_TILE_SYNTAX_PROBE_ERROR;
+      }
+      if (err && err_cap > 0) {
+         err[0] = 0;
+      }
+      return AV1_TILE_SYNTAX_PROBE_OK;
+   }
 
    if (out_stats && ((out_stats->block0_has_palette_y_decoded && out_stats->block0_has_palette_y) ||
                      (out_stats->block0_has_palette_uv_decoded && out_stats->block0_has_palette_uv))) {

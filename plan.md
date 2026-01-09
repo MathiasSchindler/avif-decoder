@@ -63,7 +63,7 @@ This is the working checklist we’ll actively keep up-to-date as we move from �
 - [x] Extend block1 further to `coeff_base_eob` (stop after that)
 - [x] Extend block1 further to `coeff_base` (stop after c==0 coeff_base milestone)
 - [x] Generalize residual decoding beyond the “first luma tx block” (iterate transform blocks)
-- [ ] Add chroma-plane residual traversal (UV coeff contexts + decoding)
+- [x] Add chroma-plane residual traversal (UV coeff contexts + decoding)
 - [ ] Decode all leaf blocks (remove “stop after N blocks” once we have full per-block decode paths)
 - [ ] Make `exit_symbol()` meaningful on at least one tiny generated tile by stopping at true end-of-tile
 

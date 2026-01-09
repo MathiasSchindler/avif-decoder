@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import re
 from pathlib import Path
 
@@ -44,41 +45,48 @@ def extract_table(html: str, name: str, dims: list[int]):
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--plane", choices=["luma", "chroma"], default="luma")
+    args = ap.parse_args()
+
+    plane = 0 if args.plane == "luma" else 1
+    suffix = "Luma" if plane == 0 else "Chroma"
+
     html = Path("av1bitstream.html").read_text(encoding="utf-8", errors="ignore")
 
     Q = 4
     P = 2  # PLANE_TYPES
 
     tables_with_ctx = [
-        ("Default_Eob_Pt_16_Cdf", [Q, P, 2, 6], "kDefaultEobPt16CdfLuma"),
-        ("Default_Eob_Pt_32_Cdf", [Q, P, 2, 7], "kDefaultEobPt32CdfLuma"),
-        ("Default_Eob_Pt_64_Cdf", [Q, P, 2, 8], "kDefaultEobPt64CdfLuma"),
-        ("Default_Eob_Pt_128_Cdf", [Q, P, 2, 9], "kDefaultEobPt128CdfLuma"),
-        ("Default_Eob_Pt_256_Cdf", [Q, P, 2, 10], "kDefaultEobPt256CdfLuma"),
+        ("Default_Eob_Pt_16_Cdf", [Q, P, 2, 6], "kDefaultEobPt16Cdf"),
+        ("Default_Eob_Pt_32_Cdf", [Q, P, 2, 7], "kDefaultEobPt32Cdf"),
+        ("Default_Eob_Pt_64_Cdf", [Q, P, 2, 8], "kDefaultEobPt64Cdf"),
+        ("Default_Eob_Pt_128_Cdf", [Q, P, 2, 9], "kDefaultEobPt128Cdf"),
+        ("Default_Eob_Pt_256_Cdf", [Q, P, 2, 10], "kDefaultEobPt256Cdf"),
     ]
 
     for name, dims, out in tables_with_ctx:
         arr = extract_table(html, name, dims)
         L = len(arr[0][0][0])
-        print(f"static const uint16_t {out}[4][2][{L}] = {{")
+        print(f"static const uint16_t {out}{suffix}[4][2][{L}] = {{")
         for q in range(4):
             print("   {")
             for ctx in range(2):
-                vals = arr[q][0][ctx]  # plane 0 == luma
+                vals = arr[q][plane][ctx]
                 print("      {" + ", ".join(map(str, vals)) + "},")
             print("   },")
         print("};\n")
 
     # No ctx dimension for these.
     for name, dims, out in [
-        ("Default_Eob_Pt_512_Cdf", [Q, P, 11], "kDefaultEobPt512CdfLuma"),
-        ("Default_Eob_Pt_1024_Cdf", [Q, P, 12], "kDefaultEobPt1024CdfLuma"),
+        ("Default_Eob_Pt_512_Cdf", [Q, P, 11], "kDefaultEobPt512Cdf"),
+        ("Default_Eob_Pt_1024_Cdf", [Q, P, 12], "kDefaultEobPt1024Cdf"),
     ]:
         arr = extract_table(html, name, dims)
         L = len(arr[0][0])
-        print(f"static const uint16_t {out}[4][{L}] = {{")
+        print(f"static const uint16_t {out}{suffix}[4][{L}] = {{")
         for q in range(4):
-            vals = arr[q][0]  # plane 0 == luma
+            vals = arr[q][plane]
             print("   {" + ", ".join(map(str, vals)) + "},")
         print("};\n")
 

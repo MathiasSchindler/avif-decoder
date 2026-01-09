@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Extract Default_Eob_Extra_Cdf initializer from local av1bitstream.html.
 
-Outputs a C initializer for luma only:
-  static const uint16_t kDefaultEobExtraCdfLuma[4][5][9][3] = { ... };
+Outputs a C initializer for a selected plane type:
+    static const uint16_t kDefaultEobExtraCdfLuma[4][5][9][3] = { ... };
+    static const uint16_t kDefaultEobExtraCdfChroma[4][5][9][3] = { ... };
 
 This is intentionally robust against the HTML "span" wrappers by slicing the
 initializer via brace depth and then regexing integers.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import argparse
 from typing import List
 
 
@@ -37,6 +39,10 @@ def reshape(nums: List[int], dims: List[int]) -> object:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--plane", choices=["luma", "chroma"], default="luma")
+    args = ap.parse_args()
+
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     html_path = os.path.join(repo_root, "av1bitstream.html")
 
@@ -89,22 +95,24 @@ def main() -> None:
 
     arr = reshape(nums, dims)  # type: ignore[assignment]
 
-    # Select PLANE_TYPES==0 (luma).
-    luma = []
+    ptype = 0 if args.plane == "luma" else 1
+    suffix = "Luma" if ptype == 0 else "Chroma"
+
+    sel = []
     for qctx in range(dims[0]):
         q_list = []
         for tx in range(dims[1]):
-            q_list.append(arr[qctx][tx][0])  # ptype=0
-        luma.append(q_list)
+            q_list.append(arr[qctx][tx][ptype])
+        sel.append(q_list)
 
     # Emit.
-    print("static const uint16_t kDefaultEobExtraCdfLuma[4][5][9][3] = {")
+    print(f"static const uint16_t kDefaultEobExtraCdf{suffix}[4][5][9][3] = {{")
     for qctx in range(4):
         print("   {")
         for tx in range(5):
             print("      {")
             for ectx in range(9):
-                cdf = luma[qctx][tx][ectx]
+                cdf = sel[qctx][tx][ectx]
                 print(f"         {{{cdf[0]}, {cdf[1]}, {cdf[2]}}},")
             print("      },")
         print("   },")

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Extract Default_Dc_Sign_Cdf initializer from local av1bitstream.html.
 
-Outputs a C initializer for luma only:
-  static const uint16_t kDefaultDcSignCdfLuma[4][3][3] = { ... };
+Outputs a C initializer for a selected plane type:
+    static const uint16_t kDefaultDcSignCdfLuma[4][3][3] = { ... };
+    static const uint16_t kDefaultDcSignCdfChroma[4][3][3] = { ... };
 
 Robust against HTML span wrappers by slicing initializer via brace depth.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import argparse
 from typing import List
 
 
@@ -36,6 +38,10 @@ def reshape(nums: List[int], dims: List[int]) -> object:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--plane", choices=["luma", "chroma"], default="luma")
+    args = ap.parse_args()
+
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     html_path = os.path.join(repo_root, "av1bitstream.html")
 
@@ -98,16 +104,17 @@ def main() -> None:
 
     arr = reshape(nums, dims)  # type: ignore[assignment]
 
-    # Select PLANE_TYPES==0 (luma).
-    luma = []
+    ptype = 0 if args.plane == "luma" else 1
+    suffix = "Luma" if ptype == 0 else "Chroma"
+    sel = []
     for qctx in range(dims[0]):
-        luma.append(arr[qctx][0])
+        sel.append(arr[qctx][ptype])
 
-    print("static const uint16_t kDefaultDcSignCdfLuma[4][3][3] = {")
+    print(f"static const uint16_t kDefaultDcSignCdf{suffix}[4][3][3] = {{")
     for qctx in range(4):
         print("   {")
         for ctx in range(3):
-            cdf = luma[qctx][ctx]
+            cdf = sel[qctx][ctx]
             print(f"      {{{cdf[0]}, {cdf[1]}, {cdf[2]}}},")
         print("   },")
     print("};")
