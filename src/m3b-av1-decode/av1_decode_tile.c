@@ -243,6 +243,18 @@ static const uint8_t kAdjustedTxSize[AV1_TX_SIZES_ALL] = {
 #define AV1_MAX_ANGLE_DELTA 3u
 #define AV1_ANGLE_DELTA_SYMBOLS (2u * AV1_MAX_ANGLE_DELTA + 1u)
 
+// Spec constants for read_delta_qindex/read_delta_lf.
+#define AV1_DELTA_Q_SMALL 3u
+#define AV1_DELTA_LF_SMALL 3u
+#define AV1_DELTA_Q_ABS_SYMBOLS (AV1_DELTA_Q_SMALL + 1u)  // symbols 0..DELTA_Q_SMALL
+#define AV1_DELTA_LF_ABS_SYMBOLS (AV1_DELTA_LF_SMALL + 1u) // symbols 0..DELTA_LF_SMALL
+#define AV1_FRAME_LF_COUNT 4u
+#define AV1_MAX_LOOP_FILTER 63
+
+// Segmentation (tile-coded) constants.
+#define AV1_MAX_SEGMENTS 8u
+#define AV1_SEGMENT_ID_CONTEXTS 3u
+
 typedef enum {
    AV1_PARTITION_NONE = 0,
    AV1_PARTITION_HORZ = 1,
@@ -269,6 +281,9 @@ typedef struct {
    // Per-MI palette sizes (0 if no palette). Default 0.
    uint8_t palette_y_size;
    uint8_t palette_uv_size;
+
+   // Per-MI segment_id (0..7). Default 0.
+   uint8_t segment_id;
 } Av1MiSize;
 
 typedef struct {
@@ -316,6 +331,9 @@ typedef struct {
    uint16_t palette_y_size[AV1_PALETTE_BLOCK_SIZE_CONTEXTS][AV1_PALETTE_SIZES + 1u];
    uint16_t palette_uv_size[AV1_PALETTE_BLOCK_SIZE_CONTEXTS][AV1_PALETTE_SIZES + 1u];
 
+   // Mutable per-tile CDF copies: segment_id.
+   uint16_t segment_id[AV1_SEGMENT_ID_CONTEXTS][AV1_MAX_SEGMENTS + 1u];
+
    // Mutable per-tile CDF copies (TxMode == TX_MODE_SELECT): tx_depth.
    uint16_t tx8x8[AV1_TX_SIZE_CONTEXTS][3];
    uint16_t tx16x16[AV1_TX_SIZE_CONTEXTS][4];
@@ -328,6 +346,16 @@ typedef struct {
    //   TileIntraTxTypeSet2Cdf[ Tx_Size_Sqr[ txSz ] ][ intraDir ]
    uint16_t intra_tx_type_set1[2][AV1_INTRA_MODES][8];
    uint16_t intra_tx_type_set2[3][AV1_INTRA_MODES][6];
+
+   // Mutable per-tile CDF copies: delta_q_abs and delta_lf_abs.
+   // Spec: TileDeltaQCdf, TileDeltaLFCdf, TileDeltaLFMultiCdf[i].
+   uint16_t delta_q_abs[AV1_DELTA_Q_ABS_SYMBOLS + 1u];
+   uint16_t delta_lf_abs[AV1_DELTA_LF_ABS_SYMBOLS + 1u];
+   uint16_t delta_lf_multi[AV1_FRAME_LF_COUNT][AV1_DELTA_LF_ABS_SYMBOLS + 1u];
+
+   // Spec-style runtime state (probe-only for now).
+   uint32_t current_qindex;
+   int32_t delta_lf_state[AV1_FRAME_LF_COUNT];
 } Av1TileSkipCdfs;
 
 typedef struct {
@@ -578,38 +606,10 @@ static void cdf_copy_u16(uint16_t *dst, const uint16_t *src, size_t n) {
    memcpy(dst, src, n * sizeof(uint16_t));
 }
 
-// Default txb_skip CDF table slice from the AV1 spec (Default_Txb_Skip_Cdf[idx][txSzCtx][ctx][3]).
-// We only embed ctx==0; during init we replicate it across all ctx values.
-static const uint16_t kDefaultTxbSkipCdfCtx0[AV1_COEFF_CDF_Q_CTXS][AV1_COEFF_TX_SIZES][3] = {
-   {
-      {31849, 32768, 0},
-      {31548, 32768, 0},
-      {29957, 32768, 0},
-      {17920, 32768, 0},
-      {6308, 32768, 0},
-   },
-   {
-      {30371, 32768, 0},
-      {31782, 32768, 0},
-      {31901, 32768, 0},
-      {26726, 32768, 0},
-      {26584, 32768, 0},
-   },
-   {
-      {29614, 32768, 0},
-      {31957, 32768, 0},
-      {32363, 32768, 0},
-      {30669, 32768, 0},
-      {28573, 32768, 0},
-   },
-   {
-      {26887, 32768, 0},
-      {31903, 32768, 0},
-      {32510, 32768, 0},
-      {31671, 32768, 0},
-      {31539, 32768, 0},
-   },
-};
+// Default txb_skip CDF table from the AV1 spec (Default_Txb_Skip_Cdf[qctx][txSzCtx][ctx][3]).
+static const uint16_t kDefaultTxbSkipCdf[AV1_COEFF_CDF_Q_CTXS][AV1_COEFF_TX_SIZES][AV1_TXB_SKIP_CONTEXTS][3] =
+#include "av1_default_cdfs_txb_skip.inc"
+    ;
 
 // Default EOB point CDF tables from the AV1 spec (see local av1bitstream.html).
 // We embed only PLANE_TYPES==0 (luma).
@@ -1153,12 +1153,46 @@ static const uint16_t kDefaultSkipCdf[AV1_SKIP_CONTEXTS][3] = {
    {4576, 32768, 0},
 };
 
+static const uint16_t kDefaultDeltaQCdf[AV1_DELTA_Q_ABS_SYMBOLS + 1u] = {28160, 32120, 32677, 32768, 0};
+static const uint16_t kDefaultDeltaLFCdf[AV1_DELTA_LF_ABS_SYMBOLS + 1u] = {28160, 32120, 32677, 32768, 0};
+
+static int32_t clip3_i32(int32_t lo, int32_t hi, int32_t v) {
+   if (v < lo) return lo;
+   if (v > hi) return hi;
+   return v;
+}
+
 static uint32_t coeff_cdf_q_ctx_from_base_q_idx(uint32_t base_q_idx) {
    // init_coeff_cdfs() (spec): idx derived from base_q_idx thresholds.
    if (base_q_idx <= 20u) return 0u;
    if (base_q_idx <= 60u) return 1u;
    if (base_q_idx <= 120u) return 2u;
    return 3u;
+}
+
+static uint32_t qindex_for_segment(const Av1TileDecodeParams *params, uint32_t segment_id) {
+   int32_t q = (int32_t)(params ? params->base_q_idx : 0u);
+   if (params && params->segmentation_enabled && segment_id < 8u && params->seg_feature_enabled_alt_q[segment_id]) {
+      q += params->seg_feature_data_alt_q[segment_id];
+   }
+   if (q < 0) {
+      q = 0;
+   } else if (q > 255) {
+      q = 255;
+   }
+   return (uint32_t)q;
+}
+
+static bool lossless_for_segment(const Av1TileDecodeParams *params, uint32_t segment_id) {
+   const uint32_t qindex = qindex_for_segment(params, segment_id);
+   if (qindex != 0u) {
+      return false;
+   }
+   if (!params) {
+      return true;
+   }
+   return params->delta_q_y_dc == 0 && params->delta_q_u_dc == 0 && params->delta_q_u_ac == 0 &&
+          params->delta_q_v_dc == 0 && params->delta_q_v_ac == 0;
 }
 
 static uint32_t tx_sz_ctx_from_tx_size(uint32_t tx_size) {
@@ -1516,6 +1550,13 @@ static const uint16_t kDefaultPaletteUVSizeCdf[AV1_PALETTE_BLOCK_SIZE_CONTEXTS][
    {1269, 5435, 10433, 18963, 21700, 25865, 32768, 0},
 };
 
+// Default segment_id CDF tables from the AV1 spec (see local av1bitstream.html).
+static const uint16_t kDefaultSegmentIdCdf[AV1_SEGMENT_ID_CONTEXTS][AV1_MAX_SEGMENTS + 1u] = {
+   {5622, 7893, 16093, 18233, 27809, 28373, 32533, 32768, 0},
+   {14274, 18230, 22557, 24935, 29980, 30851, 32344, 32768, 0},
+   {27527, 28487, 28723, 28890, 32397, 32647, 32679, 32768, 0},
+};
+
 // Default tx_depth CDF tables from the AV1 spec (see local av1bitstream.html).
 static const uint16_t kDefaultTx8x8Cdf[AV1_TX_SIZE_CONTEXTS][3] = {
    {19968, 32768, 0},
@@ -1639,7 +1680,7 @@ static void tile_coeff_cdfs_init(Av1TileCoeffCdfs *out, uint32_t base_q_idx) {
    const uint32_t qctx = coeff_cdf_q_ctx_from_base_q_idx(base_q_idx);
    for (uint32_t tx = 0; tx < AV1_COEFF_TX_SIZES; tx++) {
       for (uint32_t ctx = 0; ctx < AV1_TXB_SKIP_CONTEXTS; ctx++) {
-         cdf_copy_u16(out->txb_skip[tx][ctx], kDefaultTxbSkipCdfCtx0[qctx][tx], 3u);
+         cdf_copy_u16(out->txb_skip[tx][ctx], kDefaultTxbSkipCdf[qctx][tx][ctx], 3u);
       }
    }
 
@@ -1761,6 +1802,8 @@ static void tile_skip_cdfs_init(Av1TileSkipCdfs *t) {
    cdf_copy_u16(&t->palette_y_size[0][0], &kDefaultPaletteYSizeCdf[0][0], AV1_PALETTE_BLOCK_SIZE_CONTEXTS * (AV1_PALETTE_SIZES + 1u));
    cdf_copy_u16(&t->palette_uv_size[0][0], &kDefaultPaletteUVSizeCdf[0][0], AV1_PALETTE_BLOCK_SIZE_CONTEXTS * (AV1_PALETTE_SIZES + 1u));
 
+   cdf_copy_u16(&t->segment_id[0][0], &kDefaultSegmentIdCdf[0][0], AV1_SEGMENT_ID_CONTEXTS * (AV1_MAX_SEGMENTS + 1u));
+
    cdf_copy_u16(&t->tx8x8[0][0], &kDefaultTx8x8Cdf[0][0], AV1_TX_SIZE_CONTEXTS * 3u);
    cdf_copy_u16(&t->tx16x16[0][0], &kDefaultTx16x16Cdf[0][0], AV1_TX_SIZE_CONTEXTS * 4u);
    cdf_copy_u16(&t->tx32x32[0][0], &kDefaultTx32x32Cdf[0][0], AV1_TX_SIZE_CONTEXTS * 4u);
@@ -1768,6 +1811,13 @@ static void tile_skip_cdfs_init(Av1TileSkipCdfs *t) {
 
    cdf_copy_u16(&t->intra_tx_type_set1[0][0][0], &kDefaultIntraTxTypeSet1Cdf[0][0][0], 2u * AV1_INTRA_MODES * 8u);
    cdf_copy_u16(&t->intra_tx_type_set2[0][0][0], &kDefaultIntraTxTypeSet2Cdf[0][0][0], 3u * AV1_INTRA_MODES * 6u);
+
+   cdf_copy_u16(&t->delta_q_abs[0], &kDefaultDeltaQCdf[0], AV1_DELTA_Q_ABS_SYMBOLS + 1u);
+   cdf_copy_u16(&t->delta_lf_abs[0], &kDefaultDeltaLFCdf[0], AV1_DELTA_LF_ABS_SYMBOLS + 1u);
+   cdf_copy_u16(&t->delta_lf_multi[0][0], &kDefaultDeltaLFCdf[0], AV1_FRAME_LF_COUNT * (AV1_DELTA_LF_ABS_SYMBOLS + 1u));
+
+   t->current_qindex = 0;
+   memset(&t->delta_lf_state[0], 0, sizeof(t->delta_lf_state));
 }
 
 static uint32_t max_tx_depth_from_mi_size(uint32_t mi_size) {
@@ -2205,6 +2255,166 @@ static void mi_set_palette_sizes_block(Av1MiSize *mi_grid,
    }
 }
 
+static void mi_set_segment_id_block(Av1MiSize *mi_grid,
+                                   uint32_t mi_rows,
+                                   uint32_t mi_cols,
+                                   uint32_t r,
+                                   uint32_t c,
+                                   uint32_t wlog2,
+                                   uint32_t hlog2,
+                                   uint32_t segment_id) {
+   const uint32_t w = 1u << wlog2;
+   const uint32_t h = 1u << hlog2;
+   for (uint32_t rr = 0; rr < h; rr++) {
+      for (uint32_t cc = 0; cc < w; cc++) {
+         const uint32_t y = r + rr;
+         const uint32_t x = c + cc;
+         if (y < mi_rows && x < mi_cols) {
+            mi_grid[mi_index(y, x, mi_cols)].segment_id = (uint8_t)segment_id;
+         }
+      }
+   }
+}
+
+static uint32_t segment_id_ctx_from_mi_grid(const Av1MiSize *mi_grid, uint32_t mi_rows, uint32_t mi_cols, uint32_t r, uint32_t c) {
+   if (!mi_grid || r >= mi_rows || c >= mi_cols) {
+      return 0u;
+   }
+
+   const bool availU = (r > 0u);
+   const bool availL = (c > 0u);
+   const bool availUL = availU && availL;
+
+   const int32_t prevUL = availUL ? (int32_t)mi_grid[mi_index(r - 1u, c - 1u, mi_cols)].segment_id : -1;
+   const int32_t prevU = availU ? (int32_t)mi_grid[mi_index(r - 1u, c, mi_cols)].segment_id : -1;
+   const int32_t prevL = availL ? (int32_t)mi_grid[mi_index(r, c - 1u, mi_cols)].segment_id : -1;
+
+   uint32_t ctx = 0u;
+   if (prevUL < 0) {
+      ctx = 0u;
+   } else if ((prevUL == prevU) && (prevUL == prevL)) {
+      ctx = 2u;
+   } else if ((prevUL == prevU) || (prevUL == prevL) || (prevU == prevL)) {
+      ctx = 1u;
+   } else {
+      ctx = 0u;
+   }
+
+   if (ctx >= AV1_SEGMENT_ID_CONTEXTS) {
+      ctx = AV1_SEGMENT_ID_CONTEXTS - 1u;
+   }
+   return ctx;
+}
+
+static uint32_t segment_id_pred_from_mi_grid(const Av1MiSize *mi_grid, uint32_t mi_rows, uint32_t mi_cols, uint32_t r, uint32_t c) {
+   if (!mi_grid || r >= mi_rows || c >= mi_cols) {
+      return 0u;
+   }
+
+   const bool availU = (r > 0u);
+   const bool availL = (c > 0u);
+   const bool availUL = availU && availL;
+
+   const int32_t prevUL = availUL ? (int32_t)mi_grid[mi_index(r - 1u, c - 1u, mi_cols)].segment_id : -1;
+   const int32_t prevU = availU ? (int32_t)mi_grid[mi_index(r - 1u, c, mi_cols)].segment_id : -1;
+   const int32_t prevL = availL ? (int32_t)mi_grid[mi_index(r, c - 1u, mi_cols)].segment_id : -1;
+
+   uint32_t pred = 0u;
+   if (prevU == -1) {
+      pred = (prevL == -1) ? 0u : (uint32_t)prevL;
+   } else if (prevL == -1) {
+      pred = (uint32_t)prevU;
+   } else {
+      pred = (prevUL == prevU) ? (uint32_t)prevU : (uint32_t)prevL;
+   }
+   if (pred >= AV1_MAX_SEGMENTS) {
+      pred = 0u;
+   }
+   return pred;
+}
+
+static uint32_t neg_deinterleave(uint32_t diff, uint32_t ref, uint32_t max) {
+   if (max == 0u) {
+      return 0u;
+   }
+   if (ref == 0u) {
+      return diff;
+   }
+   if (ref >= (max - 1u)) {
+      return max - diff - 1u;
+   }
+   if (2u * ref < max) {
+      if (diff <= 2u * ref) {
+         if (diff & 1u) {
+            return ref + ((diff + 1u) >> 1u);
+         }
+         return ref - (diff >> 1u);
+      }
+      return diff;
+   }
+
+   // 2*ref >= max
+   const uint32_t span = max - ref - 1u;
+   if (diff <= 2u * span) {
+      if (diff & 1u) {
+         return ref + ((diff + 1u) >> 1u);
+      }
+      return ref - (diff >> 1u);
+   }
+   return max - (diff + 1u);
+}
+
+static bool tile_read_intra_segment_id(Av1SymbolDecoder *sd,
+                                      const Av1TileDecodeParams *params,
+                                      Av1TileSkipCdfs *mode_cdfs,
+                                      Av1MiSize *mi_grid,
+                                      uint32_t mi_rows,
+                                      uint32_t mi_cols,
+                                      uint32_t r,
+                                      uint32_t c,
+                                      uint32_t wlog2,
+                                      uint32_t hlog2,
+                                      uint32_t skip,
+                                      char *err,
+                                      size_t err_cap) {
+   if (!sd || !params || !mode_cdfs || !mi_grid) {
+      snprintf(err, err_cap, "invalid args");
+      return false;
+   }
+
+   uint32_t segment_id = 0u;
+   if (params->segmentation_enabled) {
+      const uint32_t pred = segment_id_pred_from_mi_grid(mi_grid, mi_rows, mi_cols, r, c);
+      if (skip) {
+         segment_id = pred;
+      } else {
+         const uint32_t ctx = segment_id_ctx_from_mi_grid(mi_grid, mi_rows, mi_cols, r, c);
+         uint32_t max = params->last_active_seg_id + 1u;
+         if (max == 0u) {
+            max = 1u;
+         }
+         if (max > AV1_MAX_SEGMENTS) {
+            max = AV1_MAX_SEGMENTS;
+         }
+         uint32_t diff = 0u;
+         if (max > 1u) {
+            if (!av1_symbol_read_symbol(sd, mode_cdfs->segment_id[ctx], max, &diff, err, err_cap)) {
+               return false;
+            }
+         }
+         segment_id = neg_deinterleave(diff, pred, max);
+      }
+   }
+
+   if (segment_id >= AV1_MAX_SEGMENTS) {
+      snprintf(err, err_cap, "invalid segment_id=%u", segment_id);
+      return false;
+   }
+
+   mi_set_segment_id_block(mi_grid, mi_rows, mi_cols, r, c, wlog2, hlog2, segment_id);
+   return true;
+}
+
 static uint32_t palette_y_ctx_from_mi_grid(const Av1MiSize *mi_grid,
                                           uint32_t mi_rows,
                                           uint32_t mi_cols,
@@ -2336,6 +2546,16 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
       st->block0_txb_skip_decoded = true;
       st->block0_txb_skip_ctx = ctx;
       st->block0_txb_skip = all_zero;
+   }
+   if (st && plane == 1u && block_index == 0u && tx_index == 0u && !st->block0_u_txb_skip_decoded) {
+      st->block0_u_txb_skip_decoded = true;
+      st->block0_u_txb_skip_ctx = ctx;
+      st->block0_u_txb_skip = all_zero;
+   }
+   if (st && plane == 2u && block_index == 0u && tx_index == 0u && !st->block0_v_txb_skip_decoded) {
+      st->block0_v_txb_skip_decoded = true;
+      st->block0_v_txb_skip_ctx = ctx;
+      st->block0_v_txb_skip = all_zero;
    }
    if (st && plane == 0u && block_index == 0u && tx_index == 1u && !st->block0_tx1_txb_skip_decoded) {
       st->block0_tx1_txb_skip_decoded = true;
@@ -2736,8 +2956,145 @@ static bool decode_coeffs_luma_one_tx_block(Av1SymbolDecoder *sd,
    return true;
 }
 
+typedef struct Av1TileSbProbeState {
+   uint32_t sb_origin_r;
+   uint32_t sb_origin_c;
+   uint32_t sb_mi_size; // 16 or 32
+
+   // Models ReadDeltas in the AV1 spec; initialized per superblock.
+   uint32_t read_deltas;
+
+   // Tracks whether we already consumed cdef_idx for each 64x64 region inside the superblock.
+   // For 64x64 SB: bit0 used. For 128x128 SB: bits [0..3] used for the 2x2 64x64 regions.
+   uint8_t cdef_seen_mask;
+} Av1TileSbProbeState;
+
+static bool tile_read_delta_qindex(Av1SymbolDecoder *sd,
+                                  const Av1TileDecodeParams *params,
+                                  Av1TileSkipCdfs *mode_cdfs,
+                                  bool mi_is_sb,
+                                  uint32_t skip,
+                                  char *err,
+                                  size_t err_cap) {
+   if (!sd || !params || !mode_cdfs) {
+      snprintf(err, err_cap, "invalid args");
+      return false;
+   }
+
+   // Spec: if (MiSize == sbSize && skip) return.
+   if (mi_is_sb && skip) {
+      return true;
+   }
+
+   uint32_t delta_q_abs_sym = 0;
+   if (!av1_symbol_read_symbol(sd, mode_cdfs->delta_q_abs, AV1_DELTA_Q_ABS_SYMBOLS, &delta_q_abs_sym, err, err_cap)) {
+      return false;
+   }
+
+   uint32_t delta_q_abs = delta_q_abs_sym;
+   if (delta_q_abs_sym == AV1_DELTA_Q_SMALL) {
+      uint32_t delta_q_rem_bits = 0;
+      if (!av1_symbol_read_literal(sd, 3u, &delta_q_rem_bits, err, err_cap)) {
+         return false;
+      }
+      delta_q_rem_bits++;
+
+      uint32_t delta_q_abs_bits = 0;
+      if (!av1_symbol_read_literal(sd, (unsigned)delta_q_rem_bits, &delta_q_abs_bits, err, err_cap)) {
+         return false;
+      }
+      delta_q_abs = delta_q_abs_bits + (1u << delta_q_rem_bits) + 1u;
+   }
+
+   if (delta_q_abs) {
+      uint32_t sign = 0;
+      if (!av1_symbol_read_literal(sd, 1u, &sign, err, err_cap)) {
+         return false;
+      }
+      const int32_t reduced = sign ? -(int32_t)delta_q_abs : (int32_t)delta_q_abs;
+      const int32_t scale = (params->delta_q_res < 31u) ? (1 << (int32_t)params->delta_q_res) : 1;
+      const int32_t delta = reduced * scale;
+
+      int32_t next = (int32_t)mode_cdfs->current_qindex + delta;
+      if (next < 1) next = 1;
+      if (next > 255) next = 255;
+      mode_cdfs->current_qindex = (uint32_t)next;
+   }
+
+   return true;
+}
+
+static bool tile_read_delta_lf(Av1SymbolDecoder *sd,
+                              const Av1TileDecodeParams *params,
+                              Av1TileSkipCdfs *mode_cdfs,
+                              bool mi_is_sb,
+                              uint32_t skip,
+                              char *err,
+                              size_t err_cap) {
+   if (!sd || !params || !mode_cdfs) {
+      snprintf(err, err_cap, "invalid args");
+      return false;
+   }
+
+   // Spec: if (MiSize == sbSize && skip) return.
+   if (mi_is_sb && skip) {
+      return true;
+   }
+
+   if (!params->delta_lf_present) {
+      return true;
+   }
+
+   uint32_t frame_lf_count = 1u;
+   if (params->delta_lf_multi) {
+      const uint32_t num_planes = params->mono_chrome ? 1u : 3u;
+      frame_lf_count = (num_planes > 1u) ? AV1_FRAME_LF_COUNT : (AV1_FRAME_LF_COUNT - 2u);
+   }
+   if (frame_lf_count > AV1_FRAME_LF_COUNT) {
+      frame_lf_count = AV1_FRAME_LF_COUNT;
+   }
+
+   for (uint32_t i = 0; i < frame_lf_count; i++) {
+      uint16_t *cdf = params->delta_lf_multi ? mode_cdfs->delta_lf_multi[i] : mode_cdfs->delta_lf_abs;
+
+      uint32_t delta_lf_abs_sym = 0;
+      if (!av1_symbol_read_symbol(sd, cdf, AV1_DELTA_LF_ABS_SYMBOLS, &delta_lf_abs_sym, err, err_cap)) {
+         return false;
+      }
+
+      uint32_t delta_lf_abs = delta_lf_abs_sym;
+      if (delta_lf_abs_sym == AV1_DELTA_LF_SMALL) {
+         uint32_t delta_lf_rem_bits = 0;
+         if (!av1_symbol_read_literal(sd, 3u, &delta_lf_rem_bits, err, err_cap)) {
+            return false;
+         }
+         const uint32_t nbits = delta_lf_rem_bits + 1u;
+
+         uint32_t delta_lf_abs_bits = 0;
+         if (!av1_symbol_read_literal(sd, (unsigned)nbits, &delta_lf_abs_bits, err, err_cap)) {
+            return false;
+         }
+         delta_lf_abs = delta_lf_abs_bits + (1u << nbits) + 1u;
+      }
+
+      if (delta_lf_abs) {
+         uint32_t sign = 0;
+         if (!av1_symbol_read_literal(sd, 1u, &sign, err, err_cap)) {
+            return false;
+         }
+         const int32_t reduced = sign ? -(int32_t)delta_lf_abs : (int32_t)delta_lf_abs;
+         const int32_t scale = (params->delta_lf_res < 31u) ? (1 << (int32_t)params->delta_lf_res) : 1;
+         const int32_t delta = reduced * scale;
+         mode_cdfs->delta_lf_state[i] = clip3_i32(-AV1_MAX_LOOP_FILTER, AV1_MAX_LOOP_FILTER, mode_cdfs->delta_lf_state[i] + delta);
+      }
+   }
+
+   return true;
+}
+
 static bool decode_block_stub(Av1SymbolDecoder *sd,
                               const Av1TileDecodeParams *params,
+                              struct Av1TileSbProbeState *sb,
                               Av1TileSkipCdfs *mode_cdfs,
                               Av1TileCoeffCdfs *coeff_cdfs,
                               Av1TileCoeffCtx *coeff_ctx,
@@ -2759,6 +3116,14 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
 
    const uint32_t block_index = st ? st->blocks_decoded : 0u;
 
+   // intra_frame_mode_info(): optionally read intra_segment_id() before skip.
+   // This is currently try-EOT only to keep default probe output stable.
+   if (params->probe_try_exit_symbol && params->segmentation_enabled && params->seg_id_pre_skip) {
+      if (!tile_read_intra_segment_id(sd, params, mode_cdfs, mi_grid, mi_rows, mi_cols, r, c, wlog2, hlog2, 0u /*skip*/, err, err_cap)) {
+         return false;
+      }
+   }
+
    const uint32_t ctx = skip_ctx_from_mi_grid(mi_grid, mi_rows, mi_cols, r, c);
    uint16_t *cdf = mode_cdfs->skip[ctx];
    uint32_t skip = 0;
@@ -2776,6 +3141,92 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
       st->block0_hlog2 = hlog2;
       st->block0_skip_ctx = ctx;
       st->block0_skip = skip;
+   }
+
+   // try-EOT mode: consume a few additional per-superblock tile syntax elements which appear
+   // before intra prediction modes (see intra_frame_mode_info in av1bitstream.html).
+   // This is intentionally gated so default probe behavior remains stable for regression tests.
+   if (params->probe_try_exit_symbol) {
+      // intra_frame_mode_info(): intra_segment_id() (SegIdPreSkip==0) appears after skip.
+      if (params->segmentation_enabled && !params->seg_id_pre_skip) {
+         if (!tile_read_intra_segment_id(sd, params, mode_cdfs, mi_grid, mi_rows, mi_cols, r, c, wlog2, hlog2, skip, err, err_cap)) {
+            return false;
+         }
+      }
+
+      // We do not implement intrabc tile syntax yet.
+      if (params->allow_intrabc) {
+         if (out_stop) {
+            *out_stop = true;
+         }
+         snprintf(err, err_cap, "unsupported: allow_intrabc=1 (use_intrabc not implemented)");
+         return true;
+      }
+
+      // For try-EOT, derive per-block segment_id/qindex/Lossless.
+      // Note: Frame-level coded_lossless is insufficient when segmentation is enabled.
+   }
+
+   uint32_t segment_id = 0u;
+   if (params->probe_try_exit_symbol && params->segmentation_enabled && r < mi_rows && c < mi_cols) {
+      segment_id = (uint32_t)mi_grid[mi_index(r, c, mi_cols)].segment_id;
+      if (segment_id >= 8u) {
+         segment_id = 0u;
+      }
+   }
+   const uint32_t block_qindex = params->probe_try_exit_symbol ? qindex_for_segment(params, segment_id) : params->base_q_idx;
+   const bool block_lossless = params->probe_try_exit_symbol ? lossless_for_segment(params, segment_id) : (params->coded_lossless != 0u);
+
+   if (params->probe_try_exit_symbol) {
+
+      // read_cdef(): cdef_idx is a literal (L(cdef_bits)) consumed once per 64x64 region.
+      // We track just the minimal per-superblock state to avoid double-consuming.
+      if (sb && !skip && !block_lossless && params->enable_cdef && params->cdef_bits > 0) {
+         // 64x64 cdef regions are aligned to 16 MI units (64/4).
+         const uint32_t cdef_mask = ~15u;
+         const uint32_t rr = r & cdef_mask;
+         const uint32_t cc = c & cdef_mask;
+
+         uint32_t r_idx = 0;
+         uint32_t c_idx = 0;
+         if (sb->sb_mi_size == 32u) {
+            const uint32_t dr = (rr >= sb->sb_origin_r) ? (rr - sb->sb_origin_r) : 0u;
+            const uint32_t dc = (cc >= sb->sb_origin_c) ? (cc - sb->sb_origin_c) : 0u;
+            r_idx = (dr >> 4);
+            c_idx = (dc >> 4);
+            if (r_idx > 1u) r_idx = 1u;
+            if (c_idx > 1u) c_idx = 1u;
+         }
+         const uint32_t region = (r_idx << 1) | c_idx;
+         const uint8_t bit = (uint8_t)(1u << region);
+         if ((sb->cdef_seen_mask & bit) == 0) {
+            uint32_t tmp = 0;
+            if (!av1_symbol_read_literal(sd, (unsigned)params->cdef_bits, &tmp, err, err_cap)) {
+               return false;
+            }
+            sb->cdef_seen_mask |= bit;
+         }
+      }
+
+      // read_delta_qindex()/read_delta_lf(): entropy-coded deltas in intra_frame_mode_info.
+      // Spec: ReadDeltas is initialized per superblock from delta_q_present, and is reset after
+      // the first block in the superblock.
+      if (sb && sb->read_deltas && params->delta_q_present) {
+         const uint32_t bw4 = 1u << wlog2;
+         const uint32_t bh4 = 1u << hlog2;
+         const bool mi_is_sb = (bw4 == sb->sb_mi_size) && (bh4 == sb->sb_mi_size);
+
+         if (!tile_read_delta_qindex(sd, params, mode_cdfs, mi_is_sb, skip, err, err_cap)) {
+            return false;
+         }
+         if (!tile_read_delta_lf(sd, params, mode_cdfs, mi_is_sb, skip, err, err_cap)) {
+            return false;
+         }
+      }
+      // Spec resets ReadDeltas after the first block in the superblock.
+      if (sb) {
+         sb->read_deltas = 0;
+      }
    }
 
    uint32_t y_mode_ctx = size_group_from_wlog2_hlog2(wlog2, hlog2);
@@ -2828,7 +3279,7 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
       const uint32_t luma_w_px = (1u << wlog2) * 4u;
       const uint32_t luma_h_px = (1u << hlog2) * 4u;
 
-      if (params->coded_lossless) {
+      if (block_lossless) {
          uint32_t chroma_w = (params->subsampling_x ? (luma_w_px >> params->subsampling_x) : luma_w_px);
          uint32_t chroma_h = (params->subsampling_y ? (luma_h_px >> params->subsampling_y) : luma_h_px);
          if (chroma_w < 4u) chroma_w = 4u;
@@ -3024,14 +3475,14 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
    }
 
    uint32_t tx_size = AV1_TX_4X4;
-   if (!params->coded_lossless) {
+   if (!block_lossless) {
       if (!max_tx_size_rect_from_mi_size(mi_size, &tx_size)) {
          snprintf(err, err_cap, "unsupported MiSize for Max_Tx_Size_Rect (%u)", mi_size);
          return false;
       }
    }
 
-   if (!params->coded_lossless && params->tx_mode == 2u /* TX_MODE_SELECT */ && mi_size > 0u /* MiSize > BLOCK_4X4 */) {
+   if (!block_lossless && params->tx_mode == 2u /* TX_MODE_SELECT */ && mi_size > 0u /* MiSize > BLOCK_4X4 */) {
       const uint32_t ctx = 0u; // Correct for the first block; full ctx derivation comes later.
       const uint32_t max_tx_depth = max_tx_depth_from_mi_size(mi_size);
       uint16_t *cdf = NULL;
@@ -3083,7 +3534,7 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
       const uint32_t set = get_tx_set_intra(tx_size, params->reduced_tx_set);
       const uint32_t txSzSqrUp = (tx_size < AV1_TX_SIZES_ALL) ? (uint32_t)kTxSizeSqrUp[tx_size] : 0u;
 
-      if (!params->coded_lossless && txSzSqrUp <= 3u && set != AV1_TX_SET_DCTONLY && params->base_q_idx > 0u) {
+      if (!block_lossless && txSzSqrUp <= 3u && set != AV1_TX_SET_DCTONLY && block_qindex > 0u) {
          uint32_t intraDir = y_mode;
          if (use_filter_intra_decoded && use_filter_intra) {
             // Filter_Intra_Mode_To_Intra_Dir = { DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED }.
@@ -3268,7 +3719,7 @@ static bool decode_block_stub(Av1SymbolDecoder *sd,
          }
 
          uint32_t plane_tx_type = AV1_TX_TYPE_DCT_DCT;
-         if (!params->coded_lossless) {
+         if (!block_lossless) {
             if (uv_mode < AV1_UV_INTRA_MODES_CFL_ALLOWED) {
                plane_tx_type = (uint32_t)kModeToTxfmUv[uv_mode];
             }
@@ -3375,6 +3826,7 @@ block_done:
 static bool decode_partition_rec(Av1SymbolDecoder *sd,
                                  Av1TilePartitionCdfs *cdfs,
                                  const Av1TileDecodeParams *params,
+                                 Av1TileSbProbeState *sb,
                                  Av1TileSkipCdfs *skip_cdfs,
                                  Av1TileCoeffCdfs *coeff_cdfs,
                                  Av1TileCoeffCtx *coeff_ctx,
@@ -3406,7 +3858,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
    // Base case: bSize < BLOCK_8X8 => partition = NONE.
    if (bsl == 0) {
       mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, 0, 0, st);
-      return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, 0, 0, st, out_stop, err, err_cap);
+      return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, 0, 0, st, out_stop, err, err_cap);
    }
 
    const uint32_t num4x4 = bsl_to_num4x4(bsl);
@@ -3534,47 +3986,48 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
    switch (partition) {
       case AV1_PARTITION_NONE:
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_HORZ:
          if (!params->probe_try_exit_symbol) {
             // First decode_block would be the top half.
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
-            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+            return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
          }
          // Two leaf blocks: top half then bottom half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_VERT:
          if (!params->probe_try_exit_symbol) {
             // First decode_block would be the left half.
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
-            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
+            return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
          }
          // Two leaf blocks: left half then right half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_SPLIT:
          // Recurse into 4 sub-blocks.
          if (!decode_partition_rec(sd,
                                    cdfs,
                                    params,
+                                   sb,
                                    skip_cdfs,
                                    coeff_cdfs,
                                    coeff_ctx,
@@ -3597,6 +4050,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          if (!decode_partition_rec(sd,
                                    cdfs,
                                    params,
+                                   sb,
                                    skip_cdfs,
                                    coeff_cdfs,
                                    coeff_ctx,
@@ -3619,6 +4073,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          if (!decode_partition_rec(sd,
                                    cdfs,
                                    params,
+                                   sb,
                                    skip_cdfs,
                                    coeff_cdfs,
                                    coeff_ctx,
@@ -3641,6 +4096,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          if (!decode_partition_rec(sd,
                                    cdfs,
                                    params,
+                                   sb,
                                    skip_cdfs,
                                    coeff_cdfs,
                                    coeff_ctx,
@@ -3666,97 +4122,97 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          if (!params->probe_try_exit_symbol) {
             // First decode_block would be the top-left quarter.
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
-            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+            return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
          }
          // Leaf blocks: top-left quarter, top-right quarter, then bottom half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_HORZ_B:
          if (!params->probe_try_exit_symbol) {
             // First decode_block would be the top half.
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
-            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
+            return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap);
          }
          // Leaf blocks: top half, then bottom-left quarter, then bottom-right quarter.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_VERT_A:
          if (!params->probe_try_exit_symbol) {
             // First decode_block would be the top-left quarter.
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
-            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+            return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
          }
          // Leaf blocks: top-left quarter, bottom-left quarter, then right half.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_VERT_B:
          if (!params->probe_try_exit_symbol) {
             // First decode_block would be the left half.
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
-            return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
+            return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap);
          }
          // Leaf blocks: left half, then top-right quarter, then bottom-right quarter.
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c, bsl - 1u, bsl, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st);
-         if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
+         if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap)) {
             return false;
          }
          if (out_stop && *out_stop) {
             return true;
          }
          mi_fill_block(mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st);
-         return decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
+         return decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r + half, c + half, bsl - 1u, bsl - 1u, st, out_stop, err, err_cap);
 
       case AV1_PARTITION_HORZ_4:
          if (!params->probe_try_exit_symbol) {
@@ -3764,6 +4220,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
             mi_fill_block(mi_grid, mi_rows, mi_cols, r + 0u * quarter, c, bsl, bsl - 2u, st);
             return decode_block_stub(sd,
                                     params,
+                                    sb,
                                     skip_cdfs,
                                     coeff_cdfs,
                                     coeff_ctx,
@@ -3787,7 +4244,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          for (uint32_t i = 0; i < 4u; i++) {
             const uint32_t rr = r + i * quarter;
             mi_fill_block(mi_grid, mi_rows, mi_cols, rr, c, bsl, bsl - 2u, st);
-            if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, rr, c, bsl, bsl - 2u, st, out_stop, err, err_cap)) {
+            if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, rr, c, bsl, bsl - 2u, st, out_stop, err, err_cap)) {
                return false;
             }
             if (out_stop && *out_stop) {
@@ -3802,6 +4259,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, c + 0u * quarter, bsl - 2u, bsl, st);
             return decode_block_stub(sd,
                                     params,
+                                    sb,
                                     skip_cdfs,
                                     coeff_cdfs,
                                     coeff_ctx,
@@ -3825,7 +4283,7 @@ static bool decode_partition_rec(Av1SymbolDecoder *sd,
          for (uint32_t i = 0; i < 4u; i++) {
             const uint32_t cc = c + i * quarter;
             mi_fill_block(mi_grid, mi_rows, mi_cols, r, cc, bsl - 2u, bsl, st);
-            if (!decode_block_stub(sd, params, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, cc, bsl - 2u, bsl, st, out_stop, err, err_cap)) {
+            if (!decode_block_stub(sd, params, sb, skip_cdfs, coeff_cdfs, coeff_ctx, mi_grid, mi_rows, mi_cols, r, cc, bsl - 2u, bsl, st, out_stop, err, err_cap)) {
                return false;
             }
             if (out_stop && *out_stop) {
@@ -3924,6 +4382,8 @@ Av1TileSyntaxProbeStatus av1_tile_syntax_probe(const uint8_t *tile_data,
 
    Av1TileSkipCdfs skip_cdfs;
    tile_skip_cdfs_init(&skip_cdfs);
+   skip_cdfs.current_qindex = params->base_q_idx;
+   memset(&skip_cdfs.delta_lf_state[0], 0, sizeof(skip_cdfs.delta_lf_state));
 
    Av1TileCoeffCdfs coeff_cdfs;
    tile_coeff_cdfs_init(&coeff_cdfs, params->base_q_idx);
@@ -3948,6 +4408,7 @@ Av1TileSyntaxProbeStatus av1_tile_syntax_probe(const uint8_t *tile_data,
          if (!decode_partition_rec(&sd,
                                    &cdfs,
                                    params,
+                                   NULL,
                                    &skip_cdfs,
                                    &coeff_cdfs,
                                    &coeff_ctx,
@@ -3972,9 +4433,18 @@ Av1TileSyntaxProbeStatus av1_tile_syntax_probe(const uint8_t *tile_data,
             for (uint32_t sb_c = 0; sb_c < sb_cols; sb_c++) {
                const uint32_t r0 = sb_r * sb_mi_size;
                const uint32_t c0 = sb_c * sb_mi_size;
+               
+               Av1TileSbProbeState sb;
+               memset(&sb, 0, sizeof(sb));
+               sb.sb_origin_r = r0;
+               sb.sb_origin_c = c0;
+               sb.sb_mi_size = sb_mi_size;
+               sb.read_deltas = params->delta_q_present;
+               
                if (!decode_partition_rec(&sd,
                                          &cdfs,
                                          params,
+                                         &sb,
                                          &skip_cdfs,
                                          &coeff_cdfs,
                                          &coeff_ctx,

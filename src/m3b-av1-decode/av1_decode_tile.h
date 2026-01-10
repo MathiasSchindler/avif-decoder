@@ -40,10 +40,31 @@ typedef struct {
     uint32_t allow_screen_content_tools;
 
     // From the frame header.
+    uint32_t allow_intrabc;
+
+    // From segmentation_params() in the uncompressed header.
+    // Note: For now, only enough is plumbed for safe tile syntax probing.
+    uint32_t segmentation_enabled;
+    uint32_t seg_id_pre_skip;
+    uint32_t last_active_seg_id;
+
+    // From segmentation_params() feature data (uncompressed header).
+    // Only SEG_LVL_ALT_Q is currently tracked because it affects Lossless/QIndex.
+    uint32_t seg_feature_enabled_alt_q[8];
+    int32_t seg_feature_data_alt_q[8];
+
+    // From the frame header.
     uint32_t disable_cdf_update;
 
     // From the frame header quantizer_params(). Used to initialize coeff CDFs.
     uint32_t base_q_idx;
+
+    // From the frame header quantizer_params(). Used for Lossless derivation.
+    int32_t delta_q_y_dc;
+    int32_t delta_q_u_dc;
+    int32_t delta_q_u_ac;
+    int32_t delta_q_v_dc;
+    int32_t delta_q_v_ac;
 
     // From read_tx_mode() in the frame header.
     // Values match the AV1 spec names:
@@ -53,6 +74,17 @@ typedef struct {
     // reduced_tx_set (from the frame header).
     // Used by get_tx_set(txSz) when decoding intra_tx_type.
     uint32_t reduced_tx_set;
+
+    // From sequence header + cdef_params() in frame header.
+    uint32_t enable_cdef;
+    uint32_t cdef_bits;
+
+    // From delta_q_params()/delta_lf_params() in frame header.
+    uint32_t delta_q_present;
+    uint32_t delta_q_res;
+    uint32_t delta_lf_present;
+    uint32_t delta_lf_res;
+    uint32_t delta_lf_multi;
 
     // Probe-only behavior toggle:
     // 0 (default): keep the lightweight "stop early" probe behavior (expected UNSUPPORTED).
@@ -154,6 +186,14 @@ typedef struct {
     bool block0_txb_skip_decoded;
     uint32_t block0_txb_skip_ctx;
     uint32_t block0_txb_skip;
+
+    // decode_block() progress: first chroma txb_skip (U/V planes), tx_index==0.
+    bool block0_u_txb_skip_decoded;
+    uint32_t block0_u_txb_skip_ctx;
+    uint32_t block0_u_txb_skip;
+    bool block0_v_txb_skip_decoded;
+    uint32_t block0_v_txb_skip_ctx;
+    uint32_t block0_v_txb_skip;
 
     // decode_block() progress: luma transform-block iteration within block0.
     // For now we only guarantee decoding the first two luma tx blocks.

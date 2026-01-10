@@ -37,6 +37,12 @@ Experimental end-of-tile check:
 
 This opt-in mode disables the probe's default early-stop (after 1-2 blocks), traverses the full partition tree (including non-SPLIT partition types), and attempts to run `exit_symbol()` after the traversal. It is expected to fail on most real tiles until full tile syntax decode exists.
 
+In try-EOT mode the probe also consumes a small amount of additional tile-level syntax:
+- `read_cdef()` (per-64x64 region CDEF index) when `enable_cdef && !skip && !coded_lossless`.
+- Initializes per-superblock `ReadDeltas` from `delta_q_present` and decodes:
+  - `read_delta_qindex()` (updates per-tile `CurrentQIndex`)
+  - `read_delta_lf()` (updates per-tile `DeltaLF[]`)
+
 When `exit_symbol()` fails, the probe annotates the error with the symbol-decoder bit position and `SymbolMaxBits` (e.g. `bitpos=... smb=...`) to help track how close we are to the true end-of-tile.
 
 Current probe behavior (m3b.D):

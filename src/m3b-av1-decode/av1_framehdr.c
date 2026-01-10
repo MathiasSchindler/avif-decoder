@@ -847,18 +847,45 @@ typedef struct {
     // Quantization state (useful for coeff CDF init later).
     uint32_t base_q_idx;
 
+    // Quantization deltas (used for per-segment Lossless derivation).
+    int32_t DeltaQYDc;
+    int32_t DeltaQUDc;
+    int32_t DeltaQUAc;
+    int32_t DeltaQVDc;
+    int32_t DeltaQVAc;
+
     // read_tx_mode() derived state:
     // 0 = ONLY_4X4, 1 = TX_MODE_LARGEST, 2 = TX_MODE_SELECT.
     uint32_t tx_mode;
 
     // reduced_tx_set (syntax element; used by get_tx_set() for tx_type parsing).
     uint32_t reduced_tx_set;
+
+    // From delta_q_params()/delta_lf_params() in the uncompressed header.
+    uint32_t delta_q_present;
+    uint32_t delta_q_res;
+    uint32_t delta_lf_present;
+    uint32_t delta_lf_res;
+    uint32_t delta_lf_multi;
+
+    // From cdef_params() in the uncompressed header.
+    uint32_t cdef_bits;
+
+    // From segmentation_params() in the uncompressed header.
+    uint32_t segmentation_enabled;
+    uint32_t seg_id_pre_skip;
+    uint32_t last_active_seg_id;
+
+    // Segmentation feature data (only SEG_LVL_ALT_Q is tracked today).
+    int32_t seg_feature_data_alt_q[8];
+    uint8_t seg_feature_enabled_alt_q[8];
 } FrameHdr;
 
 enum {
     MAX_SEGMENTS = 8,
     SEG_LVL_MAX = 8,
     SEG_LVL_ALT_Q = 0,
+    SEG_LVL_REF_FRAME = 5,
 };
 
 typedef struct {
@@ -870,12 +897,18 @@ typedef struct {
     int32_t DeltaQVAc;
 
     uint32_t delta_q_present;
+
+    uint32_t delta_q_res;
 } QuantizationState;
 
 typedef struct {
     uint32_t segmentation_enabled;
     int32_t feature_data_alt_q[MAX_SEGMENTS];
     uint8_t feature_enabled_alt_q[MAX_SEGMENTS];
+
+    // Derived during segmentation_update_data parsing.
+    uint32_t seg_id_pre_skip;
+    uint32_t last_active_seg_id;
 } SegmentationState;
 
 static bool parse_quantization_params_skip(BitReader *br,
@@ -992,6 +1025,10 @@ static bool parse_segmentation_params_skip(BitReader *br,
         return true;
     }
 
+    // Defaults per spec.
+    ss->seg_id_pre_skip = 0;
+    ss->last_active_seg_id = 0;
+
     // For our still-picture subset, primary_ref_frame is PRIMARY_REF_NONE.
     uint32_t segmentation_update_data = 1;
 
@@ -1003,6 +1040,7 @@ static bool parse_segmentation_params_skip(BitReader *br,
         static const int32_t Segmentation_Feature_Max[SEG_LVL_MAX] = {255, 63, 63, 63, 63, 7, 0, 0};
 
         for (uint32_t i = 0; i < MAX_SEGMENTS; i++) {
+            bool any_feature_enabled = false;
             for (uint32_t j = 0; j < SEG_LVL_MAX; j++) {
                 uint32_t feature_enabled;
                 if (!br_read_bit(br, &feature_enabled)) {
@@ -1012,6 +1050,16 @@ static bool parse_segmentation_params_skip(BitReader *br,
                 if (!feature_enabled) {
                     continue;
                 }
+
+                any_feature_enabled = true;
+                if (i > ss->last_active_seg_id) {
+                    ss->last_active_seg_id = i;
+                }
+                // Spec: SegIdPreSkip is set when any enabled feature has index >= SEG_LVL_REF_FRAME.
+                if (j >= (uint32_t)SEG_LVL_REF_FRAME) {
+                    ss->seg_id_pre_skip = 1;
+                }
+
                 uint8_t bitsToRead = Segmentation_Feature_Bits[j];
                 int32_t limit = Segmentation_Feature_Max[j];
                 int32_t clippedValue = 0;
@@ -1040,6 +1088,7 @@ static bool parse_segmentation_params_skip(BitReader *br,
                     ss->feature_data_alt_q[i] = clippedValue;
                 }
             }
+            (void)any_feature_enabled;
         }
     }
 
@@ -1051,6 +1100,7 @@ static bool parse_delta_q_params_skip(BitReader *br,
                                       char *err,
                                       size_t err_cap) {
     uint32_t delta_q_present = 0;
+    uint32_t delta_q_res = 0;
     if (qs->base_q_idx > 0) {
         if (!br_read_bit(br, &delta_q_present)) {
             snprintf(err, err_cap, "truncated delta_q_present");
@@ -1064,15 +1114,29 @@ static bool parse_delta_q_params_skip(BitReader *br,
             snprintf(err, err_cap, "truncated delta_q_res");
             return false;
         }
+        delta_q_res = tmp;
     }
+    qs->delta_q_res = delta_q_res;
     return true;
 }
 
 static bool parse_delta_lf_params_skip(BitReader *br,
                                        const QuantizationState *qs,
                                        uint32_t allow_intrabc,
+                                       uint32_t *out_delta_lf_present,
+                                       uint32_t *out_delta_lf_res,
+                                       uint32_t *out_delta_lf_multi,
                                        char *err,
                                        size_t err_cap) {
+    if (out_delta_lf_present) {
+        *out_delta_lf_present = 0;
+    }
+    if (out_delta_lf_res) {
+        *out_delta_lf_res = 0;
+    }
+    if (out_delta_lf_multi) {
+        *out_delta_lf_multi = 0;
+    }
     if (!qs->delta_q_present) {
         return true;
     }
@@ -1082,11 +1146,22 @@ static bool parse_delta_lf_params_skip(BitReader *br,
             snprintf(err, err_cap, "truncated delta_lf_present");
             return false;
         }
+        if (out_delta_lf_present) {
+            *out_delta_lf_present = delta_lf_present;
+        }
         if (delta_lf_present) {
             uint32_t tmp;
-            if (!br_read_bits(br, 2, &tmp) || !br_read_bit(br, &tmp)) {
+            uint32_t delta_lf_res;
+            uint32_t delta_lf_multi;
+            if (!br_read_bits(br, 2, &delta_lf_res) || !br_read_bit(br, &delta_lf_multi)) {
                 snprintf(err, err_cap, "truncated delta_lf_res/multi");
                 return false;
+            }
+            if (out_delta_lf_res) {
+                *out_delta_lf_res = delta_lf_res;
+            }
+            if (out_delta_lf_multi) {
+                *out_delta_lf_multi = delta_lf_multi;
             }
         }
     }
@@ -1185,9 +1260,13 @@ static bool parse_cdef_params_skip(BitReader *br,
                                    uint32_t allow_intrabc,
                                    uint32_t enable_cdef,
                                    uint32_t NumPlanes,
+                                   uint32_t *out_cdef_bits,
                                    char *err,
                                    size_t err_cap) {
     if (CodedLossless || allow_intrabc || !enable_cdef) {
+        if (out_cdef_bits) {
+            *out_cdef_bits = 0;
+        }
         return true;
     }
     uint32_t tmp;
@@ -1196,6 +1275,9 @@ static bool parse_cdef_params_skip(BitReader *br,
         return false;
     }
     uint32_t cdef_bits = tmp;
+    if (out_cdef_bits) {
+        *out_cdef_bits = cdef_bits;
+    }
     uint32_t n = 1u << cdef_bits;
     for (uint32_t i = 0; i < n; i++) {
         if (!br_read_bits(br, 4, &tmp) || !br_read_bits(br, 2, &tmp)) {
@@ -1508,19 +1590,46 @@ static bool skip_uncompressed_header_after_tile_info(BitReader *br,
     if (!parse_delta_q_params_skip(br, &qs, err, err_cap)) {
         return false;
     }
-    if (!parse_delta_lf_params_skip(br, &qs, fh->allow_intrabc, err, err_cap)) {
+    uint32_t delta_lf_present = 0;
+    uint32_t delta_lf_res = 0;
+    uint32_t delta_lf_multi = 0;
+    if (!parse_delta_lf_params_skip(br,
+                                   &qs,
+                                   fh->allow_intrabc,
+                                   &delta_lf_present,
+                                   &delta_lf_res,
+                                   &delta_lf_multi,
+                                   err,
+                                   err_cap)) {
         return false;
     }
 
     uint32_t CodedLossless = compute_coded_lossless(&qs, &ss);
     uint32_t AllLossless = CodedLossless && (fh->frame_width == fh->upscaled_width);
 
+    // Persist a minimal subset of uncompressed-header state that is referenced by
+    // tile syntax elements (m3b.D try-EOT mode).
+    fh->delta_q_present = qs.delta_q_present;
+    fh->delta_q_res = qs.delta_q_res;
+    fh->delta_lf_present = delta_lf_present;
+    fh->delta_lf_res = delta_lf_res;
+    fh->delta_lf_multi = delta_lf_multi;
+
     if (!parse_loop_filter_params_skip(br, CodedLossless, fh->allow_intrabc, seq->num_planes, err, err_cap)) {
         return false;
     }
-    if (!parse_cdef_params_skip(br, CodedLossless, fh->allow_intrabc, seq->enable_cdef, seq->num_planes, err, err_cap)) {
+    uint32_t cdef_bits = 0;
+    if (!parse_cdef_params_skip(br,
+                                CodedLossless,
+                                fh->allow_intrabc,
+                                seq->enable_cdef,
+                                seq->num_planes,
+                                &cdef_bits,
+                                err,
+                                err_cap)) {
         return false;
     }
+    fh->cdef_bits = cdef_bits;
     if (!parse_lr_params_skip(br,
                               AllLossless,
                               fh->allow_intrabc,
@@ -2011,10 +2120,30 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                 p.coded_lossless = fh->coded_lossless;
                 p.enable_filter_intra = seq->enable_filter_intra;
                 p.allow_screen_content_tools = fh->allow_screen_content_tools;
+                p.allow_intrabc = fh->allow_intrabc;
+                p.segmentation_enabled = fh->segmentation_enabled;
+                p.seg_id_pre_skip = fh->seg_id_pre_skip;
+                p.last_active_seg_id = fh->last_active_seg_id;
+                for (uint32_t i = 0; i < 8; i++) {
+                    p.seg_feature_enabled_alt_q[i] = (uint32_t)fh->seg_feature_enabled_alt_q[i];
+                    p.seg_feature_data_alt_q[i] = fh->seg_feature_data_alt_q[i];
+                }
                 p.disable_cdf_update = fh->disable_cdf_update;
                 p.base_q_idx = fh->base_q_idx;
+                p.delta_q_y_dc = fh->DeltaQYDc;
+                p.delta_q_u_dc = fh->DeltaQUDc;
+                p.delta_q_u_ac = fh->DeltaQUAc;
+                p.delta_q_v_dc = fh->DeltaQVDc;
+                p.delta_q_v_ac = fh->DeltaQVAc;
                 p.tx_mode = fh->tx_mode;
                 p.reduced_tx_set = fh->reduced_tx_set;
+                p.enable_cdef = seq->enable_cdef;
+                p.cdef_bits = fh->cdef_bits;
+                p.delta_q_present = fh->delta_q_present;
+                p.delta_q_res = fh->delta_q_res;
+                p.delta_lf_present = fh->delta_lf_present;
+                p.delta_lf_res = fh->delta_lf_res;
+                p.delta_lf_multi = fh->delta_lf_multi;
                 p.probe_try_exit_symbol = decode_tile_syntax_try_eot ? 1u : 0u;
                 Av1TileSyntaxProbeStats st;
                 Av1TileSyntaxProbeStatus s = av1_tile_syntax_probe(payload + cur,
@@ -2036,7 +2165,7 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                         return false;
                     }
                     printf(
-                        "    tile[%u] r%u c%u: decode-tile-syntax %s: %s (bools=%u/%u, tile_mi=%ux%u, sb=%ux%u, root_part=%s%u, part_syms=%u forced_splits=%u leafs=%u blocks_decoded=%u, block0_skip=%s%u ctx=%u, block0_y_mode=%s%u ctx=%u, block0_uv_mode=%s%u, palY=%s%u size=%s%u, palUV=%s%u size=%s%u, tx_mode=%u tx_depth=%s%u tx_size=%s tx_type=%s%u, txb_skip=%s%u block0_txb_skip_ctx=%s%u, block0_tx_blocks=%u, block0_tx1_txb_skip=%s%u block0_tx1_txb_skip_ctx=%s%u block0_tx1_xy=(%u,%u), block1_txb_skip=%s%u block1_txb_skip_ctx=%s%u block1_xy=(%u,%u), block1_eob_pt=%s%u block1_eob_pt_ctx=%s%u, block1_eob=%s%u, block1_coeff_base_eob=%s%u block1_coeff_base_eob_ctx=%s%u, block1_coeff_base=%s%u block1_coeff_base_ctx=%s%u, eob_pt=%s%u, eob=%s%u, coeff_base_eob=%s%u ctx=%u, coeff_base=%s%u ctx=%u, coeff_br=%s%u ctx=%u, dc_sign=%s%u ctx=%u, cfl=%s(signs=%u u=%d v=%d), filt=%s%u mode=%s%u, angle_y=%s%d, angle_uv=%s%d @(%u,%u) %ux%u)\n",
+                        "    tile[%u] r%u c%u: decode-tile-syntax %s: %s (bools=%u/%u, tile_mi=%ux%u, sb=%ux%u, root_part=%s%u, part_syms=%u forced_splits=%u leafs=%u blocks_decoded=%u, block0_skip=%s%u ctx=%u, block0_y_mode=%s%u ctx=%u, block0_uv_mode=%s%u, palY=%s%u size=%s%u, palUV=%s%u size=%s%u, tx_mode=%u tx_depth=%s%u tx_size=%s tx_type=%s%u, txb_skip=%s%u block0_txb_skip_ctx=%s%u, u_txb_skip=%s%u u_txb_skip_ctx=%s%u, v_txb_skip=%s%u v_txb_skip_ctx=%s%u, block0_tx_blocks=%u, block0_tx1_txb_skip=%s%u block0_tx1_txb_skip_ctx=%s%u block0_tx1_xy=(%u,%u), block1_txb_skip=%s%u block1_txb_skip_ctx=%s%u block1_xy=(%u,%u), block1_eob_pt=%s%u block1_eob_pt_ctx=%s%u, block1_eob=%s%u, block1_coeff_base_eob=%s%u block1_coeff_base_eob_ctx=%s%u, block1_coeff_base=%s%u block1_coeff_base_ctx=%s%u, eob_pt=%s%u, eob=%s%u, coeff_base_eob=%s%u ctx=%u, coeff_base=%s%u ctx=%u, coeff_br=%s%u ctx=%u, dc_sign=%s%u ctx=%u, cfl=%s(signs=%u u=%d v=%d), filt=%s%u mode=%s%u, angle_y=%s%d, angle_uv=%s%d @(%u,%u) %ux%u)\n",
                            TileNum,
                            tileRow,
                            tileCol,
@@ -2080,6 +2209,14 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                            st.block0_txb_skip_decoded ? st.block0_txb_skip : 0u,
                            st.block0_txb_skip_decoded ? "" : "n/a ",
                            st.block0_txb_skip_decoded ? st.block0_txb_skip_ctx : 0u,
+                           st.block0_u_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_u_txb_skip_decoded ? st.block0_u_txb_skip : 0u,
+                           st.block0_u_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_u_txb_skip_decoded ? st.block0_u_txb_skip_ctx : 0u,
+                           st.block0_v_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_v_txb_skip_decoded ? st.block0_v_txb_skip : 0u,
+                           st.block0_v_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_v_txb_skip_decoded ? st.block0_v_txb_skip_ctx : 0u,
                            st.block0_tx_blocks_decoded,
                            st.block0_tx1_txb_skip_decoded ? "" : "n/a ",
                            st.block0_tx1_txb_skip_decoded ? st.block0_tx1_txb_skip : 0u,
@@ -2254,10 +2391,30 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                 p.coded_lossless = fh->coded_lossless;
                 p.enable_filter_intra = seq->enable_filter_intra;
                 p.allow_screen_content_tools = fh->allow_screen_content_tools;
+                p.allow_intrabc = fh->allow_intrabc;
+                p.segmentation_enabled = fh->segmentation_enabled;
+                p.seg_id_pre_skip = fh->seg_id_pre_skip;
+                p.last_active_seg_id = fh->last_active_seg_id;
+                for (uint32_t i = 0; i < 8; i++) {
+                    p.seg_feature_enabled_alt_q[i] = (uint32_t)fh->seg_feature_enabled_alt_q[i];
+                    p.seg_feature_data_alt_q[i] = fh->seg_feature_data_alt_q[i];
+                }
                 p.disable_cdf_update = fh->disable_cdf_update;
                 p.base_q_idx = fh->base_q_idx;
+                p.delta_q_y_dc = fh->DeltaQYDc;
+                p.delta_q_u_dc = fh->DeltaQUDc;
+                p.delta_q_u_ac = fh->DeltaQUAc;
+                p.delta_q_v_dc = fh->DeltaQVDc;
+                p.delta_q_v_ac = fh->DeltaQVAc;
                 p.tx_mode = fh->tx_mode;
                 p.reduced_tx_set = fh->reduced_tx_set;
+                p.enable_cdef = seq->enable_cdef;
+                p.cdef_bits = fh->cdef_bits;
+                p.delta_q_present = fh->delta_q_present;
+                p.delta_q_res = fh->delta_q_res;
+                p.delta_lf_present = fh->delta_lf_present;
+                p.delta_lf_res = fh->delta_lf_res;
+                p.delta_lf_multi = fh->delta_lf_multi;
                 Av1TileSyntaxProbeStats st;
                 Av1TileSyntaxProbeStatus s = av1_tile_syntax_probe(payload + cur,
                                                                    (size_t)tileSize,
@@ -2278,7 +2435,7 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                         return false;
                     }
                     printf(
-                        "    tile[%u] r%u c%u: decode-tile-syntax %s: %s (bools=%u/%u, tile_mi=%ux%u, sb=%ux%u, root_part=%s%u, part_syms=%u forced_splits=%u leafs=%u blocks_decoded=%u, block0_skip=%s%u ctx=%u, block0_y_mode=%s%u ctx=%u, block0_uv_mode=%s%u, palY=%s%u size=%s%u, palUV=%s%u size=%s%u, tx_mode=%u tx_depth=%s%u tx_size=%s tx_type=%s%u, txb_skip=%s%u block0_txb_skip_ctx=%s%u, block0_tx_blocks=%u, block0_tx1_txb_skip=%s%u block0_tx1_txb_skip_ctx=%s%u block0_tx1_xy=(%u,%u), block1_txb_skip=%s%u block1_txb_skip_ctx=%s%u block1_xy=(%u,%u), block1_eob_pt=%s%u block1_eob_pt_ctx=%s%u, block1_eob=%s%u, block1_coeff_base_eob=%s%u block1_coeff_base_eob_ctx=%s%u, block1_coeff_base=%s%u block1_coeff_base_ctx=%s%u, eob_pt=%s%u, eob=%s%u, coeff_base_eob=%s%u ctx=%u, coeff_base=%s%u ctx=%u, coeff_br=%s%u ctx=%u, dc_sign=%s%u ctx=%u, cfl=%s(signs=%u u=%d v=%d), filt=%s%u mode=%s%u, angle_y=%s%d, angle_uv=%s%d @(%u,%u) %ux%u)\n",
+                        "    tile[%u] r%u c%u: decode-tile-syntax %s: %s (bools=%u/%u, tile_mi=%ux%u, sb=%ux%u, root_part=%s%u, part_syms=%u forced_splits=%u leafs=%u blocks_decoded=%u, block0_skip=%s%u ctx=%u, block0_y_mode=%s%u ctx=%u, block0_uv_mode=%s%u, palY=%s%u size=%s%u, palUV=%s%u size=%s%u, tx_mode=%u tx_depth=%s%u tx_size=%s tx_type=%s%u, txb_skip=%s%u block0_txb_skip_ctx=%s%u, u_txb_skip=%s%u u_txb_skip_ctx=%s%u, v_txb_skip=%s%u v_txb_skip_ctx=%s%u, block0_tx_blocks=%u, block0_tx1_txb_skip=%s%u block0_tx1_txb_skip_ctx=%s%u block0_tx1_xy=(%u,%u), block1_txb_skip=%s%u block1_txb_skip_ctx=%s%u block1_xy=(%u,%u), block1_eob_pt=%s%u block1_eob_pt_ctx=%s%u, block1_eob=%s%u, block1_coeff_base_eob=%s%u block1_coeff_base_eob_ctx=%s%u, block1_coeff_base=%s%u block1_coeff_base_ctx=%s%u, eob_pt=%s%u, eob=%s%u, coeff_base_eob=%s%u ctx=%u, coeff_base=%s%u ctx=%u, coeff_br=%s%u ctx=%u, dc_sign=%s%u ctx=%u, cfl=%s(signs=%u u=%d v=%d), filt=%s%u mode=%s%u, angle_y=%s%d, angle_uv=%s%d @(%u,%u) %ux%u)\n",
                            TileNum,
                            tileRow,
                            tileCol,
@@ -2322,6 +2479,14 @@ static bool parse_tile_group_obu_and_print(const uint8_t *payload,
                            st.block0_txb_skip_decoded ? st.block0_txb_skip : 0u,
                            st.block0_txb_skip_decoded ? "" : "n/a ",
                            st.block0_txb_skip_decoded ? st.block0_txb_skip_ctx : 0u,
+                           st.block0_u_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_u_txb_skip_decoded ? st.block0_u_txb_skip : 0u,
+                           st.block0_u_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_u_txb_skip_decoded ? st.block0_u_txb_skip_ctx : 0u,
+                           st.block0_v_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_v_txb_skip_decoded ? st.block0_v_txb_skip : 0u,
+                           st.block0_v_txb_skip_decoded ? "" : "n/a ",
+                           st.block0_v_txb_skip_decoded ? st.block0_v_txb_skip_ctx : 0u,
                            st.block0_tx_blocks_decoded,
                            st.block0_tx1_txb_skip_decoded ? "" : "n/a ",
                            st.block0_tx1_txb_skip_decoded ? st.block0_tx1_txb_skip : 0u,
@@ -2600,7 +2765,19 @@ static bool parse_uncompressed_header_reduced_still(const uint8_t *payload,
     // vectors intentionally truncate the header after tile_info().
     out->coded_lossless = 0;
     out->base_q_idx = 0;
+    out->DeltaQYDc = 0;
+    out->DeltaQUDc = 0;
+    out->DeltaQUAc = 0;
+    out->DeltaQVDc = 0;
+    out->DeltaQVAc = 0;
     out->tx_mode = 1; // TX_MODE_LARGEST default when unknown.
+    out->segmentation_enabled = 0;
+    out->seg_id_pre_skip = 0;
+    out->last_active_seg_id = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+        out->seg_feature_enabled_alt_q[i] = 0;
+        out->seg_feature_data_alt_q[i] = 0;
+    }
     {
         BitReader br2 = br;
         QuantizationState qs;
@@ -2610,6 +2787,19 @@ static bool parse_uncompressed_header_reduced_still(const uint8_t *payload,
             parse_segmentation_params_skip(&br2, &ss, tmp_err, sizeof(tmp_err))) {
             out->coded_lossless = compute_coded_lossless(&qs, &ss);
             out->base_q_idx = qs.base_q_idx;
+            out->DeltaQYDc = qs.DeltaQYDc;
+            out->DeltaQUDc = qs.DeltaQUDc;
+            out->DeltaQUAc = qs.DeltaQUAc;
+            out->DeltaQVDc = qs.DeltaQVDc;
+            out->DeltaQVAc = qs.DeltaQVAc;
+
+            out->segmentation_enabled = ss.segmentation_enabled;
+            out->seg_id_pre_skip = ss.seg_id_pre_skip;
+            out->last_active_seg_id = ss.last_active_seg_id;
+            for (uint32_t i = 0; i < 8; i++) {
+                out->seg_feature_enabled_alt_q[i] = ss.feature_enabled_alt_q[i];
+                out->seg_feature_data_alt_q[i] = ss.feature_data_alt_q[i];
+            }
             if (out->coded_lossless) {
                 out->tx_mode = 0; // ONLY_4X4
             }
@@ -2771,6 +2961,18 @@ static bool parse_uncompressed_header_nonreduced_still(const uint8_t *payload,
 
     out->coded_lossless = 0;
     out->base_q_idx = 0;
+    out->DeltaQYDc = 0;
+    out->DeltaQUDc = 0;
+    out->DeltaQUAc = 0;
+    out->DeltaQVDc = 0;
+    out->DeltaQVAc = 0;
+    out->segmentation_enabled = 0;
+    out->seg_id_pre_skip = 0;
+    out->last_active_seg_id = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+        out->seg_feature_enabled_alt_q[i] = 0;
+        out->seg_feature_data_alt_q[i] = 0;
+    }
     {
         BitReader br2 = br;
         QuantizationState qs;
@@ -2780,6 +2982,19 @@ static bool parse_uncompressed_header_nonreduced_still(const uint8_t *payload,
             parse_segmentation_params_skip(&br2, &ss, tmp_err, sizeof(tmp_err))) {
             out->coded_lossless = compute_coded_lossless(&qs, &ss);
             out->base_q_idx = qs.base_q_idx;
+            out->DeltaQYDc = qs.DeltaQYDc;
+            out->DeltaQUDc = qs.DeltaQUDc;
+            out->DeltaQUAc = qs.DeltaQUAc;
+            out->DeltaQVDc = qs.DeltaQVDc;
+            out->DeltaQVAc = qs.DeltaQVAc;
+
+            out->segmentation_enabled = ss.segmentation_enabled;
+            out->seg_id_pre_skip = ss.seg_id_pre_skip;
+            out->last_active_seg_id = ss.last_active_seg_id;
+            for (uint32_t i = 0; i < 8; i++) {
+                out->seg_feature_enabled_alt_q[i] = ss.feature_enabled_alt_q[i];
+                out->seg_feature_data_alt_q[i] = ss.feature_data_alt_q[i];
+            }
         }
     }
 
@@ -3071,16 +3286,38 @@ int main(int argc, char **argv) {
     printf("Sequence Header:\n");
     printf("  still_picture=%u\n", seq.still_picture);
     printf("  reduced_still_picture_header=%u\n", seq.reduced_still_picture_header);
+    printf("  enable_filter_intra=%u\n", seq.enable_filter_intra);
+    printf("  enable_cdef=%u\n", seq.enable_cdef);
 
     printf("Frame Header (partial):\n");
     printf("  frame_type=%u\n", fh.frame_type);
     printf("  show_frame=%u\n", fh.show_frame);
     printf("  error_resilient_mode=%u\n", fh.error_resilient_mode);
+        printf("  disable_cdf_update=%u\n", fh.disable_cdf_update);
     printf("  frame_width=%u\n", fh.frame_width);
     printf("  frame_height=%u\n", fh.frame_height);
     printf("  coded_width=%u\n", fh.coded_width);
     printf("  coded_height=%u\n", fh.coded_height);
     printf("  upscaled_width=%u\n", fh.upscaled_width);
+        printf("  segmentation_enabled=%u seg_id_pre_skip=%u last_active_seg_id=%u\n",
+            fh.segmentation_enabled,
+            fh.seg_id_pre_skip,
+            fh.last_active_seg_id);
+                printf("  allow_screen_content_tools=%u allow_intrabc=%u\n",
+                    fh.allow_screen_content_tools,
+                    fh.allow_intrabc);
+            printf("  base_q_idx=%u coded_lossless=%u tx_mode=%u reduced_tx_set=%u\n",
+                fh.base_q_idx,
+                fh.coded_lossless,
+                fh.tx_mode,
+                fh.reduced_tx_set);
+            printf("  delta_q_present=%u delta_q_res=%u delta_lf_present=%u delta_lf_res=%u delta_lf_multi=%u\n",
+                fh.delta_q_present,
+                fh.delta_q_res,
+                fh.delta_lf_present,
+                fh.delta_lf_res,
+                fh.delta_lf_multi);
+            printf("  cdef_bits=%u\n", fh.cdef_bits);
 
     printf("Tile info (from frame header):\n");
     printf("  tile_cols=%u tile_rows=%u\n", ti.tile_cols, ti.tile_rows);
