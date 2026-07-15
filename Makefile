@@ -27,7 +27,7 @@ $(error Unsupported architecture '$(ARCH)'; currently only x86_64 Linux is wired
 endif
 
 CFLAGS := \
-	-std=c11 -Wall -Wextra -Wpedantic -Werror -Os \
+	-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
 	-ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections -fPIE -MMD -MP -nostdinc \

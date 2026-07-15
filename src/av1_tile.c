@@ -1746,6 +1746,7 @@ static AvifdecStatus av1_tile_read_inter_mode_and_mvs(
             status = av1_tile_global_mv(config, fields, list,
                                         &fields->pred_mv[list]);
         } else {
+            if (stack.count == 0U) return AVIFDEC_INVALID_DATA;
             if (component_mode == 16U && fields->mv_stack_count <= 1U) {
                 position = 0U;
             }
@@ -2691,7 +2692,8 @@ static AvifdecStatus av1_tile_decode_mode_block(
                                    &fields, block_size);
     if (status != AVIFDEC_OK) return status;
     status = av1_block_state_record(config->block_state, &fields,
-                                    config->block_trace);
+                                    config->disable_trace
+                                        ? 0 : config->block_trace);
     if (status != AVIFDEC_OK) return status;
     if (config->before_residual != 0) {
         status = config->before_residual(config->user_data, decoder, &fields);
@@ -2712,6 +2714,7 @@ AvifdecStatus av1_tile_decode_modes(
 
     if (partition_config == 0 || mode_config == 0 ||
         mode_config->block_state == 0 || mode_config->block_trace == 0 ||
+        mode_config->disable_trace > 1U ||
         mode_config->segmentation_enabled > 1U || mode_config->allow_intrabc > 1U ||
         mode_config->seg_id_pre_skip > 1U ||
         mode_config->last_active_segment >= 8U ||
@@ -4486,28 +4489,39 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                                 (uint8_t)flip_lr, (uint8_t)flip_ud);
                             if (status != AVIFDEC_OK) return status;
                         }
-                        av1_tile_checkpoint_hash(&state->quantized_checksum, plane);
-                        av1_tile_checkpoint_hash(&state->quantized_checksum, x4);
-                        av1_tile_checkpoint_hash(&state->quantized_checksum, y4);
-                        av1_tile_checkpoint_hash(&state->quantized_checksum, tx_type);
-                        for (checkpoint = 0U; checkpoint < packed_count; ++checkpoint) {
-                            av1_tile_checkpoint_hash(&state->quantized_checksum,
-                                (uint32_t)state->quantized[checkpoint]);
-                            av1_tile_checkpoint_hash(&state->dequantized_checksum,
-                                (uint32_t)state->dequantized[checkpoint]);
+                        if (!state->disable_trace) {
+                            av1_tile_checkpoint_hash(
+                                &state->quantized_checksum, plane);
+                            av1_tile_checkpoint_hash(
+                                &state->quantized_checksum, x4);
+                            av1_tile_checkpoint_hash(
+                                &state->quantized_checksum, y4);
+                            av1_tile_checkpoint_hash(
+                                &state->quantized_checksum, tx_type);
+                            for (checkpoint = 0U; checkpoint < packed_count;
+                                 ++checkpoint) {
+                                av1_tile_checkpoint_hash(
+                                    &state->quantized_checksum,
+                                    (uint32_t)state->quantized[checkpoint]);
+                                av1_tile_checkpoint_hash(
+                                    &state->dequantized_checksum,
+                                    (uint32_t)state->dequantized[checkpoint]);
+                            }
+                            for (checkpoint = 0U; checkpoint < residual_count;
+                                 ++checkpoint) {
+                                av1_tile_checkpoint_hash(
+                                    &state->residual_checksum,
+                                    (uint32_t)state->residual[checkpoint]);
+                            }
+                            av1_tile_residual_hash(state, plane);
+                            av1_tile_residual_hash(state, x4);
+                            av1_tile_residual_hash(state, y4);
+                            av1_tile_residual_hash(state, tx_size);
+                            av1_tile_residual_hash(state, entropy_tx_type);
+                            av1_tile_residual_hash(state, result.eob);
+                            av1_tile_residual_hash(state, result.cul_level);
+                            av1_tile_residual_hash(state, result.dc_category);
                         }
-                        for (checkpoint = 0U; checkpoint < residual_count; ++checkpoint) {
-                            av1_tile_checkpoint_hash(&state->residual_checksum,
-                                (uint32_t)state->residual[checkpoint]);
-                        }
-                        av1_tile_residual_hash(state, plane);
-                        av1_tile_residual_hash(state, x4);
-                        av1_tile_residual_hash(state, y4);
-                        av1_tile_residual_hash(state, tx_size);
-                        av1_tile_residual_hash(state, entropy_tx_type);
-                        av1_tile_residual_hash(state, result.eob);
-                        av1_tile_residual_hash(state, result.cul_level);
-                        av1_tile_residual_hash(state, result.dc_category);
                     }
                 }
             }

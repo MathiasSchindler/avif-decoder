@@ -1,5 +1,6 @@
 /vendor/
 /build/
-/docs/
+/docs/*
+!/docs/profiling.md
 /images/
 /.vscode/

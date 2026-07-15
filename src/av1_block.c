@@ -189,7 +189,7 @@ AvifdecStatus av1_block_state_record(Av1BlockState *state,
     uint32_t column;
     Av1BlockCell cell;
 
-    if (state == 0 || fields == 0 || trace == 0 || fields->width == 0U ||
+    if (state == 0 || fields == 0 || fields->width == 0U ||
         fields->height == 0U || fields->width > 32U || fields->height > 32U ||
         fields->segment_id >= 8U || fields->skip > 1U ||
         fields->skip_mode > 1U || fields->is_inter > 1U ||
@@ -270,6 +270,7 @@ AvifdecStatus av1_block_state_record(Av1BlockState *state,
             state->cells[index] = cell;
         }
     }
+    if (trace == 0) return AVIFDEC_OK;
     av1_block_hash_u32(trace, fields->row);
     av1_block_hash_u32(trace, fields->column);
     av1_block_hash_u32(trace, fields->width);

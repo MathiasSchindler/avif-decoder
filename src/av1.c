@@ -235,6 +235,7 @@ typedef struct {
     uint8_t output_spatial_layer;
     uint8_t output_spatial_layer_set;
     uint8_t output_frame_seen;
+    uint8_t trace_enabled;
     int initialized;
     int saved_context_update;
 } Av1TraceState;
@@ -860,7 +861,7 @@ static AvifdecStatus av1_reference_commit(
         references->previous_frame_id = frame->current_frame_id;
         references->have_previous_frame_id = 1U;
     }
-    if (state == 0 || state->trace == 0) return AVIFDEC_OK;
+    if (state == 0 || !state->trace_enabled) return AVIFDEC_OK;
     ++state->trace->frame_count;
     if (frame->show_existing_frame) ++state->trace->show_existing_frame_count;
     av1_trace_hash_value(&state->trace->reference_state_checksum,
@@ -1571,10 +1572,12 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     status = av1_loop_filter_frame(&state->deblocked_planes,
                                    &state->block_state, &loop_filter);
     if (status != AVIFDEC_OK) return status;
-    status = av1_trace_stage_checksum(
-        &state->trace->deblocked_checksum, &state->deblocked_planes,
-        sequence, frame->frame_width, frame->frame_height);
-    if (status != AVIFDEC_OK) return status;
+    if (state->trace_enabled) {
+        status = av1_trace_stage_checksum(
+            &state->trace->deblocked_checksum, &state->deblocked_planes,
+            sequence, frame->frame_width, frame->frame_height);
+        if (status != AVIFDEC_OK) return status;
+    }
 
     avifdec_memory_fill(&cdef, 0U, sizeof(cdef));
     cdef.frame_width = frame->frame_width;
@@ -1596,10 +1599,12 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     status = av1_cdef_frame(&state->cdef_planes, &state->deblocked_planes,
                             &state->block_state, &cdef);
     if (status != AVIFDEC_OK) return status;
-    status = av1_trace_stage_checksum(
-        &state->trace->cdef_checksum, &state->cdef_planes, sequence,
-        frame->frame_width, frame->frame_height);
-    if (status != AVIFDEC_OK) return status;
+    if (state->trace_enabled) {
+        status = av1_trace_stage_checksum(
+            &state->trace->cdef_checksum, &state->cdef_planes, sequence,
+            frame->frame_width, frame->frame_height);
+        if (status != AVIFDEC_OK) return status;
+    }
 
     if (frame->upscaled_width == frame->frame_width) {
         status = av1_trace_copy_visible_planes(
@@ -1639,19 +1644,24 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
             if (status != AVIFDEC_OK) return status;
         }
     }
-    status = av1_trace_stage_checksum(
-        &state->trace->superres_checksum, &state->upscaled_cdef_planes,
-        sequence, frame->upscaled_width, frame->frame_height);
-    if (status != AVIFDEC_OK) return status;
+    if (state->trace_enabled) {
+        status = av1_trace_stage_checksum(
+            &state->trace->superres_checksum, &state->upscaled_cdef_planes,
+            sequence, frame->upscaled_width, frame->frame_height);
+        if (status != AVIFDEC_OK) return status;
+    }
     status = av1_loop_restoration_frame(
         &state->restored_planes, &state->upscaled_cdef_planes,
         &state->upscaled_deblocked_planes, &state->restoration,
         sequence->bit_depth);
     if (status != AVIFDEC_OK) return status;
-    status = av1_trace_stage_checksum(
-        &state->trace->restoration_checksum, &state->restored_planes,
-        sequence, frame->upscaled_width, frame->frame_height);
-    if (status != AVIFDEC_OK || state->image == 0) return status;
+    if (state->trace_enabled) {
+        status = av1_trace_stage_checksum(
+            &state->trace->restoration_checksum, &state->restored_planes,
+            sequence, frame->upscaled_width, frame->frame_height);
+        if (status != AVIFDEC_OK) return status;
+    }
+    if (state->image == 0) return AVIFDEC_OK;
     if (state->output_spatial_layer_set &&
         frame->spatial_id != state->output_spatial_layer) {
         return AVIFDEC_OK;
@@ -1729,6 +1739,7 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     state->residual.enable_order_hint = sequence->enable_order_hint;
     state->residual.order_hint_bits = sequence->order_hint_bits;
     state->residual.tx_mode = frame->tx_mode;
+    state->residual.disable_trace = !state->trace_enabled;
     state->residual.inter_pred0 = state->inter_pred0;
     state->residual.inter_pred1 = state->inter_pred1;
     state->residual.inter_mask = state->inter_mask;
@@ -1832,11 +1843,13 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     mode_config.monochrome = sequence->monochrome;
     mode_config.bit_depth = sequence->bit_depth;
     mode_config.superblock_mi = partition_config.superblock_mi;
+    mode_config.disable_trace = !state->trace_enabled;
     status = av1_tile_decode_modes(
         &partition_config, &mode_config, state->frame_cdfs, state->tile_cdfs,
         &partition_trace);
     if (status != AVIFDEC_OK) return status;
-    if (state->trace->tile_count == SIZE_MAX ||
+    if (state->trace_enabled &&
+        (state->trace->tile_count == SIZE_MAX ||
         state->trace->partition_nodes > SIZE_MAX - partition_trace.partition_nodes ||
         state->trace->block_count > SIZE_MAX - state->block_trace.block_count ||
         state->trace->inter_block_count >
@@ -1847,68 +1860,74 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
         state->trace->nonzero_transform_count >
             SIZE_MAX - state->residual.nonzero_transform_count ||
         state->trace->coefficient_count >
-            SIZE_MAX - state->residual.coefficient_count) {
+            SIZE_MAX - state->residual.coefficient_count)) {
         return AVIFDEC_OVERFLOW;
     }
-    ++state->trace->tile_count;
-    state->trace->partition_nodes += partition_trace.partition_nodes;
-    state->trace->block_count += state->block_trace.block_count;
-    state->trace->inter_block_count += state->block_trace.inter_block_count;
-    state->trace->compound_block_count +=
-        state->block_trace.compound_block_count;
-    state->trace->transform_count += state->residual.transform_count;
-    state->trace->nonzero_transform_count +=
-        state->residual.nonzero_transform_count;
-    state->trace->coefficient_count += state->residual.coefficient_count;
-    state->trace->transform_size_mask |= state->residual.transform_size_mask;
-    state->trace->transform_type_mask |= state->residual.transform_type_mask;
-    av1_trace_hash(state->trace, tile);
-    av1_trace_hash(state->trace, partition_trace.checksum);
-    av1_trace_hash(state->trace, state->block_trace.checksum);
-    av1_trace_hash(state->trace, state->residual.checksum);
-    av1_trace_hash_value(&state->trace->quantized_checksum,
-                         state->residual.quantized_checksum);
-    av1_trace_hash_value(&state->trace->mode_checksum,
-                         state->block_trace.mode_checksum);
-    av1_trace_hash_value(&state->trace->inter_mode_checksum,
-                         state->block_trace.inter_mode_checksum);
-    av1_trace_hash_value(&state->trace->mv_stack_checksum,
-                         state->block_trace.mv_stack_checksum);
-    av1_trace_hash_value(&state->trace->mv_checksum,
-                         state->block_trace.mv_checksum);
-    av1_trace_hash_value(&state->trace->predictor_checksum,
-                         state->residual.predictor_checksum);
-    av1_trace_hash_value(&state->trace->dequantized_checksum,
-                         state->residual.dequantized_checksum);
-    av1_trace_hash_value(&state->trace->residual_checksum,
-                         state->residual.residual_checksum);
-    av1_trace_hash(state->trace, av1_tile_cdfs_checksum(state->tile_cdfs));
+    if (state->trace_enabled) {
+        ++state->trace->tile_count;
+        state->trace->partition_nodes += partition_trace.partition_nodes;
+        state->trace->block_count += state->block_trace.block_count;
+        state->trace->inter_block_count += state->block_trace.inter_block_count;
+        state->trace->compound_block_count +=
+            state->block_trace.compound_block_count;
+        state->trace->transform_count += state->residual.transform_count;
+        state->trace->nonzero_transform_count +=
+            state->residual.nonzero_transform_count;
+        state->trace->coefficient_count += state->residual.coefficient_count;
+        state->trace->transform_size_mask |= state->residual.transform_size_mask;
+        state->trace->transform_type_mask |= state->residual.transform_type_mask;
+        av1_trace_hash(state->trace, tile);
+        av1_trace_hash(state->trace, partition_trace.checksum);
+        av1_trace_hash(state->trace, state->block_trace.checksum);
+        av1_trace_hash(state->trace, state->residual.checksum);
+        av1_trace_hash_value(&state->trace->quantized_checksum,
+                             state->residual.quantized_checksum);
+        av1_trace_hash_value(&state->trace->mode_checksum,
+                             state->block_trace.mode_checksum);
+        av1_trace_hash_value(&state->trace->inter_mode_checksum,
+                             state->block_trace.inter_mode_checksum);
+        av1_trace_hash_value(&state->trace->mv_stack_checksum,
+                             state->block_trace.mv_stack_checksum);
+        av1_trace_hash_value(&state->trace->mv_checksum,
+                             state->block_trace.mv_checksum);
+        av1_trace_hash_value(&state->trace->predictor_checksum,
+                             state->residual.predictor_checksum);
+        av1_trace_hash_value(&state->trace->dequantized_checksum,
+                             state->residual.dequantized_checksum);
+        av1_trace_hash_value(&state->trace->residual_checksum,
+                             state->residual.residual_checksum);
+        av1_trace_hash(state->trace, av1_tile_cdfs_checksum(state->tile_cdfs));
+    }
     if (tile == frame->context_update_tile_id) {
         avifdec_memory_copy(state->context_update_cdfs, state->tile_cdfs,
                             sizeof(*state->context_update_cdfs));
         state->saved_context_update = 1;
     }
     if (tile + 1U == (size_t)frame->tile_columns * frame->tile_rows) {
-        unsigned int checksum_plane;
-        unsigned int plane_count = sequence->monochrome ? 1U : 3U;
-        for (checksum_plane = 0U; checksum_plane < plane_count; ++checksum_plane) {
-            unsigned int sub_x = checksum_plane == 0U ? 0U
-                                                       : sequence->subsampling_x;
-            unsigned int sub_y = checksum_plane == 0U ? 0U
-                                                       : sequence->subsampling_y;
-            uint32_t visible_width = (frame->frame_width +
-                ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-            uint32_t visible_height = (frame->frame_height +
-                ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-            uint64_t plane_checksum;
-            status = av1_predict_checksum(
-                state->frame_planes.data[checksum_plane],
-                state->frame_planes.stride[checksum_plane],
-                visible_width, visible_height, (uint8_t)checksum_plane,
-                &plane_checksum);
-            if (status != AVIFDEC_OK) return status;
-            av1_trace_hash_value(&state->trace->reconstruction_checksum,
-                                 plane_checksum);
+        if (state->trace_enabled) {
+            unsigned int checksum_plane;
+            unsigned int plane_count = sequence->monochrome ? 1U : 3U;
+            for (checksum_plane = 0U; checksum_plane < plane_count;
+                 ++checksum_plane) {
+                unsigned int sub_x = checksum_plane == 0U ? 0U
+                    : sequence->subsampling_x;
+                unsigned int sub_y = checksum_plane == 0U ? 0U
+                    : sequence->subsampling_y;
+                uint32_t visible_width = (frame->frame_width +
+                    ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+                uint32_t visible_height = (frame->frame_height +
+                    ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+                uint64_t plane_checksum;
+                status = av1_predict_checksum(
+                    state->frame_planes.data[checksum_plane],
+                    state->frame_planes.stride[checksum_plane],
+                    visible_width, visible_height, (uint8_t)checksum_plane,
+                    &plane_checksum);
+                if (status != AVIFDEC_OK) return status;
+                av1_trace_hash_value(
+                    &state->trace->reconstruction_checksum,
+                    plane_checksum);
+            }
         }
         status = av1_trace_finish_frame(state, sequence, frame);
         if (status != AVIFDEC_OK) return status;
@@ -3536,6 +3555,7 @@ AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
     avifdec_memory_fill(&state, 0U, sizeof(state));
     avifdec_arena_init(&state.arena, workspace, workspace_size);
     state.trace = trace;
+    state.trace_enabled = 1U;
     state.output_spatial_layer =
         limits == 0 ? 0U : limits->spatial_layer;
     state.output_spatial_layer_set =
@@ -3553,11 +3573,14 @@ AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
                                  AvifdecEntropyTrace *trace,
                                  AvifdecError *error) {
     Av1TraceState state;
+    AvifdecEntropyTrace local_trace;
+    uint8_t trace_enabled = trace != 0;
 
     if (spans == 0 || span_count == 0U || info == 0 || image == 0 ||
-        trace == 0 || (workspace == 0 && workspace_size != 0U)) {
+        (workspace == 0 && workspace_size != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
+    if (trace == 0) trace = &local_trace;
     avifdec_memory_fill(trace, 0U, sizeof(*trace));
     trace->checksum = (uint64_t)1469598103934665603ULL;
     trace->reference_state_checksum = (uint64_t)1469598103934665603ULL;
@@ -3577,6 +3600,7 @@ AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
     avifdec_memory_fill(&state, 0U, sizeof(state));
     avifdec_arena_init(&state.arena, workspace, workspace_size);
     state.trace = trace;
+    state.trace_enabled = trace_enabled;
     state.image = image;
     state.output_spatial_layer =
         limits == 0 ? 0U : limits->spatial_layer;

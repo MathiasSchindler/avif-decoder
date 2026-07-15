@@ -409,8 +409,8 @@ static AvifdecStatus avif_parse_location(AvifContext *context,
         }
         for (extent_index = 0U; extent_index < extent_count; ++extent_index) {
             uint64_t ignored;
-            uint64_t extent_offset;
-            uint64_t extent_length;
+            uint64_t extent_offset = 0U;
+            uint64_t extent_length = 0U;
 
             if (index_size != 0U && avif_read_sized_uint(&reader, index_size, &ignored) != AVIFDEC_OK) break;
             if (avif_read_sized_uint(&reader, offset_size, &extent_offset) != AVIFDEC_OK ||
@@ -2267,7 +2267,7 @@ static AvifdecStatus avif_decode_item(
             status = avif_decode_item(
                 context, reference->to_item_id, depth + 1U,
                 child_workspace, arena.size - arena.used,
-                &tile_image, &tile_trace);
+                &tile_image, trace == 0 ? 0 : &tile_trace);
             if (status != AVIFDEC_OK) return status;
             avif_copy_grid_tile(
                 &grid_info, &tile_image, image, tile_index);
@@ -2395,7 +2395,8 @@ static AvifdecStatus avif_decode_item(
             status = avif_decode_item(
                 context, input_ids[input_index], depth + 1U,
                 child_workspace, arena.size - arena.used,
-                &input_images[input_index], &input_trace);
+                &input_images[input_index],
+                trace == 0 ? 0 : &input_trace);
             if (status != AVIFDEC_OK) return status;
             if (trace != 0) {
                 trace->frame_count += input_trace.frame_count;
@@ -2746,7 +2747,6 @@ AvifdecStatus avifdec_decode(const void *data,
                              AvifdecEntropyTrace *trace,
                              AvifdecError *error) {
     AvifdecImageInfo info;
-    AvifdecEntropyTrace local_trace;
     AvifContext context;
     uint32_t primary_id;
     AvifdecStatus status;
@@ -2763,12 +2763,11 @@ AvifdecStatus avifdec_decode(const void *data,
     if (status != AVIFDEC_OK) return status;
     status = avif_decode_item(
         &context, primary_id, 0U, workspace, workspace_size,
-        image, trace == 0 ? &local_trace : trace);
+        image, trace);
     if (status != AVIFDEC_OK || !info.has_alpha) return status;
     {
         AvifdecImageInfo alpha_info;
         AvifdecImage alpha_image;
-        AvifdecEntropyTrace alpha_trace;
 
         if (image->alpha_plane == 0 ||
             image->alpha_stride < info.width) {
@@ -2786,8 +2785,7 @@ AvifdecStatus avifdec_decode(const void *data,
         alpha_image.strides[0] = image->alpha_stride;
         status = avif_decode_item(
             &context, info.alpha_item_id, 0U,
-            workspace, workspace_size, &alpha_image,
-            &alpha_trace);
+            workspace, workspace_size, &alpha_image, 0);
         if (status != AVIFDEC_OK) return status;
         image->alpha_width = alpha_image.widths[0];
         image->alpha_height = alpha_image.heights[0];

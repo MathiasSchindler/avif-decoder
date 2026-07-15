@@ -76,6 +76,13 @@ void avifdec_memory_copy(void *destination, const void *source, size_t count) {
     }
 }
 
+#if defined(__STDC_HOSTED__) && !__STDC_HOSTED__
+void *memcpy(void *destination, const void *source, size_t count) {
+    avifdec_memory_copy(destination, source, count);
+    return destination;
+}
+#endif
+
 void avifdec_memory_fill(void *destination, unsigned char value, size_t count) {
     unsigned char *output = (unsigned char *)destination;
     size_t index;

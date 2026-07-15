@@ -269,6 +269,7 @@ typedef struct {
     uint8_t monochrome;
     uint8_t bit_depth;
     uint8_t superblock_mi;
+    uint8_t disable_trace;
 } Av1TileModeConfig;
 
 typedef struct {
@@ -333,6 +334,7 @@ typedef struct {
     uint8_t order_hint_bits;
     uint8_t base_q_index;
     uint8_t lossless;
+    uint8_t disable_trace;
 } Av1TileResidualState;
 
 typedef struct {

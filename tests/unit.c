@@ -3476,8 +3476,12 @@ static int test_av1_loop_restoration(void) {
         };
         static unsigned char corrupt[sizeof(file)];
         static unsigned char workspace[700000U];
+        uint16_t traced_planes[3];
+        uint16_t untraced_planes[3];
         AvifdecEntropyTrace trace;
         AvifdecImageInfo info;
+        AvifdecImage traced_image;
+        AvifdecImage untraced_image;
         AvifdecError error;
 
         CHECK(avifdec_query(file, sizeof(file), 0, 0, 0U, &info, &error) ==
@@ -3491,6 +3495,29 @@ static int test_av1_loop_restoration(void) {
             trace.nonzero_transform_count == 3U &&
             trace.coefficient_count == 3U &&
             trace.checksum == 0x786a84f4336e4869ULL);
+        avifdec_memory_fill(&traced_image, 0U, sizeof(traced_image));
+        avifdec_memory_fill(&untraced_image, 0U, sizeof(untraced_image));
+        traced_image.planes[0] = &traced_planes[0];
+        traced_image.planes[1] = &traced_planes[1];
+        traced_image.planes[2] = &traced_planes[2];
+        untraced_image.planes[0] = &untraced_planes[0];
+        untraced_image.planes[1] = &untraced_planes[1];
+        untraced_image.planes[2] = &untraced_planes[2];
+        traced_image.strides[0] = traced_image.strides[1] =
+            traced_image.strides[2] = 1U;
+        untraced_image.strides[0] = untraced_image.strides[1] =
+            untraced_image.strides[2] = 1U;
+        CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
+                    sizeof(workspace), &traced_image, &trace, &error) ==
+            AVIFDEC_OK);
+        CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
+                    sizeof(workspace), &untraced_image, 0, &error) ==
+            AVIFDEC_OK);
+        CHECK(traced_image.widths[0] == untraced_image.widths[0] &&
+            traced_image.heights[0] == untraced_image.heights[0] &&
+            traced_planes[0] == untraced_planes[0] &&
+            traced_planes[1] == untraced_planes[1] &&
+            traced_planes[2] == untraced_planes[2]);
         avifdec_memory_copy(corrupt, file, sizeof(file));
         corrupt[sizeof(corrupt) - 1U] ^= 1U;
         CHECK(avifdec_trace(corrupt, sizeof(corrupt), 0, workspace,
