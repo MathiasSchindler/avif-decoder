@@ -1,0 +1,299 @@
+# avif-decoder
+
+`avif-decoder` is a dependency-free AVIF still-image and image-sequence
+decoder written in freestanding C. The command-line executable is a static PIE
+that uses Linux system calls directly: it does not link a C library, dynamic
+loader, codec library, or image library.
+
+The decoder supports native planar YUV, packed RGB/RGBA, and PNG output. Its
+core API operates on immutable input memory and caller-owned workspace and
+output buffers, with explicit limits and structured errors for untrusted input.
+
+## Build
+
+The supplied executable currently targets Linux/x86-64:
+
+```sh
+make
+```
+
+This produces:
+
+```text
+build/x86_64/avifdec
+```
+
+Run the complete test suite with:
+
+```sh
+make test
+```
+
+`make`, `make test`, and `make clean` are the complete public Makefile
+interface.
+
+## Command-line usage
+
+Inspect and validate a still image:
+
+```sh
+build/x86_64/avifdec image.avif
+```
+
+Inspect only the ISOBMFF box structure:
+
+```sh
+build/x86_64/avifdec --boxes image.avif
+```
+
+Decode a still image:
+
+```sh
+build/x86_64/avifdec --png image.avif image.png
+build/x86_64/avifdec --raw image.avif image.yuv
+build/x86_64/avifdec --rgb image.avif image.rgb
+build/x86_64/avifdec --rgba image.avif image.rgba
+build/x86_64/avifdec --rgb16 image.avif image.rgb16
+build/x86_64/avifdec --rgba16 image.avif image.rgba16
+```
+
+The `--rgba-premul` and `--rgba16-premul` variants request premultiplied
+packed output. Normal RGBA and PNG output use straight alpha.
+
+Query an `avis` image sequence:
+
+```sh
+build/x86_64/avifdec animation.avif
+```
+
+Decode an indexed sequence frame:
+
+```sh
+build/x86_64/avifdec --png-frame 7 animation.avif frame-7.png
+build/x86_64/avifdec --raw-frame 7 animation.avif frame-7.yuv
+```
+
+Sequence query output includes frame count, timescale, duration, alpha mode,
+and repetition information. Frame output includes DTS, duration, sync status,
+and the sync frame used for random access.
+
+## Output formats
+
+### PNG
+
+PNG output is encoded internally without zlib or another image library.
+
+- 8-bit AVIF input produces PNG8.
+- 10- and 12-bit AVIF input produces PNG16.
+- Alpha is written as straight RGBA.
+- `pasp` is preserved through a PNG `pHYs` chunk.
+- NCLX primaries and transfer characteristics are preserved through `cICP`.
+
+The encoder uses valid stored DEFLATE blocks rather than entropy compression,
+so its PNG files prioritize simplicity and independence over file size.
+
+### Raw planar YUV
+
+`--raw` and `--raw-frame` write the decoded Y plane followed by U and V.
+Monochrome images contain only Y. Samples are one byte at 8-bit depth and
+little-endian 16-bit values at 10- or 12-bit depth.
+
+Raw output does not include an auxiliary alpha plane; use PNG or the public API
+when alpha is required.
+
+### Packed RGB
+
+Packed output is tightly ordered RGB or RGBA. The 16-bit CLI formats use
+host-native byte order.
+
+The converter supports:
+
+- identity RGB mapping for 4:4:4 content;
+- BT.709;
+- BT.601-compatible matrix coefficients;
+- BT.2020 non-constant-luminance;
+- full and limited ranges;
+- monochrome input;
+- straight and premultiplied alpha;
+- clean aperture, rotation, and mirroring.
+
+Chroma upsampling is deterministic nearest-neighbor sampling. ICC transforms,
+transfer-function conversion, HDR display mapping, and tone-map application
+are not performed. The original ICC, NCLX, HDR, and tone-map metadata remains
+available through the API.
+
+## AVIF container support
+
+Still-image item support includes:
+
+- `pitm`, `iloc` versions 0-2, `iinf`/`infe`, `iprp`/`ipco`/`ipma`;
+- `mdat` and `idat` payloads with multiple extents;
+- item-wide `iref` relationships and cycle-checked derived graphs;
+- `av1C`, `ispe`, `pixi`, ICC and NCLX `colr`;
+- `clap`, `irot`, `imir`, and `pasp`;
+- auxiliary alpha through `auxC`, `auxl`, and `prem`;
+- full and partial-edge image grids;
+- `a1op`, `lsel`, and `a1lx` layered images;
+- checked sample-transform (`sato`) expressions;
+- CLL/MDCV and opaque tone-map/gain-map metadata.
+
+Unknown non-essential item properties are skipped. Unknown essential
+properties return `AVIFDEC_UNSUPPORTED`.
+
+Image-sequence track support includes:
+
+- `moov`, `trak`, `mdia`, `minf`, and `stbl`;
+- `av01` visual sample entries and `av1C`;
+- `stts` and version 0/1 `ctts` timing;
+- `stsc`, `stsz`, compact 4/8/16-bit `stz2`, `stco`, and `co64`;
+- explicit `stss` sync samples or implicit all-sync tracks;
+- finite and infinite repetition reporting;
+- synchronized `auxv` alpha tracks;
+- `auxl` and `prem` track relationships;
+- nearest-sync random access followed by dependent-sample decoding.
+
+One normal edit-list entry with media time zero and playback rate 1.0 is
+supported. Multi-entry edits and non-identity track matrices return
+`AVIFDEC_UNSUPPORTED`.
+
+## AV1 decoding support
+
+The AV1 decoder supports Main, High, and Professional profiles at 8, 10, and
+12 bits, including monochrome, 4:2:0, 4:2:2, and 4:4:4.
+
+Implemented decoding includes:
+
+- low-overhead OBU framing and explicitly selected Annex-B framing;
+- operating-point and spatial-layer selection;
+- key, intra-only, inter, switch, and show-existing frames;
+- retained reference frames and frame-context updates;
+- all intra predictors, directional modes, filter intra, CfL, and palettes;
+- translational, scaled, compound, inter-intra, warped, OBMC, intrabc, and
+  skip-mode prediction;
+- sub-8x8 chroma prediction and variable inter transforms;
+- coefficient entropy decoding, quantization matrices, dequantization, and
+  inverse transforms;
+- deblocking, CDEF, super-resolution, Wiener restoration, and self-guided
+  restoration;
+- display-only film-grain synthesis without contaminating reference frames;
+- HDR CLL/MDCV, scalability, ITU-T T.35, and timecode metadata.
+
+Tile-list OBUs and large-scale-tile mode are intentionally not supported and
+are reported through capability flags and `AVIFDEC_UNSUPPORTED`.
+
+## Public API
+
+The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.0.0 is
+reported by:
+
+```c
+AVIFDEC_VERSION_MAJOR
+AVIFDEC_VERSION_MINOR
+AVIFDEC_VERSION_PATCH
+avifdec_version_string()
+```
+
+### Still images
+
+The usual workflow is:
+
+1. Call `avifdec_query()` to validate the image, inspect its format, and obtain
+   `workspace_required`.
+2. Allocate workspace and output planes.
+3. Call `avifdec_decode()`.
+4. Optionally call `avifdec_image_to_rgb()` for packed presentation output.
+
+`avifdec_trace()` performs full decoding without caller output planes and
+returns deterministic syntax and reconstruction checksums.
+
+### Image sequences
+
+Use:
+
+- `avifdec_sequence_query()` for track-level metadata;
+- `avifdec_sequence_frame_query()` for one frame's format, timing, sync point,
+  and workspace requirement;
+- `avifdec_sequence_decode_frame()` for indexed decoding.
+
+Decoding frame *N* starts from its nearest preceding sync sample and processes
+all required samples through *N*. This reconstructs reference-dependent frames
+without keeping decoder state between API calls.
+
+### Ownership and memory
+
+- Input bytes remain owned by the caller.
+- ICC and other byte views point into the input buffer.
+- Workspace and all output planes are caller-owned.
+- The core performs no allocation and no file I/O.
+- Separate input, workspace, output, trace, and error objects make calls
+  reentrant.
+- Workspace may be unaligned; internal arena allocations align absolute
+  pointers safely.
+
+`AvifdecImage` uses 16-bit sample storage for all source bit depths. Strides are
+measured in samples, not bytes.
+
+### Limits and errors
+
+`AvifdecLimits` bounds:
+
+- width, height, and total pixels;
+- items, extents, and properties;
+- OBUs and frames;
+- operating point and selected spatial layer;
+- low-overhead versus Annex-B framing.
+
+Default sequence and AV1 frame capacity is 256 frames. The CLI additionally
+rejects input files larger than 1 GiB.
+
+All APIs return `AvifdecStatus`. `AvifdecError` reports the first failure's
+absolute byte offset and containing box or OBU type when available. Invalid
+syntax, truncation, arithmetic overflow, configured limits, insufficient
+workspace, and valid-but-unsupported features are distinct outcomes.
+
+`avifdec_capabilities()` returns feature bits for the supported AV1, AVIF,
+presentation, RGB, film-grain, and sequence surfaces.
+
+## Validation
+
+`make test` includes:
+
+- strict freestanding and hosted ASan/UBSan unit binaries;
+- checked arithmetic, readers, arena alignment, PNG, transforms, prediction,
+  filters, film grain, and malformed-input vectors;
+- recursive BMFF and 34-file AVIF corpus tests;
+- generated-table reproduction checks;
+- byte-exact native YUV comparisons against libaom/libavif;
+- block-level syntax, predictor, coefficient, motion-vector, reference-state,
+  and filter-stage comparisons against instrumented libaom;
+- RGB(A) presentation checks for transforms, alpha, grids, and layers;
+- PNG8 and PNG16 round-trip comparisons;
+- timed image-sequence tests covering dependent-frame seeking, varied
+  durations, finite/infinite repetition, compact sample tables, straight and
+  premultiplied alpha, repeated decoding, and malformed tables.
+
+The trusted test programs are development-time or test-time tools only. They
+are never linked into `avifdec`.
+
+A hosted coverage-guided harness is available at
+[`tests/fuzz.c`](tests/fuzz.c) for Clang
+`-fsanitize=fuzzer,address,undefined` campaigns.
+
+## Known limitations
+
+- The supplied freestanding executable is wired only for Linux/x86-64.
+- Tile-list OBUs and large-scale-tile mode are unsupported.
+- Tone-map/gain-map metadata is retained but not applied.
+- ICC color transforms and transfer-function conversion are not applied.
+- Sequence edit lists are restricted to the normal single-entry form.
+- Sequence track matrices must be identity.
+- PNG encoding is intentionally uncompressed beyond stored DEFLATE framing.
+
+## License and authorship
+
+The project source code is released under the
+[CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/)
+public-domain dedication.
+
+Most of the source code was written by large language models, predominantly
+GPT-5.6 Sol, under human direction and review.

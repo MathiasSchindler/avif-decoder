@@ -1,0 +1,688 @@
+diff --git a/av1/decoder/decodeframe.c b/av1/decoder/decodeframe.c
+index ca9f0a4..3b55967 100644
+--- a/av1/decoder/decodeframe.c
++++ b/av1/decoder/decodeframe.c
+@@ -14,6 +14,9 @@
+ #include <stddef.h>
+ 
+ #include "config/aom_config.h"
++#if CONFIG_INSPECTION
++#include <stdio.h>
++#endif
+ #include "config/aom_scale_rtcd.h"
+ 
+ #include "aom/aom_codec.h"
+@@ -78,6 +81,164 @@
+ #define AOM_MIN_THREADS_PER_TILE 1
+ #define AOM_MAX_THREADS_PER_TILE 2
+ 
++#if CONFIG_INSPECTION
++#define AVIFDEC_FNV_OFFSET UINT64_C(1469598103934665603)
++#define AVIFDEC_FNV_PRIME UINT64_C(1099511628211)
++
++static void avifdec_reference_hash(uint64_t *checksum, uint64_t value) {
++  for (int byte = 0; byte < 8; ++byte) {
++    *checksum ^= (uint8_t)(value >> (byte * 8));
++    *checksum *= AVIFDEC_FNV_PRIME;
++  }
++}
++
++static uint64_t avifdec_stage_checksum(const AV1_COMMON *cm) {
++  const YV12_BUFFER_CONFIG *const frame = &cm->cur_frame->buf;
++  uint64_t checksum = AVIFDEC_FNV_OFFSET;
++  const int high_bitdepth = cm->seq_params->use_highbitdepth;
++  for (int plane = 0; plane < av1_num_planes(cm); ++plane) {
++    const int is_uv = plane > 0;
++    const int width = frame->crop_widths[is_uv];
++    const int height = frame->crop_heights[is_uv];
++    const int stride = frame->strides[is_uv];
++    uint64_t plane_checksum = AVIFDEC_FNV_OFFSET;
++    plane_checksum ^= (uint8_t)plane;
++    plane_checksum *= AVIFDEC_FNV_PRIME;
++    for (int row = 0; row < height; ++row) {
++      for (int column = 0; column < width; ++column) {
++        const uint16_t sample = high_bitdepth
++            ? CONVERT_TO_SHORTPTR(frame->buffers[plane])[row * stride + column]
++            : frame->buffers[plane][row * stride + column];
++        plane_checksum ^= (uint8_t)sample;
++        plane_checksum *= AVIFDEC_FNV_PRIME;
++        plane_checksum ^= (uint8_t)(sample >> 8);
++        plane_checksum *= AVIFDEC_FNV_PRIME;
++      }
++    }
++    avifdec_reference_hash(&checksum, plane_checksum);
++  }
++  return checksum;
++}
++
++static void avifdec_print_stage_plane_checksums(const AV1_COMMON *cm,
++                                                 const char *stage) {
++  const YV12_BUFFER_CONFIG *const frame = &cm->cur_frame->buf;
++  const int high_bitdepth = cm->seq_params->use_highbitdepth;
++  for (int plane = 0; plane < av1_num_planes(cm); ++plane) {
++    const int is_uv = plane > 0;
++    const int width = frame->crop_widths[is_uv];
++    const int height = frame->crop_heights[is_uv];
++    const int stride = frame->strides[is_uv];
++    uint64_t checksum = AVIFDEC_FNV_OFFSET;
++    checksum ^= (uint8_t)plane;
++    checksum *= AVIFDEC_FNV_PRIME;
++    for (int row = 0; row < height; ++row) {
++      for (int column = 0; column < width; ++column) {
++        const uint16_t sample = high_bitdepth
++            ? CONVERT_TO_SHORTPTR(frame->buffers[plane])[row * stride + column]
++            : frame->buffers[plane][row * stride + column];
++        checksum ^= (uint8_t)sample;
++        checksum *= AVIFDEC_FNV_PRIME;
++        checksum ^= (uint8_t)(sample >> 8);
++        checksum *= AVIFDEC_FNV_PRIME;
++      }
++    }
++    fprintf(stderr, "avifdec_%s_plane_checksum=0x%016llx\n", stage,
++            (unsigned long long)checksum);
++  }
++}
++
++static int avifdec_cfl_alpha(uint8_t alpha_idx, int8_t joint_sign,
++                             int plane) {
++  const int sign = plane == 0 ? CFL_SIGN_U(joint_sign)
++                              : CFL_SIGN_V(joint_sign);
++  if (sign == CFL_SIGN_ZERO) return 0;
++  const int magnitude = (plane == 0 ? CFL_IDX_U(alpha_idx)
++                                    : CFL_IDX_V(alpha_idx)) + 1;
++  return sign == CFL_SIGN_POS ? magnitude : -magnitude;
++}
++
++static void avifdec_hash_mode(DecoderCodingBlock *dcb, int mi_row, int mi_col,
++                              int width, int height) {
++  MACROBLOCKD *const xd = &dcb->xd;
++  MB_MODE_INFO *const mbmi = dcb->xd.mi[0];
++  AvifdecReferenceTrace *const trace = dcb->avifdec_reference_trace;
++  if (trace == NULL) return;
++  if (is_inter_block(mbmi)) {
++    const int ref_type = av1_ref_frame_type(mbmi->ref_frame);
++    const int count = dcb->ref_mv_count[ref_type];
++    ++trace->inter_block_count;
++    if (has_second_ref(mbmi)) ++trace->compound_block_count;
++    if (is_interintra_pred(mbmi)) ++trace->interintra_block_count;
++    if (mbmi->motion_mode == OBMC_CAUSAL) ++trace->obmc_block_count;
++    if (mbmi->motion_mode == WARPED_CAUSAL) ++trace->local_warp_block_count;
++    if (is_global_mv_block(
++            mbmi, xd->global_motion[mbmi->ref_frame[0]].wmtype)) {
++      ++trace->global_warp_block_count;
++    }
++    if (mbmi->skip_mode) ++trace->skip_mode_block_count;
++    trace->inter_mode_mask |= UINT64_C(1) << mbmi->mode;
++    trace->interpolation_filter_mask |=
++        UINT64_C(1) << av1_extract_interp_filter(mbmi->interp_filters, 0);
++    trace->interpolation_filter_mask |=
++        UINT64_C(1) << av1_extract_interp_filter(mbmi->interp_filters, 1);
++    trace->motion_mode_mask |= UINT64_C(1) << mbmi->motion_mode;
++    fprintf(stderr,
++            "avifdec_inter_block=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
++            mi_row, mi_col, width, height, mbmi->mode, mbmi->motion_mode,
++            mbmi->num_proj_ref, mbmi->mv[0].as_mv.row,
++            mbmi->mv[0].as_mv.col, mbmi->ref_mv_idx, count,
++            count > 0 ? xd->ref_mv_stack[ref_type][0].this_mv.as_mv.row : 0,
++            count > 0 ? xd->ref_mv_stack[ref_type][0].this_mv.as_mv.col : 0,
++            mbmi->ref_frame[0], mbmi->ref_frame[1]);
++    avifdec_reference_hash(&trace->inter_mode_checksum, mi_row);
++    avifdec_reference_hash(&trace->inter_mode_checksum, mi_col);
++    avifdec_reference_hash(&trace->inter_mode_checksum, mbmi->ref_frame[0]);
++    avifdec_reference_hash(&trace->inter_mode_checksum,
++                           has_second_ref(mbmi) ? mbmi->ref_frame[1] : 0);
++    avifdec_reference_hash(&trace->inter_mode_checksum, mbmi->mode);
++    avifdec_reference_hash(&trace->inter_mode_checksum, mbmi->ref_mv_idx);
++    avifdec_reference_hash(&trace->mv_stack_checksum, count);
++    for (int index = 0; index < count; ++index) {
++      avifdec_reference_hash(
++          &trace->mv_stack_checksum,
++          (uint32_t)xd->ref_mv_stack[ref_type][index].this_mv.as_mv.row);
++      avifdec_reference_hash(
++          &trace->mv_stack_checksum,
++          (uint32_t)xd->ref_mv_stack[ref_type][index].this_mv.as_mv.col);
++      avifdec_reference_hash(
++          &trace->mv_stack_checksum,
++          (uint32_t)xd->ref_mv_stack[ref_type][index].comp_mv.as_mv.row);
++      avifdec_reference_hash(
++          &trace->mv_stack_checksum,
++          (uint32_t)xd->ref_mv_stack[ref_type][index].comp_mv.as_mv.col);
++      avifdec_reference_hash(&trace->mv_stack_checksum,
++                             xd->weight[ref_type][index]);
++    }
++    avifdec_reference_hash(&trace->mv_checksum,
++                           (uint32_t)mbmi->mv[0].as_mv.row);
++    avifdec_reference_hash(&trace->mv_checksum,
++                           (uint32_t)mbmi->mv[0].as_mv.col);
++    avifdec_reference_hash(&trace->mv_checksum,
++                           (uint32_t)mbmi->mv[1].as_mv.row);
++    avifdec_reference_hash(&trace->mv_checksum,
++                           (uint32_t)mbmi->mv[1].as_mv.col);
++  }
++  if (is_intrabc_block(mbmi)) {
++    ++trace->intrabc_block_count;
++    fprintf(stderr, "avifdec_intrabc_block=%d,%d,%d,%d,%d,%d\n",
++            mi_row, mi_col, width, height, mbmi->mv[0].as_mv.row,
++            mbmi->mv[0].as_mv.col);
++  }
++  uint64_t *const checksum = &trace->mode_checksum;
++  const int angle_delta_y =
++      mbmi->mode >= V_PRED && mbmi->mode <= D67_PRED
++          ? mbmi->angle_delta[PLANE_TYPE_Y]
++          : 0;
++  const int angle_delta_uv =
++      mbmi->uv_mode >= UV_V_PRED && mbmi->uv_mode <= UV_D67_PRED
++          ? mbmi->angle_delta[PLANE_TYPE_UV]
++          : 0;
++  const int use_filter_intra =
++      mbmi->filter_intra_mode_info.use_filter_intra;
++  const int cfl_alpha_u =
++      mbmi->uv_mode == UV_CFL_PRED
++          ? avifdec_cfl_alpha(mbmi->cfl_alpha_idx, mbmi->cfl_alpha_signs, 0)
++          : 0;
++  const int cfl_alpha_v =
++      mbmi->uv_mode == UV_CFL_PRED
++          ? avifdec_cfl_alpha(mbmi->cfl_alpha_idx, mbmi->cfl_alpha_signs, 1)
++          : 0;
++  ++trace->block_count;
++  if ((mbmi->mode >= V_PRED && mbmi->mode <= D67_PRED) ||
++      (mbmi->uv_mode >= UV_V_PRED && mbmi->uv_mode <= UV_D67_PRED)) {
++    ++trace->directional_block_count;
++  }
++  if (mbmi->palette_mode_info.palette_size[0] != 0 ||
++      mbmi->palette_mode_info.palette_size[1] != 0) {
++    ++trace->palette_block_count;
++  }
++  if (mbmi->uv_mode == UV_CFL_PRED) ++trace->cfl_block_count;
++  if (use_filter_intra) ++trace->filter_intra_block_count;
++  avifdec_reference_hash(checksum, mi_row);
++  avifdec_reference_hash(checksum, mi_col);
++  avifdec_reference_hash(checksum, width);
++  avifdec_reference_hash(checksum, height);
++  avifdec_reference_hash(checksum, mbmi->mode);
++  avifdec_reference_hash(checksum, mbmi->uv_mode);
++  avifdec_reference_hash(checksum, (uint8_t)angle_delta_y);
++  avifdec_reference_hash(checksum, (uint8_t)angle_delta_uv);
++  avifdec_reference_hash(checksum, use_filter_intra);
++  avifdec_reference_hash(
++      checksum, use_filter_intra
++                    ? mbmi->filter_intra_mode_info.filter_intra_mode
++                    : 0);
++  const PALETTE_MODE_INFO *const palette = &mbmi->palette_mode_info;
++  avifdec_reference_hash(checksum, palette->palette_size[0]);
++  avifdec_reference_hash(checksum, palette->palette_size[1]);
++  avifdec_reference_hash(checksum, (uint8_t)cfl_alpha_u);
++  avifdec_reference_hash(checksum, (uint8_t)cfl_alpha_v);
++  for (int index = 0; index < palette->palette_size[0]; ++index) {
++    avifdec_reference_hash(checksum, palette->palette_colors[index]);
++  }
++  for (int index = 0; index < palette->palette_size[1]; ++index) {
++    avifdec_reference_hash(
++        checksum, palette->palette_colors[PALETTE_MAX_SIZE + index]);
++    avifdec_reference_hash(
++        checksum, palette->palette_colors[2 * PALETTE_MAX_SIZE + index]);
++  }
++}
++
++static void avifdec_hash_predictor(const AV1_COMMON *cm,
++                                   DecoderCodingBlock *dcb, int plane,
++                                   int row, int col, TX_SIZE tx_size) {
++  MACROBLOCKD *const xd = &dcb->xd;
++  struct macroblockd_plane *const pd = &xd->plane[plane];
++  AvifdecReferenceTrace *const trace = dcb->avifdec_reference_trace;
++  if (trace == NULL) return;
++  uint64_t *const checksum = &trace->predictor_checksum;
++  const int mi_row = -xd->mb_to_top_edge >> (3 + MI_SIZE_LOG2);
++  const int mi_col = -xd->mb_to_left_edge >> (3 + MI_SIZE_LOG2);
++  const int x4 = (mi_col >> pd->subsampling_x) + col;
++  const int y4 = (mi_row >> pd->subsampling_y) + row;
++  const int max_x4 =
++      (cm->mi_params.mi_cols + pd->subsampling_x) >> pd->subsampling_x;
++  const int max_y4 =
++      (cm->mi_params.mi_rows + pd->subsampling_y) >> pd->subsampling_y;
++  const int width4 = AOMMIN(tx_size_wide_unit[tx_size], max_x4 - x4);
++  const int height4 = AOMMIN(tx_size_high_unit[tx_size], max_y4 - y4);
++  const int width = width4 << MI_SIZE_LOG2;
++  const int height = height4 << MI_SIZE_LOG2;
++  const int offset = (row * pd->dst.stride + col) << MI_SIZE_LOG2;
++  avifdec_reference_hash(checksum, plane);
++  avifdec_reference_hash(checksum, x4);
++  avifdec_reference_hash(checksum, y4);
++  avifdec_reference_hash(checksum, tx_size);
++  if (cm->seq_params->use_highbitdepth) {
++    const uint16_t *const predictor = CONVERT_TO_SHORTPTR(pd->dst.buf) + offset;
++    for (int y = 0; y < height; ++y) {
++      for (int x = 0; x < width; ++x) {
++        avifdec_reference_hash(checksum,
++                               predictor[y * pd->dst.stride + x]);
++      }
++    }
++  } else {
++    const uint8_t *const predictor = pd->dst.buf + offset;
++    for (int y = 0; y < height; ++y) {
++      for (int x = 0; x < width; ++x) {
++        avifdec_reference_hash(checksum,
++                               predictor[y * pd->dst.stride + x]);
++      }
++    }
++  }
++}
++#endif
++
+ // This is needed by ext_tile related unit tests.
+ #define EXT_TILE_DEBUG 1
+ #define MC_TEMP_BUF_PELS                           \
+@@ -220,6 +381,9 @@ static inline void predict_and_reconstruct_intra_block(
+   PLANE_TYPE plane_type = get_plane_type(plane);
+ 
+   av1_predict_intra_block_facade(cm, xd, plane, col, row, tx_size);
++#if CONFIG_INSPECTION
++  avifdec_hash_predictor(cm, dcb, plane, row, col, tx_size);
++#endif
+ 
+   if (!mbmi->skip_txfm) {
+     eob_info *eob_data = dcb->eob_data[plane] + dcb->txb_offset[plane];
+@@ -387,6 +551,11 @@ static inline void decode_mbmi_block(AV1Decoder *const pbi,
+   set_offsets(cm, xd, bsize, mi_row, mi_col, bw, bh, x_mis, y_mis);
+   xd->mi[0]->partition = partition;
+   av1_read_mode_info(pbi, dcb, r, x_mis, y_mis);
++#if CONFIG_INSPECTION
++  avifdec_hash_mode(dcb, mi_row, mi_col,
++                    mi_size_wide[dcb->xd.mi[0]->bsize],
++                    mi_size_high[dcb->xd.mi[0]->bsize]);
++#endif
+   if (bsize >= BLOCK_8X8 &&
+       (seq_params->subsampling_x || seq_params->subsampling_y)) {
+     const BLOCK_SIZE uv_subsize =
+@@ -5200,6 +5369,16 @@ uint32_t av1_decode_frame_headers_and_setup(AV1Decoder *pbi,
+ 
+   read_uncompressed_header(pbi, rb);
+ 
++#if CONFIG_INSPECTION
++  memset(&pbi->avifdec_reference_trace, 0,
++         sizeof(pbi->avifdec_reference_trace));
++  pbi->avifdec_reference_trace.mode_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->avifdec_reference_trace.inter_mode_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->avifdec_reference_trace.mv_stack_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->avifdec_reference_trace.mv_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->avifdec_reference_trace.predictor_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->avifdec_reference_trace.quantized_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->avifdec_reference_trace.dequantized_checksum = AVIFDEC_FNV_OFFSET;
++  pbi->dcb.avifdec_reference_trace = &pbi->avifdec_reference_trace;
++#endif
++
+   if (trailing_bits_present) av1_check_trailing_bits(pbi, rb);
+ 
+   if (!cm->tiles.single_tile_decoding &&
+@@ -5314,6 +5493,10 @@ void av1_decode_tg_tiles_and_wrapup(AV1Decoder *pbi, const uint8_t *data,
+                                num_planes, 0, pbi->tile_workers,
+                                pbi->num_workers, &pbi->lf_row_sync, 0);
+     }
++#if CONFIG_INSPECTION
++    pbi->avifdec_reference_trace.deblocked_checksum =
++        avifdec_stage_checksum(cm);
++#endif
+ 
+     const int do_cdef =
+         !pbi->skip_loop_filter && !cm->features.coded_lossless &&
+@@ -5344,8 +5527,15 @@ void av1_decode_tg_tiles_and_wrapup(AV1Decoder *pbi, const uint8_t *data,
+                          av1_cdef_init_fb_row);
+         }
+       }
++    #if CONFIG_INSPECTION
++      pbi->avifdec_reference_trace.cdef_checksum = avifdec_stage_checksum(cm);
++    #endif
+ 
+       superres_post_decode(pbi);
++    #if CONFIG_INSPECTION
++      pbi->avifdec_reference_trace.superres_checksum =
++          avifdec_stage_checksum(cm);
++    #endif
+ 
+       if (do_loop_restoration) {
+         av1_loop_restoration_save_boundary_lines(&pbi->common.cur_frame->buf,
+@@ -5364,6 +5554,11 @@ void av1_decode_tg_tiles_and_wrapup(AV1Decoder *pbi, const uint8_t *data,
+     } else {
+       // In no cdef and no superres case. Provide an optimized version of
+       // loop_restoration_filter.
++#if CONFIG_INSPECTION
++      pbi->avifdec_reference_trace.cdef_checksum = avifdec_stage_checksum(cm);
++      pbi->avifdec_reference_trace.superres_checksum =
++          pbi->avifdec_reference_trace.cdef_checksum;
++#endif
+       if (do_loop_restoration) {
+         if (pbi->num_workers > 1) {
+           av1_loop_restoration_filter_frame_mt(
+@@ -5377,6 +5572,10 @@ void av1_decode_tg_tiles_and_wrapup(AV1Decoder *pbi, const uint8_t *data,
+         }
+       }
+     }
+   }
++#if CONFIG_INSPECTION
++  pbi->avifdec_reference_trace.restoration_checksum =
++      avifdec_stage_checksum(cm);
++  avifdec_print_stage_plane_checksums(cm, "restoration");
++#endif
+ 
+   if (!pbi->dcb.corrupted) {
+@@ -5394,6 +5593,46 @@ void av1_decode_tg_tiles_and_wrapup(AV1Decoder *pbi, const uint8_t *data,
+   if (pbi->inspect_cb != NULL) {
+     (*pbi->inspect_cb)(pbi, pbi->inspect_ctx);
+   }
++  uint64_t mode_checksum = AVIFDEC_FNV_OFFSET;
++  uint64_t predictor_checksum = AVIFDEC_FNV_OFFSET;
++  uint64_t quantized_checksum = AVIFDEC_FNV_OFFSET;
++  uint64_t dequantized_checksum = AVIFDEC_FNV_OFFSET;
++  AvifdecReferenceTrace *const trace = &pbi->avifdec_reference_trace;
++  avifdec_reference_hash(&mode_checksum, trace->mode_checksum);
++  avifdec_reference_hash(&predictor_checksum, trace->predictor_checksum);
++  avifdec_reference_hash(&quantized_checksum, trace->quantized_checksum);
++  avifdec_reference_hash(&dequantized_checksum,
++                         trace->dequantized_checksum);
++  fprintf(stderr, "avifdec_mode_checksum=0x%016llx\n",
++          (unsigned long long)mode_checksum);
++  fprintf(stderr, "avifdec_inter_mode_tile_checksum=0x%016llx\n",
++          (unsigned long long)trace->inter_mode_checksum);
++  fprintf(stderr, "avifdec_mv_stack_tile_checksum=0x%016llx\n",
++          (unsigned long long)trace->mv_stack_checksum);
++  fprintf(stderr, "avifdec_mv_tile_checksum=0x%016llx\n",
++          (unsigned long long)trace->mv_checksum);
++  fprintf(stderr, "avifdec_predictor_checksum=0x%016llx\n",
++          (unsigned long long)predictor_checksum);
++  fprintf(stderr, "avifdec_quantized_checksum=0x%016llx\n",
++          (unsigned long long)quantized_checksum);
++  fprintf(stderr, "avifdec_dequantized_checksum=0x%016llx\n",
++          (unsigned long long)dequantized_checksum);
++  fprintf(stderr, "avifdec_deblocked_checksum=0x%016llx\n",
++          (unsigned long long)trace->deblocked_checksum);
++  fprintf(stderr, "avifdec_cdef_checksum=0x%016llx\n",
++          (unsigned long long)trace->cdef_checksum);
++  fprintf(stderr, "avifdec_superres_checksum=0x%016llx\n",
++          (unsigned long long)trace->superres_checksum);
++  fprintf(stderr, "avifdec_restoration_checksum=0x%016llx\n",
++          (unsigned long long)trace->restoration_checksum);
++  fprintf(stderr, "avifdec_frame_type=%d\n", cm->current_frame.frame_type);
++  fprintf(stderr, "avifdec_blocks=%llu\n",
++          (unsigned long long)trace->block_count);
++  fprintf(stderr, "avifdec_inter_blocks=%llu\n",
++          (unsigned long long)trace->inter_block_count);
++  fprintf(stderr, "avifdec_compound_blocks=%llu\n",
++          (unsigned long long)trace->compound_block_count);
++  fprintf(stderr, "avifdec_interintra_blocks=%llu\n",
++          (unsigned long long)trace->interintra_block_count);
++  fprintf(stderr, "avifdec_global_warp_blocks=%llu\n",
++          (unsigned long long)trace->global_warp_block_count);
++  fprintf(stderr, "avifdec_local_warp_blocks=%llu\n",
++          (unsigned long long)trace->local_warp_block_count);
++  fprintf(stderr, "avifdec_obmc_blocks=%llu\n",
++          (unsigned long long)trace->obmc_block_count);
++  fprintf(stderr, "avifdec_intrabc_blocks=%llu\n",
++          (unsigned long long)trace->intrabc_block_count);
++  fprintf(stderr, "avifdec_skip_mode_blocks=%llu\n",
++          (unsigned long long)trace->skip_mode_block_count);
++  fprintf(stderr, "avifdec_inter_mode_mask=0x%016llx\n",
++          (unsigned long long)trace->inter_mode_mask);
++  fprintf(stderr, "avifdec_interpolation_filter_mask=0x%016llx\n",
++          (unsigned long long)trace->interpolation_filter_mask);
++  fprintf(stderr, "avifdec_motion_mode_mask=0x%016llx\n",
++          (unsigned long long)trace->motion_mode_mask);
++  fprintf(stderr, "avifdec_directional_blocks=%llu\n",
++          (unsigned long long)trace->directional_block_count);
++  fprintf(stderr, "avifdec_palette_blocks=%llu\n",
++          (unsigned long long)trace->palette_block_count);
++  fprintf(stderr, "avifdec_cfl_blocks=%llu\n",
++          (unsigned long long)trace->cfl_block_count);
++  fprintf(stderr, "avifdec_filter_intra_blocks=%llu\n",
++          (unsigned long long)trace->filter_intra_block_count);
++  fprintf(stderr, "avifdec_transforms=%llu\n",
++          (unsigned long long)trace->transform_count);
++  fprintf(stderr, "avifdec_nonzero_transforms=%llu\n",
++          (unsigned long long)trace->nonzero_transform_count);
+ #endif
+ 
+   // Non frame parallel update frame context here.
+diff --git a/av1/decoder/decoder.h b/av1/decoder/decoder.h
+index d6610cd..2bb70e7 100644
+--- a/av1/decoder/decoder.h
++++ b/av1/decoder/decoder.h
+@@ -42,6 +42,26 @@ extern "C" {
+  * Contrast this with a similar struct MACROBLOCK on encoder side.
+  * This data is also common between ThreadData and AV1Decoder structs.
+  */
++#if CONFIG_INSPECTION
++typedef struct AvifdecReferenceTrace {
++  uint64_t mode_checksum;
++  uint64_t inter_mode_checksum;
++  uint64_t mv_stack_checksum;
++  uint64_t mv_checksum;
++  uint64_t predictor_checksum;
++  uint64_t quantized_checksum;
++  uint64_t dequantized_checksum;
++  uint64_t deblocked_checksum;
++  uint64_t cdef_checksum;
++  uint64_t superres_checksum;
++  uint64_t restoration_checksum;
++  uint64_t block_count;
++  uint64_t inter_block_count;
++  uint64_t compound_block_count;
++  uint64_t interintra_block_count;
++  uint64_t global_warp_block_count;
++  uint64_t local_warp_block_count;
++  uint64_t obmc_block_count;
++  uint64_t intrabc_block_count;
++  uint64_t skip_mode_block_count;
++  uint64_t inter_mode_mask;
++  uint64_t interpolation_filter_mask;
++  uint64_t motion_mode_mask;
++  uint64_t directional_block_count;
++  uint64_t palette_block_count;
++  uint64_t cfl_block_count;
++  uint64_t filter_intra_block_count;
++  uint64_t transform_count;
++  uint64_t nonzero_transform_count;
++} AvifdecReferenceTrace;
++#endif
++
+ typedef struct DecoderCodingBlock {
+   /*!
+    * Coding block info that is common between encoder and decoder.
+@@ -81,6 +101,9 @@ typedef struct DecoderCodingBlock {
+    * in xd->ref_mv_stack[i].
+    */
+   uint8_t ref_mv_count[MODE_CTX_REF_FRAMES];
++#if CONFIG_INSPECTION
++  AvifdecReferenceTrace *avifdec_reference_trace;
++#endif
+ } DecoderCodingBlock;
+ 
+ /*!\cond */
+@@ -287,6 +310,7 @@ typedef struct AV1Decoder {
+ #if CONFIG_INSPECTION
+   aom_inspect_cb inspect_cb;
+   void *inspect_ctx;
++  AvifdecReferenceTrace avifdec_reference_trace;
++  uint64_t avifdec_reference_state_checksum;
++  uint64_t avifdec_reference_frame_count;
+ #endif
+   int operating_point;
+   int current_operating_point;
+diff --git a/av1/decoder/decoder.c b/av1/decoder/decoder.c
+index 972b117..0aa5cab 100644
+--- a/av1/decoder/decoder.c
++++ b/av1/decoder/decoder.c
+@@ -350,6 +350,48 @@ static void release_frame_buffers(AV1_COMMON *cm) {
+   cm->cur_frame = NULL;
+ }
+ 
++#if CONFIG_INSPECTION
++#define AVIFDEC_FNV_OFFSET UINT64_C(1469598103934665603)
++#define AVIFDEC_FNV_PRIME UINT64_C(1099511628211)
++
++static void avifdec_state_hash(uint64_t *checksum, uint64_t value) {
++  for (int byte = 0; byte < 8; ++byte) {
++    *checksum ^= (uint8_t)(value >> (byte * 8));
++    *checksum *= AVIFDEC_FNV_PRIME;
++  }
++}
++
++static void avifdec_hash_reference_state(AV1Decoder *pbi) {
++  AV1_COMMON *const cm = &pbi->common;
++  if (pbi->avifdec_reference_frame_count == 0) {
++    pbi->avifdec_reference_state_checksum = AVIFDEC_FNV_OFFSET;
++  }
++  ++pbi->avifdec_reference_frame_count;
++  avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                     pbi->avifdec_reference_frame_count);
++  avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                     cm->show_existing_frame);
++  avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                     cm->current_frame.refresh_frame_flags);
++  for (int index = 0; index < REF_FRAMES; ++index) {
++    const RefCntBuffer *const slot = cm->ref_frame_map[index];
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum, index);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum, slot != NULL);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                       cm->ref_frame_id[index]);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                       slot != NULL ? slot->order_hint : 0);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                       slot != NULL ? slot->buf.crop_widths[0] : 0);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                       slot != NULL ? slot->buf.crop_heights[0] : 0);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                       slot != NULL ? slot->frame_type : 0);
++    avifdec_state_hash(&pbi->avifdec_reference_state_checksum,
++                       slot != NULL ? slot->showable_frame : 0);
++  }
++  fprintf(stderr, "avifdec_reference_state_checksum=0x%016llx\n",
++          (unsigned long long)pbi->avifdec_reference_state_checksum);
++  fprintf(stderr, "avifdec_reference_frames=%llu\n",
++          (unsigned long long)pbi->avifdec_reference_frame_count);
++}
++#endif
++
+ // If any buffer updating is signaled it should be done here.
+ // Consumes a reference to cm->cur_frame.
+ //
+@@ -491,6 +533,9 @@ int av1_receive_compressed_data(AV1Decoder *pbi, size_t size,
+   // Note: At this point, this function holds a reference to cm->cur_frame
+   // in the buffer pool. This reference is consumed by update_frame_buffers().
+   update_frame_buffers(pbi, frame_decoded);
++#if CONFIG_INSPECTION
++  if (frame_decoded) avifdec_hash_reference_state(pbi);
++#endif
+ 
+   if (frame_decoded) {
+     pbi->decoding_first_frame = 0;
+diff --git a/av1/decoder/decodetxb.c b/av1/decoder/decodetxb.c
+index 17d67cb..a026b6a 100644
+--- a/av1/decoder/decodetxb.c
++++ b/av1/decoder/decodetxb.c
+@@ -11,6 +11,10 @@
+ 
+ #include "av1/decoder/decodetxb.h"
+ 
++#if CONFIG_INSPECTION
++#include <stdio.h>
++#endif
++
+ #include "aom_ports/mem.h"
+ #include "av1/common/idct.h"
+ #include "av1/common/scan.h"
+@@ -19,6 +23,52 @@
+ 
+ #define ACCT_STR __func__
+ 
++#if CONFIG_INSPECTION
++static void avifdec_reference_hash(uint64_t *checksum, uint64_t value) {
++  for (int byte = 0; byte < 8; ++byte) {
++    *checksum ^= (uint8_t)(value >> (byte * 8));
++    *checksum *= UINT64_C(1099511628211);
++  }
++}
++
++static void avifdec_hash_quantized(const AV1_COMMON *cm,
++                                   DecoderCodingBlock *dcb, int plane,
++                                   int row, int col, TX_SIZE tx_size,
++                                   const tran_low_t *quantized,
++                                   const tran_low_t *dequantized) {
++  MACROBLOCKD *const xd = &dcb->xd;
++  struct macroblockd_plane *const pd = &xd->plane[plane];
++  AvifdecReferenceTrace *const trace = dcb->avifdec_reference_trace;
++  if (trace == NULL) return;
++  uint64_t *const checksum = &trace->quantized_checksum;
++  const int mi_row = -xd->mb_to_top_edge >> (3 + MI_SIZE_LOG2);
++  const int mi_col = -xd->mb_to_left_edge >> (3 + MI_SIZE_LOG2);
++  const int x4 = (mi_col >> pd->subsampling_x) + col;
++  const int y4 = (mi_row >> pd->subsampling_y) + row;
++  const TX_TYPE tx_type = av1_get_tx_type(
++      xd, get_plane_type(plane), row, col, tx_size,
++      cm->features.reduced_tx_set_used);
++  const int packed_width = AOMMIN(tx_size_wide[tx_size], 32);
++  const int packed_height = AOMMIN(tx_size_high[tx_size], 32);
++  int nonzero = 0;
++  avifdec_reference_hash(checksum, plane);
++  avifdec_reference_hash(checksum, x4);
++  avifdec_reference_hash(checksum, y4);
++  avifdec_reference_hash(checksum, tx_type);
++  for (int y = 0; y < packed_height; ++y) {
++    for (int x = 0; x < packed_width; ++x) {
++      const int index = x * packed_height + y;
++      avifdec_reference_hash(checksum, (uint32_t)quantized[index]);
++      avifdec_reference_hash(&trace->dequantized_checksum,
++                             (uint32_t)dequantized[index]);
++      if (quantized[index] != 0) nonzero = 1;
++    }
++  }
++  ++trace->transform_count;
++  if (nonzero) ++trace->nonzero_transform_count;
++}
++#endif
++
+ static int read_golomb(MACROBLOCKD *xd, aom_reader *r) {
+   int x = 1;
+   int length = 0;
+@@ -130,6 +180,10 @@ static uint8_t read_coeffs_txb(const AV1_COMMON *const cm,
+   int dc_val = 0;
+   uint8_t levels_buf[TX_PAD_2D];
+   uint8_t *const levels = set_levels(levels_buf, height);
++#if CONFIG_INSPECTION
++  tran_low_t quantized[MAX_TX_SQUARE];
++  memset(quantized, 0, sizeof(quantized));
++#endif
+   const int all_zero = aom_read_symbol(
+       r, ec_ctx->txb_skip_cdf[txs_ctx][txb_ctx->txb_skip_ctx], 2, ACCT_STR);
+   eob_info *eob_data = dcb->eob_data[plane] + dcb->txb_offset[plane];
+@@ -151,6 +205,10 @@ static uint8_t read_coeffs_txb(const AV1_COMMON *const cm,
+     if (plane == 0) {
+       xd->tx_type_map[blk_row * xd->tx_type_map_stride + blk_col] = DCT_DCT;
+     }
++#if CONFIG_INSPECTION
++    avifdec_hash_quantized(cm, dcb, plane, blk_row, blk_col, tx_size,
++                          quantized, quantized);
++#endif
+     return 0;
+   }
+ 
+@@ -310,6 +368,9 @@ static uint8_t read_coeffs_txb(const AV1_COMMON *const cm,
+       if (sign) {
+         dq_coeff = -dq_coeff;
+       }
++#if CONFIG_INSPECTION
++      quantized[pos] = sign ? -level : level;
++#endif
+       tcoeffs[pos] = clamp(dq_coeff, min_value, max_value);
+     }
+   }
+@@ -319,6 +380,11 @@ static uint8_t read_coeffs_txb(const AV1_COMMON *const cm,
+   // DC value
+   set_dc_sign(&cul_level, dc_val);
+ 
++#if CONFIG_INSPECTION
++  avifdec_hash_quantized(cm, dcb, plane, blk_row, blk_col, tx_size, quantized,
++                         tcoeffs);
++#endif
++
+   return cul_level;
+ }
+ 
