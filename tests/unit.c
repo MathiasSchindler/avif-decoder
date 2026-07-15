@@ -2317,6 +2317,21 @@ static int test_av1_coeff_cdfs(void) {
             cdfs.coeff_base_eob[0][0][0][3] == 1U &&
             cdfs.dc_sign[0][0][2] == 1U);
 
+        planes[0].width4 = 3U;
+        CHECK(av1_coeff_context_init(&contexts, planes) == AVIFDEC_OK);
+        av1_coeff_cdfs_init(&cdfs, 0U);
+        force_cdf_symbol(cdfs.txb_skip[1][0], 2U, 0U);
+        force_cdf_symbol(cdfs.eob_pt_64[0][0], 7U, 0U);
+        force_cdf_symbol(cdfs.coeff_base_eob[1][0][0], 3U, 0U);
+        force_cdf_symbol(cdfs.dc_sign[0][0], 2U, 0U);
+        CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 0) == AVIFDEC_OK);
+        CHECK(av1_coeff_parse_block(&decoder, &cdfs, &contexts, 0U,
+                          AV1_TX_8X8, AV1_TX_DCT_DCT, 8U, 8U,
+                          2U, 0U, &result) == AVIFDEC_OK);
+        CHECK(result.eob == 1U && above_level[2] == 1U &&
+            above_dc[2] == 1U && above_level[3] == 0U && above_dc[3] == 0U);
+        planes[0].width4 = 4U;
+
         CHECK(av1_coeff_context_init(&contexts, planes) == AVIFDEC_OK);
         left_level[0] = 4U;
         av1_coeff_cdfs_init(&cdfs, 0U);

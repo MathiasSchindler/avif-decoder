@@ -319,11 +319,11 @@ static void av1_coeff_store_context(Av1CoeffPlaneContext *context,
                                     uint8_t dc_category) {
     size_t index;
 
-    for (index = 0U; index < w4; ++index) {
+    for (index = 0U; index < w4 && x4 + index < context->width4; ++index) {
         context->above_level_context[x4 + index] = cul_level;
         context->above_dc_context[x4 + index] = dc_category;
     }
-    for (index = 0U; index < h4; ++index) {
+    for (index = 0U; index < h4 && y4 + index < context->height4; ++index) {
         context->left_level_context[y4 + index] = cul_level;
         context->left_dc_context[y4 + index] = dc_category;
     }
@@ -403,15 +403,15 @@ AvifdecStatus av1_coeff_context_init(Av1CoeffContextState *state,
         state->plane[index] = plane[index];
         if (plane[index].width4 != 0U) {
             avifdec_memory_fill(state->plane[index].above_level_context, 0U,
-                                plane[index].width4);
+                                plane[index].above_capacity);
             avifdec_memory_fill(state->plane[index].above_dc_context, 0U,
-                                plane[index].width4);
+                                plane[index].above_capacity);
         }
         if (plane[index].height4 != 0U) {
             avifdec_memory_fill(state->plane[index].left_level_context, 0U,
-                                plane[index].height4);
+                                plane[index].left_capacity);
             avifdec_memory_fill(state->plane[index].left_dc_context, 0U,
-                                plane[index].height4);
+                                plane[index].left_capacity);
         }
     }
     return AVIFDEC_OK;
@@ -464,8 +464,8 @@ AvifdecStatus av1_coeff_parse_block_select(
         context->above_dc_context == 0 || context->left_dc_context == 0 ||
         context->above_capacity < context->width4 ||
         context->left_capacity < context->height4 ||
-        x4 > context->width4 || w4 > context->width4 - x4 ||
-        y4 > context->height4 || h4 > context->height4 - y4 ||
+        x4 >= context->width4 || w4 > context->above_capacity - x4 ||
+        y4 >= context->height4 || h4 > context->left_capacity - y4 ||
         plane_block_width < tx->width || plane_block_height < tx->height ||
         plane_block_width > 128U || plane_block_height > 128U) {
         return AVIFDEC_INVALID_ARGUMENT;

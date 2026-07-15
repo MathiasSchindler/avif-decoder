@@ -1700,6 +1700,15 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     if (status != AVIFDEC_OK) return status;
     for (plane = 0U; plane < 3U; ++plane) {
         planes[plane] = state->coeff_contexts.plane[plane];
+        if (plane == 0U || !sequence->monochrome) {
+            unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
+            unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
+
+            planes[plane].width4 =
+                (frame->mi_cols + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+            planes[plane].height4 =
+                (frame->mi_rows + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+        }
     }
     status = av1_coeff_context_init(&state->coeff_contexts, planes);
     if (status != AVIFDEC_OK) return status;
