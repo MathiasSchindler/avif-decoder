@@ -56,9 +56,19 @@ for malformed in "$tmp_dir/truncated-large-size.avif" "$tmp_dir/short-box.avif" 
 done
 
 test -z "$(nm -u "$binary")"
-if readelf -l "$binary" | grep -q INTERP; then
-    echo 'freestanding binary has a dynamic interpreter' >&2
-    exit 1
-fi
+case $(uname -s) in
+    Darwin)
+        if test -n "$(otool -L "$binary" | sed '1d')"; then
+            echo 'freestanding binary has a dynamic library dependency' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        if readelf -l "$binary" | grep -q INTERP; then
+            echo 'freestanding binary has a dynamic interpreter' >&2
+            exit 1
+        fi
+        ;;
+esac
 
 echo 'freestanding smoke test: ok'

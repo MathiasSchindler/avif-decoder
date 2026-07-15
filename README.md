@@ -1,9 +1,11 @@
 # avif-decoder
 
 `avif-decoder` is a dependency-free AVIF still-image and image-sequence
-decoder written in freestanding C. The command-line executable is a static PIE
-that uses Linux system calls directly: it does not link a C library, dynamic
-loader, codec library, or image library.
+decoder written in freestanding C. The command-line executable uses native
+system calls directly and does not link a C library, codec library, or image
+library. Linux builds are static PIE executables without an interpreter. macOS
+builds use the system dyld as their process launcher but have no dynamic-library
+load commands.
 
 The decoder supports native planar YUV, packed RGB/RGBA, and PNG output. Its
 core API operates on immutable input memory and caller-owned workspace and
@@ -11,16 +13,21 @@ output buffers, with explicit limits and structured errors for untrusted input.
 
 ## Build
 
-The supplied executable currently targets Linux/x86-64:
+The supplied executable targets Linux/x86-64 and macOS/arm64. Build for the
+current host with:
 
 ```sh
 make
 ```
 
-This produces:
+The macOS build requires the Xcode command-line tools and targets macOS 11 or
+newer.
+
+This produces one of:
 
 ```text
-build/x86_64/avifdec
+Linux/x86-64: build/x86_64/avifdec
+macOS/arm64:  build/arm64/avifdec
 ```
 
 Run the complete test suite with:
@@ -31,6 +38,9 @@ make test
 
 `make`, `make test`, and `make clean` are the complete public Makefile
 interface.
+
+The examples below use the Linux output path. On macOS, substitute
+`build/arm64/avifdec`.
 
 ## Command-line usage
 

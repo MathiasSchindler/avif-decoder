@@ -1,5 +1,10 @@
 CC ?= cc
 
+MACHO_DYLIB_REMOVER := build/host/macho-dylib-remover
+LINK_TOOLS :=
+POST_LINK :=
+TARGET_CFLAGS :=
+OS := $(shell uname -s)
 ARCH := $(shell uname -m)
 BUILD_DIR := build/$(ARCH)
 TARGET := $(BUILD_DIR)/avifdec
@@ -19,28 +24,49 @@ FILM_GRAIN_TABLE := src/av1_film_grain_gaussian.inc
 FILM_GRAIN_TABLE_CHECK := build/generated-check/av1_film_grain_gaussian.inc
 GENERATED_CHECK := build/generated-check/.verified
 
+ifeq ($(OS),Linux)
 ifeq ($(ARCH),x86_64)
 ARCH_DIR := src/arch/x86_64/linux
 ARCH_SOURCES := $(ARCH_DIR)/crt0.S $(ARCH_DIR)/syscall_stubs.S
+PLATFORM_DIR := src/platform/linux
+LDFLAGS := \
+	-nostdlib -static-pie \
+	-Wl,--gc-sections -Wl,--build-id=none -Wl,-e,_start
 else
-$(error Unsupported architecture '$(ARCH)'; currently only x86_64 Linux is wired into the build)
+$(error Unsupported Linux architecture '$(ARCH)'; currently only x86_64 is supported)
+endif
+else ifeq ($(OS),Darwin)
+ifeq ($(ARCH),arm64)
+ARCH_DIR := src/arch/aarch64/macos
+ARCH_SOURCES := $(ARCH_DIR)/crt0.S
+PLATFORM_DIR := src/platform/macos
+MACOS_SDKROOT := $(shell xcrun --sdk macosx --show-sdk-path)
+LINK_TOOLS := $(MACHO_DYLIB_REMOVER)
+POST_LINK = $(MACHO_DYLIB_REMOVER) $@ && codesign --force --sign - $@
+TARGET_CFLAGS := -target arm64-apple-macos11 -isysroot $(MACOS_SDKROOT)
+LDFLAGS := \
+	$(TARGET_CFLAGS) -nostdlib -lSystem -Wl,-no_fixup_chains \
+	-Wl,-platform_version,macos,11.0,11.0 \
+	-Wl,-e,_start -Wl,-dead_strip \
+	-Wl,-no_function_starts -Wl,-adhoc_codesign
+else
+$(error Unsupported macOS architecture '$(ARCH)'; currently only arm64 is supported)
+endif
+else
+$(error Unsupported operating system '$(OS)')
 endif
 
 CFLAGS := \
-	-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
+	$(TARGET_CFLAGS) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
 	-ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections -fPIE -MMD -MP -nostdinc \
 	-DNEWOS_DISABLE_STACK_GUARD_INIT \
-	-Isrc -Isrc/shared -Isrc/platform/linux -I$(ARCH_DIR)
+	-Isrc -Isrc/shared -I$(PLATFORM_DIR) -I$(ARCH_DIR)
 HOST_TEST_CFLAGS := \
 	-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g \
 	-fsanitize=address,undefined -fno-omit-frame-pointer \
 	-Isrc -Isrc/shared
-LDFLAGS := \
-	-nostdlib -static-pie \
-	-Wl,--gc-sections -Wl,--build-id=none -Wl,-e,_start
-
 CORE_C_SOURCES := \
 	src/base.c src/bmff.c src/avif.c src/avif_sequence.c src/avif_rgb.c \
 	src/avif_sato.c src/png.c \
@@ -54,7 +80,7 @@ CORE_C_SOURCES := \
 	src/av1_tile_palette.c src/av1_block.c \
 	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
 	src/av1_restoration_filter.c
-C_SOURCES := src/main.c $(CORE_C_SOURCES) src/platform/linux/io.c
+C_SOURCES := src/main.c $(CORE_C_SOURCES) $(PLATFORM_DIR)/io.c
 SOURCES := $(C_SOURCES) $(ARCH_SOURCES)
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
 OBJECTS := $(OBJECTS:.S=.o)
@@ -62,7 +88,7 @@ CORE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(CORE_C_SOURCES:.c=.o))
 ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
-	$(BUILD_DIR)/src/platform/linux/io.o $(ARCH_OBJECTS)
+	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
 	$(OBU_TRACE_OBJECTS:.o=.d)
 
@@ -70,17 +96,24 @@ DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
 
 .PHONY: clean test
 
-$(TARGET): $(OBJECTS)
+$(TARGET): $(OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
 
-$(STRICT_UNIT): $(STRICT_UNIT_OBJECTS)
+$(STRICT_UNIT): $(STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
 	$(CC) $(STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
 
-$(OBU_TRACE): $(OBU_TRACE_OBJECTS)
+$(OBU_TRACE): $(OBU_TRACE_OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
 	$(CC) $(OBU_TRACE_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+$(MACHO_DYLIB_REMOVER): tools/macho_dylib_remover.c
+	@mkdir -p $(@D)
+	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 $< -o $@
 
 $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 		src/av1.h src/av1_bitstream.h src/av1_metadata.h src/av1_profile.h \
