@@ -48,8 +48,26 @@ The generated-table reproduction checks run when the ignored
 `docs/av1.html` specification file is available. Without that maintainer
 input, `make test` reports the skipped check and runs the rest of the suite.
 
-`make`, `make test`, and `make clean` are the complete public Makefile
-interface.
+`make`, `make test`, `make wasm`, and `make clean` are the complete public
+Makefile interface.
+
+### Browser experiment
+
+An experimental WebAssembly build exposes the same decoder core through a
+drag-and-drop browser viewer. It requires Emscripten:
+
+```sh
+brew install emscripten
+make wasm
+python3 -m http.server 8000 -d build/wasm
+```
+
+Open `http://localhost:8000`. Decoding runs locally in a Web Worker; files are
+not uploaded. The wrapper limits images to 8192 pixels per dimension and
+33,554,432 total pixels, with a 768 MiB decoder-workspace budget. Some large
+images can hit the workspace budget below the pixel limit. The Emscripten build
+uses an 8 MiB stack because the decoder's parsing state exceeds Emscripten's
+small default stack.
 
 The examples below use the Linux output path. On macOS, substitute
 `build/arm64/avifdec`.

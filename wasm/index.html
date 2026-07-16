@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>AVIF Decoder Lab</title>
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <header>
+        <a class="wordmark" href="./">AVIF Decoder <span>Lab</span></a>
+        <div class="runtime"><i></i> WebAssembly</div>
+    </header>
+
+    <main>
+        <section class="intro" aria-labelledby="title">
+            <p class="eyebrow">Local image inspection</p>
+            <h1 id="title">Open an AVIF.</h1>
+            <p>Decoded in this browser by the freestanding C implementation.</p>
+        </section>
+
+        <section id="drop-target" class="workspace">
+            <div class="toolbar">
+                <div>
+                    <strong id="filename">No file selected</strong>
+                    <span id="details">AVIF still images up to 128 MiB</span>
+                </div>
+                <div class="actions">
+                    <label class="file-button" for="file-input">Choose AVIF</label>
+                    <input id="file-input" type="file" accept=".avif,image/avif">
+                    <button id="save-button" type="button" disabled>Save PNG</button>
+                </div>
+            </div>
+
+            <div class="stage">
+                <div id="placeholder" class="placeholder">
+                    <span class="file-mark" aria-hidden="true">AVIF</span>
+                    <strong>Drop a file here</strong>
+                </div>
+                <canvas id="preview" hidden></canvas>
+            </div>
+
+            <div class="status-line">
+                <span id="status" data-state="idle">Ready</span>
+                <span>Nothing leaves this device</span>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+</body>
+</html>

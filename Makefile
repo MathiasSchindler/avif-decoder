@@ -11,6 +11,10 @@ TARGET := $(BUILD_DIR)/avifdec
 STRICT_UNIT := $(BUILD_DIR)/unit
 HOST_UNIT := build/host/unit
 OBU_TRACE := $(BUILD_DIR)/obu-trace
+WASM_BUILD_DIR := build/wasm
+WASM_LOADER := $(WASM_BUILD_DIR)/avif-decoder.js
+WASM_BINARY := $(WASM_BUILD_DIR)/avif-decoder.wasm
+WASM_ASSETS := index.html app.js decoder-worker.js styles.css
 .DEFAULT_GOAL := $(TARGET)
 COEFF_TABLES := src/av1_coeff_tables.inc
 COEFF_TABLES_CHECK := build/generated-check/av1_coeff_tables.inc
@@ -99,7 +103,7 @@ DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
 
 -include $(DEPENDENCIES)
 
-.PHONY: clean test
+.PHONY: clean test wasm
 
 $(TARGET): $(OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
@@ -132,6 +136,25 @@ $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 		src/av1_filter.h src/avifdec.h src/png.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
+
+$(WASM_LOADER): wasm/avif_wasm.c $(CORE_C_SOURCES) src/avifdec.h
+	@mkdir -p $(@D)
+	emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc \
+		wasm/avif_wasm.c $(CORE_C_SOURCES) --no-entry \
+		-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createAvifDecoder \
+		-sENVIRONMENT=web,worker -sFILESYSTEM=0 -sALLOW_MEMORY_GROWTH=1 \
+		-sINITIAL_MEMORY=16777216 -sMAXIMUM_MEMORY=1073741824 \
+		-sSTACK_SIZE=8388608 -sSTACK_OVERFLOW_CHECK=2 \
+		-sEXPORTED_FUNCTIONS='["_malloc","_free","_avif_wasm_decode","_avif_wasm_reset","_avif_wasm_pixel_pointer","_avif_wasm_pixel_bytes","_avif_wasm_width","_avif_wasm_height","_avif_wasm_source_width","_avif_wasm_source_height","_avif_wasm_bit_depth","_avif_wasm_has_alpha","_avif_wasm_stage","_avif_wasm_error_offset","_avif_wasm_error_context"]' \
+		-sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' -o $@
+
+$(WASM_BUILD_DIR)/%: wasm/%
+	@mkdir -p $(@D)
+	cp $< $@
+
+wasm: $(WASM_LOADER) $(addprefix $(WASM_BUILD_DIR)/,$(WASM_ASSETS))
+	@test -f $(WASM_BINARY)
+	@printf '%s\n' 'WASM viewer built in $(WASM_BUILD_DIR)'
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(@D)
