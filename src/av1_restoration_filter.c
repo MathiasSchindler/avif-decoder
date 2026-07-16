@@ -269,32 +269,50 @@ static void av1_restoration_sgr_block(
     }
 }
 
-AvifdecStatus av1_loop_restoration_frame(
+typedef struct {
+    Av1FramePlanes *output;
+    const Av1FramePlanes *upscaled_cdef;
+    const Av1FramePlanes *upscaled_deblocked;
+    const Av1RestorationState *restoration;
+    size_t row_units;
+    uint8_t bit_depth;
+    uint8_t plane_count;
+} Av1RestorationParallelContext;
+
+static AvifdecStatus av1_restoration_validate(
     Av1FramePlanes *output,
     const Av1FramePlanes *upscaled_cdef,
     const Av1FramePlanes *upscaled_deblocked,
     const Av1RestorationState *restoration,
-    uint8_t bit_depth) {
+    uint8_t bit_depth,
+    unsigned int *plane_count) {
     unsigned int planes;
     unsigned int plane;
 
     if (output == 0 || upscaled_cdef == 0 || upscaled_deblocked == 0 ||
-        restoration == 0 ||
+        restoration == 0 || plane_count == 0 ||
+        restoration->monochrome > 1U ||
+        restoration->subsampling_x > 1U ||
+        restoration->subsampling_y > 1U ||
+        restoration->upscaled_width == 0U ||
+        restoration->frame_height == 0U ||
         (bit_depth != 8U && bit_depth != 10U && bit_depth != 12U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
     planes = restoration->monochrome ? 1U : 3U;
+    *plane_count = planes;
     for (plane = 0U; plane < planes; ++plane) {
-        unsigned int sub_x = plane == 0U ? 0U : restoration->subsampling_x;
-        unsigned int sub_y = plane == 0U ? 0U : restoration->subsampling_y;
+        unsigned int sub_x =
+            plane == 0U ? 0U : restoration->subsampling_x;
+        unsigned int sub_y =
+            plane == 0U ? 0U : restoration->subsampling_y;
         uint32_t width = (restoration->upscaled_width +
                           ((uint32_t)1U << sub_x) - 1U) >> sub_x;
         uint32_t height = (restoration->frame_height +
                            ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-        uint32_t luma_row;
-        uint32_t luma_column;
 
-        if (output->data[plane] == 0 || upscaled_cdef->data[plane] == 0 ||
+        if (output->data[plane] == 0 ||
+            upscaled_cdef->data[plane] == 0 ||
             upscaled_deblocked->data[plane] == 0 ||
             output->stride[plane] < width ||
             upscaled_cdef->stride[plane] < width ||
@@ -303,74 +321,247 @@ AvifdecStatus av1_loop_restoration_frame(
         }
         output->width[plane] = width;
         output->height[plane] = height;
-        for (luma_row = 0U; luma_row < restoration->frame_height;
-             luma_row += 4U) {
-            uint32_t stripe = (luma_row + 8U) / 64U;
-            Av1RestorationSource source;
-            source.cdef = upscaled_cdef->data[plane];
-            source.deblocked = upscaled_deblocked->data[plane];
-            source.cdef_stride = upscaled_cdef->stride[plane];
-            source.deblocked_stride = upscaled_deblocked->stride[plane];
-            source.width = width;
-            source.height = height;
-            source.stripe_start_y = (int)av1_restoration_arshift64(
-                -8 + (int64_t)stripe * 64, sub_y);
-            source.stripe_end_y = source.stripe_start_y +
-                                  (int)(64U >> sub_y) - 1;
-            for (luma_column = 0U; luma_column < restoration->upscaled_width;
-                 luma_column += 4U) {
-                uint32_t x = luma_column >> sub_x;
-                uint32_t y = luma_row >> sub_y;
-                uint32_t block_width = 4U >> sub_x;
-                uint32_t block_height = 4U >> sub_y;
-                uint32_t unit_row;
-                uint32_t unit_column;
-                size_t unit_index;
-                const Av1RestorationUnit *unit;
-                uint32_t row;
+        if (restoration->frame_type[plane] == 0U) continue;
+        {
+            size_t unit_count;
+            size_t unit_end;
+            size_t unit_index;
 
-                if (x + block_width > width) block_width = width - x;
-                if (y + block_height > height) block_height = height - y;
-                for (row = 0U; row < block_height; ++row) {
-                    avifdec_memory_copy(
-                        output->data[plane] + (size_t)(y + row) *
-                            output->stride[plane] + x,
-                        upscaled_cdef->data[plane] + (size_t)(y + row) *
-                            upscaled_cdef->stride[plane] + x,
-                        block_width * sizeof(uint16_t));
-                }
-                if (restoration->frame_type[plane] == 0U) continue;
-                unit_row = (((luma_row + 8U) >> sub_y) /
-                            restoration->unit_size[plane]);
-                if (unit_row >= restoration->unit_rows[plane]) {
-                    unit_row = restoration->unit_rows[plane] - 1U;
-                }
-                unit_column = (luma_column >> sub_x) /
-                              restoration->unit_size[plane];
-                if (unit_column >= restoration->unit_columns[plane]) {
-                    unit_column = restoration->unit_columns[plane] - 1U;
-                }
-                unit_index = restoration->plane_offset[plane] +
-                    (size_t)unit_row * restoration->unit_columns[plane] +
-                    unit_column;
-                if (unit_index >= restoration->unit_capacity) {
-                    return AVIFDEC_LIMIT_EXCEEDED;
-                }
-                unit = &restoration->units[unit_index];
+            if (restoration->frame_type[plane] > 3U ||
+                restoration->units == 0 ||
+                restoration->unit_size[plane] < 32U ||
+                restoration->unit_size[plane] > 256U ||
+                restoration->unit_rows[plane] == 0U ||
+                restoration->unit_columns[plane] == 0U) {
+                return AVIFDEC_INVALID_DATA;
+            }
+            if (!avifdec_size_multiply(
+                    restoration->unit_rows[plane],
+                    restoration->unit_columns[plane],
+                    &unit_count) ||
+                !avifdec_size_add(
+                    restoration->plane_offset[plane],
+                    unit_count, &unit_end)) {
+                return AVIFDEC_OVERFLOW;
+            }
+            if (unit_end > restoration->unit_capacity) {
+                return AVIFDEC_LIMIT_EXCEEDED;
+            }
+            for (unit_index = restoration->plane_offset[plane];
+                 unit_index < unit_end;
+                 ++unit_index) {
+                const Av1RestorationUnit *unit =
+                    &restoration->units[unit_index];
+
                 if (!unit->parsed || unit->type == 0U) continue;
-                if (unit->type == 1U) {
-                    av1_restoration_wiener_block(
-                        output->data[plane], output->stride[plane], &source,
-                        x, y, block_width, block_height, unit, bit_depth);
-                } else if (unit->type == 2U && unit->sgr_set < 16U) {
-                    av1_restoration_sgr_block(
-                        output->data[plane], output->stride[plane], &source,
-                        x, y, block_width, block_height, unit, bit_depth);
-                } else {
-                    return AVIFDEC_INVALID_DATA;
+                if (unit->type == 1U ||
+                    (unit->type == 2U && unit->sgr_set < 16U)) {
+                    continue;
                 }
+                return AVIFDEC_INVALID_DATA;
             }
         }
     }
     return AVIFDEC_OK;
+}
+
+static void av1_restoration_copy_row(
+    const Av1RestorationParallelContext *parallel,
+    unsigned int plane,
+    uint32_t luma_row) {
+    unsigned int sub_y = plane == 0U
+        ? 0U : parallel->restoration->subsampling_y;
+    uint32_t y = luma_row >> sub_y;
+    uint32_t row_count = 4U >> sub_y;
+    uint32_t row;
+
+    if (y + row_count > parallel->output->height[plane]) {
+        row_count = parallel->output->height[plane] - y;
+    }
+    for (row = 0U; row < row_count; ++row) {
+        avifdec_memory_copy(
+            parallel->output->data[plane] +
+                (size_t)(y + row) *
+                    parallel->output->stride[plane],
+            parallel->upscaled_cdef->data[plane] +
+                (size_t)(y + row) *
+                    parallel->upscaled_cdef->stride[plane],
+            parallel->output->width[plane] *
+                sizeof(uint16_t));
+    }
+}
+
+static void av1_restoration_filter_row(
+    const Av1RestorationParallelContext *parallel,
+    unsigned int plane,
+    uint32_t luma_row) {
+    const Av1RestorationState *restoration =
+        parallel->restoration;
+    unsigned int sub_x =
+        plane == 0U ? 0U : restoration->subsampling_x;
+    unsigned int sub_y =
+        plane == 0U ? 0U : restoration->subsampling_y;
+    uint32_t width = parallel->output->width[plane];
+    uint32_t height = parallel->output->height[plane];
+    uint32_t stripe = (luma_row + 8U) / 64U;
+    Av1RestorationSource source;
+    uint32_t luma_column;
+
+    if (restoration->frame_type[plane] == 0U) return;
+    source.cdef = parallel->upscaled_cdef->data[plane];
+    source.deblocked =
+        parallel->upscaled_deblocked->data[plane];
+    source.cdef_stride =
+        parallel->upscaled_cdef->stride[plane];
+    source.deblocked_stride =
+        parallel->upscaled_deblocked->stride[plane];
+    source.width = width;
+    source.height = height;
+    source.stripe_start_y = (int)av1_restoration_arshift64(
+        -8 + (int64_t)stripe * 64, sub_y);
+    source.stripe_end_y = source.stripe_start_y +
+                          (int)(64U >> sub_y) - 1;
+    for (luma_column = 0U;
+         luma_column < restoration->upscaled_width;
+         luma_column += 4U) {
+        uint32_t x = luma_column >> sub_x;
+        uint32_t y = luma_row >> sub_y;
+        uint32_t block_width = 4U >> sub_x;
+        uint32_t block_height = 4U >> sub_y;
+        uint32_t unit_row =
+            (((luma_row + 8U) >> sub_y) /
+             restoration->unit_size[plane]);
+        uint32_t unit_column =
+            (luma_column >> sub_x) /
+            restoration->unit_size[plane];
+        size_t unit_index;
+        const Av1RestorationUnit *unit;
+
+        if (x + block_width > width) {
+            block_width = width - x;
+        }
+        if (y + block_height > height) {
+            block_height = height - y;
+        }
+        if (unit_row >= restoration->unit_rows[plane]) {
+            unit_row = restoration->unit_rows[plane] - 1U;
+        }
+        if (unit_column >=
+            restoration->unit_columns[plane]) {
+            unit_column =
+                restoration->unit_columns[plane] - 1U;
+        }
+        unit_index = restoration->plane_offset[plane] +
+            (size_t)unit_row *
+                restoration->unit_columns[plane] +
+            unit_column;
+        unit = &restoration->units[unit_index];
+        if (!unit->parsed || unit->type == 0U) continue;
+        if (unit->type == 1U) {
+            av1_restoration_wiener_block(
+                parallel->output->data[plane],
+                parallel->output->stride[plane], &source,
+                x, y, block_width, block_height, unit,
+                parallel->bit_depth);
+        } else {
+            av1_restoration_sgr_block(
+                parallel->output->data[plane],
+                parallel->output->stride[plane], &source,
+                x, y, block_width, block_height, unit,
+                parallel->bit_depth);
+        }
+    }
+}
+
+static AvifdecStatus av1_restoration_filter_ranges(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    Av1RestorationParallelContext *parallel =
+        (Av1RestorationParallelContext *)arg;
+    size_t work_count;
+
+    (void)worker_index;
+    if (parallel == 0 || begin > end ||
+        !avifdec_size_multiply(
+            parallel->row_units, parallel->plane_count,
+            &work_count) ||
+        end > work_count) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    while (begin < end) {
+        unsigned int plane =
+            (unsigned int)(begin / parallel->row_units);
+        size_t plane_end =
+            (size_t)(plane + 1U) * parallel->row_units;
+
+        if (plane_end > end) plane_end = end;
+        while (begin < plane_end) {
+            uint32_t luma_row = (uint32_t)(
+                (begin % parallel->row_units) * 4U);
+
+            av1_restoration_copy_row(
+                parallel, plane, luma_row);
+            av1_restoration_filter_row(
+                parallel, plane, luma_row);
+            ++begin;
+        }
+    }
+    return AVIFDEC_OK;
+}
+
+AvifdecStatus av1_loop_restoration_frame_ex(
+    Av1FramePlanes *output,
+    const Av1FramePlanes *upscaled_cdef,
+    const Av1FramePlanes *upscaled_deblocked,
+    const Av1RestorationState *restoration,
+    uint8_t bit_depth,
+    const AvifdecExecutor *executor) {
+    Av1RestorationParallelContext parallel;
+    unsigned int plane_count;
+    size_t work_count;
+    AvifdecStatus status;
+
+    if (executor != 0 &&
+        (executor->worker_count == 0U ||
+         executor->worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS ||
+         executor->parallel_for == 0)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    status = av1_restoration_validate(
+        output, upscaled_cdef, upscaled_deblocked,
+        restoration, bit_depth, &plane_count);
+    if (status != AVIFDEC_OK) return status;
+    parallel.output = output;
+    parallel.upscaled_cdef = upscaled_cdef;
+    parallel.upscaled_deblocked = upscaled_deblocked;
+    parallel.restoration = restoration;
+    parallel.row_units =
+        ((size_t)restoration->frame_height + 3U) / 4U;
+    parallel.bit_depth = bit_depth;
+    parallel.plane_count = (uint8_t)plane_count;
+    if (!avifdec_size_multiply(
+            parallel.row_units, plane_count, &work_count)) {
+        return AVIFDEC_OVERFLOW;
+    }
+    if (executor != 0 && executor->worker_count > 1U &&
+        work_count > 1U) {
+        return executor->parallel_for(
+            executor->user_data, work_count, 1U,
+            av1_restoration_filter_ranges, &parallel);
+    }
+    return av1_restoration_filter_ranges(
+        0U, work_count, 0U, &parallel);
+}
+
+AvifdecStatus av1_loop_restoration_frame(
+    Av1FramePlanes *output,
+    const Av1FramePlanes *upscaled_cdef,
+    const Av1FramePlanes *upscaled_deblocked,
+    const Av1RestorationState *restoration,
+    uint8_t bit_depth) {
+    return av1_loop_restoration_frame_ex(
+        output, upscaled_cdef, upscaled_deblocked,
+        restoration, bit_depth, 0);
 }

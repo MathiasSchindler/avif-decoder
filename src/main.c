@@ -768,7 +768,13 @@ int main(int argc, char **argv) {
                 }
             } else {
                 work_count =
-                    ((size_t)image_info.height + 7U) / 8U;
+                    ((size_t)image_info.height + 3U) / 4U;
+                if (!image_info.monochrome &&
+                    !avifdec_size_multiply(
+                        work_count, 3U, &work_count)) {
+                    (void)platform_free_pages(data, size);
+                    return 1;
+                }
             }
             if (worker_count == 0U) {
                 worker_count =

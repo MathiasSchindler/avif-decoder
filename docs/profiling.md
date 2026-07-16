@@ -235,7 +235,28 @@ workspace or peak RSS. Widths 1 and 4 produced byte-identical planar output,
 the same CDEF checksum `0x26fd6feea1d4f415`, and the same restoration checksum
 `0x6d8bb6a201107db9`. The smaller speedup than CDEF's instrumented profile
 share indicates bandwidth pressure and the remaining serial decode/filter
-stages. Restoration remains the next safe four-luma-row candidate.
+stages.
+
+Restoration now validates unit metadata in plane/unit order, then dispatches
+flattened plane/four-luma-row units. Each unit copies complete output rows from
+the immutable CDEF source before applying Wiener or self-guided restoration.
+This replaces millions of tiny 4x4 copies, keeps scratch state worker-local,
+and adds no decoder workspace.
+
+The same three-run benchmark after restoration threading measured:
+
+| Workers | Median elapsed | User time | Maximum RSS | Decoder workspace |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 6.02 s | 5.53 s | 1,648 MiB | 1,732,566,678 bytes |
+| 2 | 4.82 s | 5.52 s | 1,647 MiB | 1,732,566,678 bytes |
+| 4 | 4.27 s | 5.62 s | 1,647 MiB | 1,732,566,678 bytes |
+
+Four workers reduce wall time by about 29% (1.41x) relative to width 1.
+Compared with CDEF-only threading's 4.53-second median, restoration contributes
+an additional roughly 6% wall-time reduction on this workload. Widths 1 and 4
+again produced byte-identical planar output and unchanged CDEF/restoration
+checksums. The width-1 result is effectively unchanged within run-to-run
+variance, so the row-copy refactor does not provide a material serial speedup.
 
 ## Validation
 

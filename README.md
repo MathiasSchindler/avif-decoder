@@ -53,7 +53,8 @@ Makefile interface.
 
 The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
 tiles, sample-transform output rows, and AV1 CDEF row units through the
-imported newos clone/futex task-pool substrate:
+imported newos clone/futex task-pool substrate. AV1 restoration copying and
+filtering use the same row-unit executor:
 
 ```sh
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
@@ -263,15 +264,16 @@ returns deterministic syntax and reconstruction checksums.
 by the caller; the decoder still performs no allocation and retains no thread
 state. The current parallel regions cover independent tiles of a top-level
 primary grid, independent output rows of a primary sample transform, and
-two-mi-row CDEF units in a direct primary AV1 item. Sample-transform input
-images remain serial. Nested derived images, auxiliary alpha, sequences, RGB
-conversion, the other AV1 filters, and AV1 bitstream tiles remain serial.
+two-mi-row CDEF units plus four-luma-row restoration units in a direct primary
+AV1 item. Sample-transform input images remain serial. Nested derived images,
+auxiliary alpha, sequences, RGB conversion, loop filtering, super-resolution,
+and AV1 bitstream tiles remain serial.
 
 Parallel grid query results include one copied parser context, tile buffer,
 and child decoder workspace per executor worker. Sample-transform row
-parallelism and CDEF row parallelism add no decoder workspace. Callers must use
-the workspace requirement returned for the same executor width used during
-decoding.
+parallelism, CDEF row parallelism, and restoration row parallelism add no
+decoder workspace. Callers must use the workspace requirement returned for the
+same executor width used during decoding.
 
 ### Image sequences
 
@@ -358,7 +360,8 @@ A hosted coverage-guided harness is available at
 - Sequence track matrices must be identity.
 - PNG encoding is intentionally uncompressed beyond stored DEFLATE framing.
 - Internal parallel decoding is currently limited to top-level AVIF grids,
-  primary sample-transform output rows, and direct-primary AV1 CDEF rows.
+  primary sample-transform output rows, and direct-primary AV1 CDEF and
+  restoration rows.
 
 ## License and authorship
 

@@ -1731,10 +1731,10 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
             sequence, frame->upscaled_width, frame->frame_height);
         if (status != AVIFDEC_OK) return status;
     }
-    status = av1_loop_restoration_frame(
+    status = av1_loop_restoration_frame_ex(
         &state->restored_planes, &state->upscaled_cdef_planes,
         &state->upscaled_deblocked_planes, &state->restoration,
-        sequence->bit_depth);
+        sequence->bit_depth, state->executor);
     if (status != AVIFDEC_OK) return status;
     if (state->trace_enabled) {
         status = av1_trace_stage_checksum(

@@ -88,5 +88,12 @@ AvifdecStatus av1_loop_restoration_frame(
     const Av1FramePlanes *upscaled_deblocked,
     const Av1RestorationState *restoration,
     uint8_t bit_depth);
+AvifdecStatus av1_loop_restoration_frame_ex(
+    Av1FramePlanes *output,
+    const Av1FramePlanes *upscaled_cdef,
+    const Av1FramePlanes *upscaled_deblocked,
+    const Av1RestorationState *restoration,
+    uint8_t bit_depth,
+    const AvifdecExecutor *executor);
 
 #endif

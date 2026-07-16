@@ -3342,26 +3342,41 @@ static int test_av1_loop_restoration(void) {
     uint16_t cdef_data[64];
     uint16_t deblocked_data[64];
     uint16_t output_data[64];
+    uint16_t parallel_output_data[64];
+    uint16_t cdef_chroma[2][16];
+    uint16_t deblocked_chroma[2][16];
+    uint16_t output_chroma[2][16];
+    uint16_t parallel_output_chroma[2][16];
     Av1FramePlanes cdef;
     Av1FramePlanes deblocked;
     Av1FramePlanes output;
+    Av1FramePlanes parallel_output;
     Av1RestorationUnit units[3];
     Av1RestorationState restoration;
+    OutOfOrderExecutorState executor_state = { 0U, 0U, 0U };
+    AvifdecExecutor executor = {
+        &executor_state, 4U, out_of_order_parallel_for
+    };
     uint8_t frame_type[3] = { 1U, 0U, 0U };
     uint16_t unit_size[3] = { 64U, 0U, 0U };
     unsigned int depth_index;
+    unsigned int plane;
     unsigned int set;
     unsigned int index;
 
     avifdec_memory_fill(&cdef, 0U, sizeof(cdef));
     avifdec_memory_fill(&deblocked, 0U, sizeof(deblocked));
     avifdec_memory_fill(&output, 0U, sizeof(output));
+    avifdec_memory_fill(
+        &parallel_output, 0U, sizeof(parallel_output));
     cdef.data[0] = cdef_data;
     deblocked.data[0] = deblocked_data;
     output.data[0] = output_data;
+    parallel_output.data[0] = parallel_output_data;
     cdef.stride[0] = 8U;
     deblocked.stride[0] = 8U;
     output.stride[0] = 8U;
+    parallel_output.stride[0] = 8U;
     for (depth_index = 0U; depth_index < 3U; ++depth_index) {
         uint8_t bit_depth = (uint8_t)(8U + 2U * depth_index);
         uint16_t value = (uint16_t)(137U << (bit_depth - 8U));
@@ -3370,6 +3385,7 @@ static int test_av1_loop_restoration(void) {
             cdef_data[index] = value;
             deblocked_data[index] = value;
             output_data[index] = 0U;
+            parallel_output_data[index] = 0U;
         }
         CHECK(av1_restoration_state_init(
                   &restoration, units, 3U, 8U, 8U, 8U, frame_type,
@@ -3385,7 +3401,19 @@ static int test_av1_loop_restoration(void) {
         CHECK(av1_loop_restoration_frame(
                   &output, &cdef, &deblocked, &restoration, bit_depth) ==
               AVIFDEC_OK);
+        executor_state.calls = 0U;
+        CHECK(av1_loop_restoration_frame_ex(
+                  &parallel_output, &cdef, &deblocked,
+                  &restoration, bit_depth, &executor) ==
+              AVIFDEC_OK);
+        CHECK(executor_state.calls == 1U &&
+              executor_state.count == 2U &&
+              executor_state.min_chunk == 1U);
         for (index = 0U; index < 64U; ++index) CHECK(output_data[index] == value);
+        for (index = 0U; index < 64U; ++index) {
+            CHECK(parallel_output_data[index] ==
+                  output_data[index]);
+        }
         frame_type[0] = 2U;
         for (set = 0U; set < 16U; ++set) {
             CHECK(av1_restoration_state_init(
@@ -3412,6 +3440,95 @@ static int test_av1_loop_restoration(void) {
               AVIFDEC_OK);
         for (index = 0U; index < 64U; ++index) CHECK(output_data[index] == value);
         frame_type[0] = 1U;
+    }
+    for (index = 0U; index < 64U; ++index) {
+        cdef_data[index] = (uint16_t)(
+            (index * 37U + (index >> 3U) * 19U) & 255U);
+        deblocked_data[index] = (uint16_t)(
+            (index * 11U + 53U) & 255U);
+        output_data[index] = 0U;
+        parallel_output_data[index] = 0U;
+    }
+    CHECK(av1_restoration_state_init(
+              &restoration, units, 3U, 8U, 8U, 8U,
+              frame_type, unit_size, 1, 0, 0) == AVIFDEC_OK);
+    units[0].parsed = 1U;
+    units[0].type = 1U;
+    units[0].wiener[0][0] = 3;
+    units[0].wiener[0][1] = -7;
+    units[0].wiener[0][2] = 15;
+    units[0].wiener[1][0] = -5;
+    units[0].wiener[1][1] = 8;
+    units[0].wiener[1][2] = 22;
+    CHECK(av1_loop_restoration_frame(
+              &output, &cdef, &deblocked,
+              &restoration, 8U) == AVIFDEC_OK);
+    executor_state.calls = 0U;
+    CHECK(av1_loop_restoration_frame_ex(
+              &parallel_output, &cdef, &deblocked,
+              &restoration, 8U, &executor) == AVIFDEC_OK);
+    CHECK(executor_state.calls == 1U &&
+          executor_state.count == 2U);
+    for (index = 0U; index < 64U; ++index) {
+        CHECK(parallel_output_data[index] ==
+              output_data[index]);
+    }
+    units[0].type = 3U;
+    executor_state.calls = 0U;
+    CHECK(av1_loop_restoration_frame_ex(
+              &parallel_output, &cdef, &deblocked,
+              &restoration, 8U, &executor) ==
+          AVIFDEC_INVALID_DATA);
+    CHECK(executor_state.calls == 0U);
+    for (plane = 0U; plane < 2U; ++plane) {
+        cdef.data[plane + 1U] = cdef_chroma[plane];
+        deblocked.data[plane + 1U] =
+            deblocked_chroma[plane];
+        output.data[plane + 1U] = output_chroma[plane];
+        parallel_output.data[plane + 1U] =
+            parallel_output_chroma[plane];
+        cdef.stride[plane + 1U] = 4U;
+        deblocked.stride[plane + 1U] = 4U;
+        output.stride[plane + 1U] = 4U;
+        parallel_output.stride[plane + 1U] = 4U;
+        for (index = 0U; index < 16U; ++index) {
+            cdef_chroma[plane][index] =
+                (uint16_t)(plane * 31U + index * 7U);
+            deblocked_chroma[plane][index] =
+                (uint16_t)(plane * 17U + index * 5U);
+            output_chroma[plane][index] = 0U;
+            parallel_output_chroma[plane][index] = 0U;
+        }
+    }
+    CHECK(av1_restoration_state_init(
+              &restoration, units, 3U, 8U, 8U, 8U,
+              frame_type, unit_size, 0, 1, 1) == AVIFDEC_OK);
+    units[0].parsed = 1U;
+    units[0].type = 1U;
+    units[0].wiener[0][0] = 3;
+    units[0].wiener[0][1] = -7;
+    units[0].wiener[0][2] = 15;
+    units[0].wiener[1][0] = -5;
+    units[0].wiener[1][1] = 8;
+    units[0].wiener[1][2] = 22;
+    CHECK(av1_loop_restoration_frame(
+              &output, &cdef, &deblocked,
+              &restoration, 8U) == AVIFDEC_OK);
+    executor_state.calls = 0U;
+    CHECK(av1_loop_restoration_frame_ex(
+              &parallel_output, &cdef, &deblocked,
+              &restoration, 8U, &executor) == AVIFDEC_OK);
+    CHECK(executor_state.calls == 1U &&
+          executor_state.count == 6U);
+    for (index = 0U; index < 64U; ++index) {
+        CHECK(parallel_output_data[index] ==
+              output_data[index]);
+    }
+    for (plane = 0U; plane < 2U; ++plane) {
+        for (index = 0U; index < 16U; ++index) {
+            CHECK(parallel_output_chroma[plane][index] ==
+                  output_chroma[plane][index]);
+        }
     }
     return 0;
 }
