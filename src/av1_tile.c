@@ -3051,17 +3051,13 @@ static int av1_tile_mode_is_smooth(uint8_t mode) {
 static uint8_t av1_tile_intra_filter_type(const Av1TileResidualState *state,
                                           const Av1BlockTraceFields *block,
                                           unsigned int plane,
-                                          uint32_t plane_offset_x4,
-                                          uint32_t plane_offset_y4,
                                           const Av1BlockAvailability *availability) {
     int above_smooth = 0;
     int left_smooth = 0;
 
     if (plane == 0U ? availability->above : availability->above_chroma) {
         int64_t row = (int64_t)block->row - 1;
-        int64_t column = (int64_t)block->column +
-                         (int64_t)(plane_offset_x4 <<
-                             (plane == 0U ? 0U : state->subsampling_x));
+        int64_t column = (int64_t)block->column;
         const Av1BlockCell *cell;
         if (plane != 0U) {
             if (state->subsampling_x && !(column & 1)) ++column;
@@ -3072,9 +3068,7 @@ static uint8_t av1_tile_intra_filter_type(const Av1TileResidualState *state,
             plane == 0U ? cell->y_mode : cell->uv_mode);
     }
     if (plane == 0U ? availability->left : availability->left_chroma) {
-        int64_t row = (int64_t)block->row +
-                      (int64_t)(plane_offset_y4 <<
-                          (plane == 0U ? 0U : state->subsampling_y));
+        int64_t row = (int64_t)block->row;
         int64_t column = (int64_t)block->column - 1;
         const Av1BlockCell *cell;
         if (plane != 0U) {
@@ -3218,8 +3212,7 @@ static AvifdecStatus av1_tile_predict_chunk(
     }
     if (mode >= 1U && mode <= 8U) {
         filter_type = av1_tile_intra_filter_type(
-            state, block, plane, plane_offset_x4, plane_offset_y4,
-            &availability);
+            state, block, plane, &availability);
         return av1_predict_directional_edges(
             destination, stride, width, height,
             state->dequant_params.bit_depth,
