@@ -27,6 +27,17 @@ and restoration row threading do not. Applications should cap executor width,
 enforce their own memory budgets, and retain a width-1 fallback for untrusted
 or unusually large inputs.
 
+Reduced-still queries may return substantially smaller AV1 workspace because
+inter-frame references are impossible and exact pass-through filter planes can
+alias. Applications must still allocate the complete queried requirement and
+must not reuse a plan across different inputs or executor widths.
+
+Adaptive compressed PNG output requires the separate
+`avifdec_png_workspace_requirement()` allocation. It is bounded by a fixed
+458,752-byte compressor core plus three scanlines, rejects filtered streams
+larger than `UINT32_MAX`, and reports row-provider or output-callback failures
+instead of continuing with a partial success result.
+
 ## Reporting Security Issues
 
 Security reports are welcome via mathiasschindler@github.com. Reports may also

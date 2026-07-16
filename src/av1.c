@@ -606,6 +606,37 @@ static void av1_trace_hash(AvifdecEntropyTrace *trace, uint64_t value) {
     av1_trace_hash_value(&trace->checksum, value);
 }
 
+static int av1_cdef_is_identity(const Av1Sequence *sequence,
+                                const Av1Frame *frame) {
+    uint32_t index;
+    uint32_t count;
+
+    if (sequence == 0 || frame == 0) return 0;
+    count = (uint32_t)1U << frame->cdef_bits;
+    for (index = 0U; index < count; ++index) {
+        if (frame->cdef_y_pri_strength[index] != 0U ||
+            frame->cdef_y_sec_strength[index] != 0U ||
+            (!sequence->monochrome &&
+             (frame->cdef_uv_pri_strength[index] != 0U ||
+              frame->cdef_uv_sec_strength[index] != 0U))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int av1_restoration_is_identity(const Av1Sequence *sequence,
+                                       const Av1Frame *frame) {
+    unsigned int plane;
+
+    if (sequence == 0 || frame == 0) return 0;
+    for (plane = 0U; plane < (sequence->monochrome ? 1U : 3U);
+         ++plane) {
+        if (frame->restoration_type[plane] != 0U) return 0;
+    }
+    return 1;
+}
+
 static uint32_t av1_motion_abs(int32_t value) {
     return value < 0 ? (uint32_t)(-(int64_t)value) : (uint32_t)value;
 }
@@ -619,7 +650,10 @@ static void av1_store_current_motion(
     uint32_t columns = (frame->mi_cols + 1U) >> 1;
     uint32_t y8;
 
-    if (state == 0 || !state->initialized) return;
+    if (state == 0 || !state->initialized ||
+        state->current_motion == 0) {
+        return;
+    }
     avifdec_memory_fill(state->current_motion, 0U,
                         state->motion_field_capacity *
                         sizeof(*state->current_motion));
@@ -894,7 +928,7 @@ static AvifdecStatus av1_reference_commit(
                 saved_planes =
                     &state->reference_planes[frame->frame_to_show_map_idx];
             }
-        } else {
+        } else if (state->reference_planes[0].data[0] != 0) {
             saved.pixels_valid = 1U;
             saved_planes = &state->restored_planes;
         }
@@ -927,6 +961,8 @@ static AvifdecStatus av1_reference_commit(
             }
             references->slots[slot_index] = saved;
             if (state != 0 && state->initialized &&
+                state->reference_motion != 0 &&
+                state->current_motion != 0 &&
                 !frame->show_existing_frame) {
                 avifdec_memory_copy(
                     &state->reference_motion[
@@ -1135,6 +1171,7 @@ static void av1_setup_motion_field(
                 sizeof(state->logical_reference_planes[reference]));
         }
     }
+    if (state->temporal_motion == 0) return;
     avifdec_memory_fill(state->temporal_motion, 0U,
                         state->motion_field_capacity *
                         sizeof(*state->temporal_motion));
@@ -1191,15 +1228,28 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     size_t temporal_motion_samples;
     size_t restoration_units;
     unsigned int plane;
+    int alias_cdef;
+    int alias_superres;
+    int alias_restoration;
 
     if (state->initialized) return AVIFDEC_OK;
+    alias_cdef = sequence->reduced_still_picture_header &&
+        av1_cdef_is_identity(sequence, frame);
+    alias_superres = sequence->reduced_still_picture_header &&
+        frame->upscaled_width == frame->frame_width;
+    alias_restoration = sequence->reduced_still_picture_header &&
+        av1_restoration_is_identity(sequence, frame);
     max_mi_columns = 2U * ((sequence->max_width + 7U) >> 3);
     max_mi_rows = 2U * ((sequence->max_height + 7U) >> 3);
     if (max_mi_rows == 0U || max_mi_columns == 0U ||
         !avifdec_size_multiply(max_mi_rows, max_mi_columns, &cells)) {
         return AVIFDEC_OVERFLOW;
     }
-    if (!avifdec_size_multiply(cells, 3U, &restoration_units)) {
+    if (av1_restoration_unit_capacity(
+            sequence->max_width, sequence->max_height,
+            sequence->monochrome, sequence->subsampling_x,
+            sequence->subsampling_y,
+            &restoration_units) != AVIFDEC_OK) {
         return AVIFDEC_OVERFLOW;
     }
     motion_columns = ((size_t)sequence->max_width + 7U) / 8U;
@@ -1223,17 +1273,25 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         &state->arena,
         AV1_NUM_REF_FRAMES * sizeof(*state->reference_cdfs),
         _Alignof(Av1TileCdfs));
-    state->reference_motion = (Av1SavedMotion *)avifdec_arena_allocate(
-        &state->arena,
-        reference_motion_samples * sizeof(*state->reference_motion),
-        _Alignof(Av1SavedMotion));
-    state->current_motion = (Av1SavedMotion *)avifdec_arena_allocate(
-        &state->arena, motion_samples * sizeof(*state->current_motion),
-        _Alignof(Av1SavedMotion));
-    state->temporal_motion = (Av1TemporalMotion *)avifdec_arena_allocate(
-        &state->arena,
-        temporal_motion_samples * sizeof(*state->temporal_motion),
-        _Alignof(Av1TemporalMotion));
+    if (!sequence->reduced_still_picture_header) {
+        state->reference_motion =
+            (Av1SavedMotion *)avifdec_arena_allocate(
+                &state->arena,
+                reference_motion_samples *
+                sizeof(*state->reference_motion),
+                _Alignof(Av1SavedMotion));
+        state->current_motion =
+            (Av1SavedMotion *)avifdec_arena_allocate(
+                &state->arena,
+                motion_samples * sizeof(*state->current_motion),
+                _Alignof(Av1SavedMotion));
+        state->temporal_motion =
+            (Av1TemporalMotion *)avifdec_arena_allocate(
+                &state->arena,
+                temporal_motion_samples *
+                sizeof(*state->temporal_motion),
+                _Alignof(Av1TemporalMotion));
+    }
     state->cells = (Av1BlockCell *)avifdec_arena_allocate(
         &state->arena, cells * sizeof(*state->cells), _Alignof(Av1BlockCell));
     state->block_widths = (uint8_t *)avifdec_arena_allocate(
@@ -1336,51 +1394,80 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
             (uint16_t *)avifdec_arena_allocate(
                 &state->arena, coded_samples * sizeof(uint16_t),
                 _Alignof(uint16_t));
-        state->cdef_planes.data[plane] =
-            (uint16_t *)avifdec_arena_allocate(
-                &state->arena, coded_samples * sizeof(uint16_t),
-                _Alignof(uint16_t));
         state->deblocked_planes.stride[plane] =
             state->frame_planes.width[plane];
-        state->cdef_planes.stride[plane] = state->frame_planes.width[plane];
         state->deblocked_planes.width[plane] = state->frame_planes.width[plane];
-        state->cdef_planes.width[plane] = state->frame_planes.width[plane];
         state->deblocked_planes.height[plane] = state->frame_planes.height[plane];
-        state->cdef_planes.height[plane] = state->frame_planes.height[plane];
-        state->upscaled_deblocked_planes.data[plane] =
-            (uint16_t *)avifdec_arena_allocate(
-                &state->arena, upscaled_samples * sizeof(uint16_t),
-                _Alignof(uint16_t));
-        state->upscaled_cdef_planes.data[plane] =
-            (uint16_t *)avifdec_arena_allocate(
-                &state->arena, upscaled_samples * sizeof(uint16_t),
-                _Alignof(uint16_t));
-        state->restored_planes.data[plane] =
-            (uint16_t *)avifdec_arena_allocate(
-                &state->arena, upscaled_samples * sizeof(uint16_t),
-                _Alignof(uint16_t));
-        state->upscaled_deblocked_planes.stride[plane] = upscaled_width;
-        state->upscaled_cdef_planes.stride[plane] = upscaled_width;
-        state->restored_planes.stride[plane] = upscaled_width;
-        state->upscaled_deblocked_planes.width[plane] = upscaled_width;
-        state->upscaled_cdef_planes.width[plane] = upscaled_width;
-        state->restored_planes.width[plane] = upscaled_width;
-        state->upscaled_deblocked_planes.height[plane] = upscaled_height;
-        state->upscaled_cdef_planes.height[plane] = upscaled_height;
-        state->restored_planes.height[plane] = upscaled_height;
-        for (slot = 0U; slot < AV1_NUM_REF_FRAMES; ++slot) {
-            state->reference_planes[slot].data[plane] =
+        if (alias_cdef) {
+            state->cdef_planes = state->deblocked_planes;
+        } else {
+            state->cdef_planes.data[plane] =
                 (uint16_t *)avifdec_arena_allocate(
-                    &state->arena,
-                    upscaled_samples * sizeof(uint16_t),
+                    &state->arena, coded_samples * sizeof(uint16_t),
                     _Alignof(uint16_t));
-            state->reference_planes[slot].stride[plane] = upscaled_width;
-            state->reference_planes[slot].width[plane] = upscaled_width;
-            state->reference_planes[slot].height[plane] = upscaled_height;
-            if (state->reference_planes[slot].data[plane] != 0) {
-                avifdec_memory_fill(
-                    state->reference_planes[slot].data[plane], 0U,
-                    upscaled_samples * sizeof(uint16_t));
+            state->cdef_planes.stride[plane] =
+                state->frame_planes.width[plane];
+            state->cdef_planes.width[plane] =
+                state->frame_planes.width[plane];
+            state->cdef_planes.height[plane] =
+                state->frame_planes.height[plane];
+        }
+        if (alias_superres) {
+            state->upscaled_deblocked_planes =
+                state->deblocked_planes;
+            state->upscaled_cdef_planes = state->cdef_planes;
+        } else {
+            state->upscaled_deblocked_planes.data[plane] =
+                (uint16_t *)avifdec_arena_allocate(
+                    &state->arena, upscaled_samples * sizeof(uint16_t),
+                    _Alignof(uint16_t));
+            state->upscaled_cdef_planes.data[plane] =
+                (uint16_t *)avifdec_arena_allocate(
+                    &state->arena, upscaled_samples * sizeof(uint16_t),
+                    _Alignof(uint16_t));
+            state->upscaled_deblocked_planes.stride[plane] =
+                upscaled_width;
+            state->upscaled_cdef_planes.stride[plane] =
+                upscaled_width;
+            state->upscaled_deblocked_planes.width[plane] =
+                upscaled_width;
+            state->upscaled_cdef_planes.width[plane] =
+                upscaled_width;
+            state->upscaled_deblocked_planes.height[plane] =
+                upscaled_height;
+            state->upscaled_cdef_planes.height[plane] =
+                upscaled_height;
+        }
+        if (alias_restoration) {
+            state->restored_planes =
+                state->upscaled_cdef_planes;
+        } else {
+            state->restored_planes.data[plane] =
+                (uint16_t *)avifdec_arena_allocate(
+                    &state->arena, upscaled_samples * sizeof(uint16_t),
+                    _Alignof(uint16_t));
+            state->restored_planes.stride[plane] = upscaled_width;
+            state->restored_planes.width[plane] = upscaled_width;
+            state->restored_planes.height[plane] = upscaled_height;
+        }
+        if (!sequence->reduced_still_picture_header) {
+            for (slot = 0U; slot < AV1_NUM_REF_FRAMES; ++slot) {
+                state->reference_planes[slot].data[plane] =
+                    (uint16_t *)avifdec_arena_allocate(
+                        &state->arena,
+                        upscaled_samples * sizeof(uint16_t),
+                        _Alignof(uint16_t));
+                state->reference_planes[slot].stride[plane] =
+                    upscaled_width;
+                state->reference_planes[slot].width[plane] =
+                    upscaled_width;
+                state->reference_planes[slot].height[plane] =
+                    upscaled_height;
+                if (state->reference_planes[slot].data[plane] != 0) {
+                    avifdec_memory_fill(
+                        state->reference_planes[slot].data[plane], 0U,
+                        upscaled_samples * sizeof(uint16_t));
+                }
             }
         }
     }
@@ -1401,8 +1488,10 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         state->reference_cdfs == 0 ||
         (sequence->film_grain_params_present &&
          state->film_grain_scratch == 0) ||
-        state->reference_motion == 0 || state->current_motion == 0 ||
-        state->temporal_motion == 0 ||
+        (!sequence->reduced_still_picture_header &&
+         (state->reference_motion == 0 ||
+          state->current_motion == 0 ||
+          state->temporal_motion == 0)) ||
         state->cells == 0 || state->block_widths == 0 ||
         state->block_heights == 0 || state->tx_types == 0 ||
         state->loop_filter_tx_sizes[0] == 0 ||
@@ -1415,16 +1504,21 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         state->upscaled_deblocked_planes.data[0] == 0 ||
         state->upscaled_cdef_planes.data[0] == 0 ||
         state->restored_planes.data[0] == 0 ||
-        state->reference_planes[0].data[0] == 0 ||
-        state->reference_planes[AV1_NUM_REF_FRAMES - 1U].data[0] == 0 ||
+        (!sequence->reduced_still_picture_header &&
+         (state->reference_planes[0].data[0] == 0 ||
+          state->reference_planes[
+              AV1_NUM_REF_FRAMES - 1U].data[0] == 0)) ||
         state->frame_planes.data[0] == 0 ||
         (!sequence->monochrome &&
          (state->frame_planes.data[1] == 0 ||
           state->frame_planes.data[2] == 0 ||
-          state->reference_planes[0].data[1] == 0 ||
-          state->reference_planes[0].data[2] == 0 ||
-          state->reference_planes[AV1_NUM_REF_FRAMES - 1U].data[1] == 0 ||
-          state->reference_planes[AV1_NUM_REF_FRAMES - 1U].data[2] == 0)) ||
+          (!sequence->reduced_still_picture_header &&
+           (state->reference_planes[0].data[1] == 0 ||
+            state->reference_planes[0].data[2] == 0 ||
+            state->reference_planes[
+                AV1_NUM_REF_FRAMES - 1U].data[1] == 0 ||
+            state->reference_planes[
+                AV1_NUM_REF_FRAMES - 1U].data[2] == 0)))) ||
         state->quantized == 0 ||
         state->dequantized == 0 || state->residual_scratch == 0 ||
         state->inter_pred0 == 0 || state->inter_pred1 == 0 ||
@@ -1444,14 +1538,17 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     av1_tile_cdfs_init_frame(state->frame_cdfs, frame->base_q_index);
     avifdec_memory_fill(state->reference_cdf_valid, 0U,
                         sizeof(state->reference_cdf_valid));
-    avifdec_memory_fill(state->reference_motion, 0U,
-                        reference_motion_samples *
-                        sizeof(*state->reference_motion));
-    avifdec_memory_fill(state->current_motion, 0U,
-                        motion_samples * sizeof(*state->current_motion));
-    avifdec_memory_fill(state->temporal_motion, 0U,
-                        temporal_motion_samples *
-                        sizeof(*state->temporal_motion));
+    if (!sequence->reduced_still_picture_header) {
+        avifdec_memory_fill(state->reference_motion, 0U,
+                            reference_motion_samples *
+                            sizeof(*state->reference_motion));
+        avifdec_memory_fill(state->current_motion, 0U,
+                            motion_samples *
+                            sizeof(*state->current_motion));
+        avifdec_memory_fill(state->temporal_motion, 0U,
+                            temporal_motion_samples *
+                            sizeof(*state->temporal_motion));
+    }
     if (av1_restoration_state_init(
             &state->restoration, state->restoration_units, restoration_units,
             frame->upscaled_width, frame->frame_height, frame->superres_denom,
@@ -1676,10 +1773,13 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     cdef.uv_sec_strength = frame->cdef_uv_sec_strength;
     cdef.indices = state->cdef_indices;
     cdef.index_capacity = state->cell_count;
-    status = av1_cdef_frame_ex(
-        &state->cdef_planes, &state->deblocked_planes,
-        &state->block_state, &cdef, state->executor);
-    if (status != AVIFDEC_OK) return status;
+    if (state->cdef_planes.data[0] !=
+        state->deblocked_planes.data[0]) {
+        status = av1_cdef_frame_ex(
+            &state->cdef_planes, &state->deblocked_planes,
+            &state->block_state, &cdef, state->executor);
+        if (status != AVIFDEC_OK) return status;
+    }
     if (state->trace_enabled) {
         status = av1_trace_stage_checksum(
             &state->trace->cdef_checksum, &state->cdef_planes, sequence,
@@ -1687,42 +1787,51 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
         if (status != AVIFDEC_OK) return status;
     }
 
-    if (frame->upscaled_width == frame->frame_width) {
-        status = av1_trace_copy_visible_planes(
-            &state->upscaled_deblocked_planes, &state->deblocked_planes,
-            sequence, frame->upscaled_width, frame->frame_height);
-        if (status == AVIFDEC_OK) {
+    if (state->upscaled_deblocked_planes.data[0] !=
+        state->deblocked_planes.data[0]) {
+        if (frame->upscaled_width == frame->frame_width) {
             status = av1_trace_copy_visible_planes(
-                &state->upscaled_cdef_planes, &state->cdef_planes,
-                sequence, frame->upscaled_width, frame->frame_height);
-        }
-        if (status != AVIFDEC_OK) return status;
-    } else {
-        for (plane = 0U; plane < plane_count; ++plane) {
-            unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
-            unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
-            uint32_t input_width = (frame->frame_width +
-                ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-            uint32_t padded_input_width =
-                (frame->mi_cols * 4U) >> sub_x;
-            uint32_t output_width = (frame->upscaled_width +
-                ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-            uint32_t height = (frame->frame_height +
-                ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-            status = av1_superres_upscale_plane(
-                state->upscaled_deblocked_planes.data[plane], output_width,
-                output_width, state->deblocked_planes.data[plane],
-                state->deblocked_planes.stride[plane], input_width,
-                padded_input_width, height,
-                sequence->bit_depth);
+                &state->upscaled_deblocked_planes,
+                &state->deblocked_planes, sequence,
+                frame->upscaled_width, frame->frame_height);
+            if (status == AVIFDEC_OK) {
+                status = av1_trace_copy_visible_planes(
+                    &state->upscaled_cdef_planes,
+                    &state->cdef_planes, sequence,
+                    frame->upscaled_width, frame->frame_height);
+            }
             if (status != AVIFDEC_OK) return status;
-            status = av1_superres_upscale_plane(
-                state->upscaled_cdef_planes.data[plane], output_width,
-                output_width, state->cdef_planes.data[plane],
-                state->cdef_planes.stride[plane], input_width,
-                padded_input_width, height,
-                sequence->bit_depth);
-            if (status != AVIFDEC_OK) return status;
+        } else {
+            for (plane = 0U; plane < plane_count; ++plane) {
+                unsigned int sub_x =
+                    plane == 0U ? 0U : sequence->subsampling_x;
+                unsigned int sub_y =
+                    plane == 0U ? 0U : sequence->subsampling_y;
+                uint32_t input_width = (frame->frame_width +
+                    ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+                uint32_t padded_input_width =
+                    (frame->mi_cols * 4U) >> sub_x;
+                uint32_t output_width = (frame->upscaled_width +
+                    ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+                uint32_t height = (frame->frame_height +
+                    ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+                status = av1_superres_upscale_plane(
+                    state->upscaled_deblocked_planes.data[plane],
+                    output_width, output_width,
+                    state->deblocked_planes.data[plane],
+                    state->deblocked_planes.stride[plane],
+                    input_width, padded_input_width, height,
+                    sequence->bit_depth);
+                if (status != AVIFDEC_OK) return status;
+                status = av1_superres_upscale_plane(
+                    state->upscaled_cdef_planes.data[plane],
+                    output_width, output_width,
+                    state->cdef_planes.data[plane],
+                    state->cdef_planes.stride[plane],
+                    input_width, padded_input_width, height,
+                    sequence->bit_depth);
+                if (status != AVIFDEC_OK) return status;
+            }
         }
     }
     if (state->trace_enabled) {
@@ -1731,11 +1840,14 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
             sequence, frame->upscaled_width, frame->frame_height);
         if (status != AVIFDEC_OK) return status;
     }
-    status = av1_loop_restoration_frame_ex(
-        &state->restored_planes, &state->upscaled_cdef_planes,
-        &state->upscaled_deblocked_planes, &state->restoration,
-        sequence->bit_depth, state->executor);
-    if (status != AVIFDEC_OK) return status;
+    if (state->restored_planes.data[0] !=
+        state->upscaled_cdef_planes.data[0]) {
+        status = av1_loop_restoration_frame_ex(
+            &state->restored_planes, &state->upscaled_cdef_planes,
+            &state->upscaled_deblocked_planes, &state->restoration,
+            sequence->bit_depth, state->executor);
+        if (status != AVIFDEC_OK) return status;
+    }
     if (state->trace_enabled) {
         status = av1_trace_stage_checksum(
             &state->trace->restoration_checksum, &state->restored_planes,
@@ -2984,13 +3096,20 @@ static AvifdecStatus av1_workspace_requirement(
     }
     if (!avifdec_size_multiply(
             plane_samples, sizeof(uint16_t), &plane_workspace) ||
-        !avifdec_size_multiply(plane_workspace, 14U, &plane_workspace) ||
+        !avifdec_size_multiply(
+            plane_workspace,
+            info->workspace_plane_buffer_count != 0U
+                ? info->workspace_plane_buffer_count
+                : (info->reduced_still_picture_header ? 6U : 14U),
+            &plane_workspace) ||
         !avifdec_size_multiply(
             pixels, info->bit_depth > 8U ? 2U : 1U, &result) ||
         !avifdec_size_multiply(
             result, info->monochrome ? 2U : 6U, &result) ||
         av1_tile_workspace_requirement(
-            width, height, &tile_workspace) != AVIFDEC_OK ||
+            width, height, info->monochrome,
+            info->subsampling_x, info->subsampling_y,
+            &tile_workspace) != AVIFDEC_OK ||
         !avifdec_size_add(result, tile_workspace, &result) ||
         !avifdec_size_add(
             result, 6144U * sizeof(int32_t) + _Alignof(int32_t) - 1U,
@@ -3565,6 +3684,19 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     info->render_width = frame.render_width;
     info->render_height = frame.render_height;
     info->reduced_still_picture_header = sequence.reduced_still_picture_header;
+    info->workspace_plane_buffer_count =
+        sequence.reduced_still_picture_header ? 6U : 14U;
+    if (sequence.reduced_still_picture_header) {
+        if (av1_cdef_is_identity(&sequence, &frame)) {
+            --info->workspace_plane_buffer_count;
+        }
+        if (frame.upscaled_width == frame.frame_width) {
+            info->workspace_plane_buffer_count -= 2U;
+        }
+        if (av1_restoration_is_identity(&sequence, &frame)) {
+            --info->workspace_plane_buffer_count;
+        }
+    }
     info->film_grain_params_present =
         sequence.film_grain_params_present;
     info->film_grain_applied = frame.film_grain.apply_grain;

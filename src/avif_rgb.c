@@ -220,10 +220,13 @@ static void avif_rgb_store_u16(unsigned char *destination,
     avifdec_memory_copy(destination, &value, sizeof(value));
 }
 
-AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
-                                   const AvifdecImageInfo *info,
-                                   AvifdecRgbImage *rgb,
-                                   AvifdecError *error) {
+static AvifdecStatus avifdec_image_to_rgb_rows(
+    const AvifdecImage *image,
+    const AvifdecImageInfo *info,
+    AvifdecRgbImage *rgb,
+    uint32_t first_output_y,
+    uint32_t output_rows,
+    AvifdecError *error) {
     AvifRgbMatrix matrix = { 0, 0, 0, 0 };
     uint32_t source_width;
     uint32_t source_height;
@@ -246,7 +249,8 @@ AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
         error->offset = 0U;
         error->context = 0U;
     }
-    if (image == 0 || info == 0 || rgb == 0 || rgb->pixels == 0) {
+    if (image == 0 || info == 0 || rgb == 0 || rgb->pixels == 0 ||
+        output_rows == 0U) {
         return avif_rgb_fail(error, AVIFDEC_INVALID_ARGUMENT);
     }
     if (rgb->format > AVIFDEC_RGBA16 ||
@@ -308,7 +312,9 @@ AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
     if (info->presentation_width != presentation_width ||
         info->presentation_height != presentation_height ||
         rgb->width != presentation_width ||
-        rgb->height != presentation_height) {
+        rgb->height != presentation_height ||
+        first_output_y >= presentation_height ||
+        output_rows > presentation_height - first_output_y) {
         return avif_rgb_fail(error, AVIFDEC_INVALID_ARGUMENT);
     }
 
@@ -363,17 +369,18 @@ AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
         return avif_rgb_fail(error, AVIFDEC_INVALID_ARGUMENT);
     }
     if (!avifdec_size_multiply(
-            (size_t)presentation_height - 1U,
+            (size_t)output_rows - 1U,
             rgb->stride, &output_last_row) ||
         !avifdec_size_add(output_last_row, row_bytes, &output_size)) {
         return avif_rgb_fail(error, AVIFDEC_OVERFLOW);
     }
     (void)output_size;
 
-    for (output_y = 0U; output_y < presentation_height; ++output_y) {
+    for (output_y = first_output_y;
+         output_y < first_output_y + output_rows; ++output_y) {
         unsigned char *output_row =
             (unsigned char *)rgb->pixels +
-            (size_t)output_y * rgb->stride;
+            (size_t)(output_y - first_output_y) * rgb->stride;
         uint32_t output_x;
 
         for (output_x = 0U; output_x < presentation_width; ++output_x) {
@@ -478,4 +485,24 @@ AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
         }
     }
     return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
+                                   const AvifdecImageInfo *info,
+                                   AvifdecRgbImage *rgb,
+                                   AvifdecError *error) {
+    if (rgb == 0) {
+        return avif_rgb_fail(error, AVIFDEC_INVALID_ARGUMENT);
+    }
+    return avifdec_image_to_rgb_rows(
+        image, info, rgb, 0U, rgb->height, error);
+}
+
+AvifdecStatus avifdec_image_to_rgb_row(const AvifdecImage *image,
+                                       const AvifdecImageInfo *info,
+                                       AvifdecRgbImage *rgb,
+                                       uint32_t row,
+                                       AvifdecError *error) {
+    return avifdec_image_to_rgb_rows(
+        image, info, rgb, row, 1U, error);
 }

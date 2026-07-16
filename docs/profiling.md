@@ -66,6 +66,47 @@ The large file requires 2,386,828,722 bytes of AVIF workspace. This is structura
 
 `Av1BlockCell` is 172 bytes in this build. Its motion-vector candidates, warp parameters, palettes, and inter/compound state make the cell grid a major contributor. Reducing this memory requires a separate representation change with broad reference testing; merely removing zero fills would expose stale caller workspace and invalid reference pixels.
 
+### Large-image workspace reductions
+
+The same 7563x5042 4:2:0 file uses the reduced-still AV1 header and selects
+identity CDEF, super-resolution, and restoration stages. Three conservative
+layout changes reduce its queried workspace:
+
+| Layout | Workspace | Incremental saving |
+| --- | ---: | ---: |
+| Previous layout | 2,386,828,722 bytes | - |
+| Restoration units bounded at the minimum legal 32-pixel geometry | 2,308,649,742 bytes | 78,178,980 bytes |
+| Reduced-still reference planes and motion fields elided | 1,364,931,342 bytes | 943,718,400 bytes |
+| Identity filter and super-resolution planes aliased | 893,072,142 bytes | 471,859,200 bytes |
+
+The cumulative reduction is 1,493,756,580 bytes (62.6%, or 1,424.6 MiB).
+Restoration capacity still covers every legal unit-size choice. Inter-frame
+streams retain all reference and motion allocations, and non-reduced streams
+retain the worst-case filter-plane layout because later frames may select
+different tools.
+
+The diagnostic command used for the original baseline now takes 4.51 seconds
+and 655,680 KiB maximum RSS, compared with 5.30 seconds and 2,063,424 KiB
+before these memory changes. A raw-output decode takes 4.62 seconds and
+766,272 KiB maximum RSS, including caller-owned decoded planes.
+
+### Streaming compressed PNG
+
+The previous PNG writer emitted filter-0 scanlines in stored DEFLATE blocks,
+and the CLI first allocated a complete packed presentation image. The new row
+path converts one RGB/RGBA row at a time, evaluates None/Sub/Up/Average/Paeth,
+uses fixed-Huffman LZ77 derived from the CC0 newos compressor, and flushes
+bounded 32 KiB `IDAT` chunks. Its caller-owned workspace is 458,752 fixed
+bytes plus three scanline buffers and alignment.
+
+For `tribu-large.avif`, a packed RGB image would require 114,397,938 bytes.
+The row path avoids that allocation. The filtered stream is 114,402,980 bytes;
+the resulting PNG is 60,883,969 bytes, 46.8% smaller than the uncompressed
+scanlines. End-to-end PNG decode, conversion, and encoding takes 7.48 seconds
+and 768,060 KiB maximum RSS. The corresponding raw decode peaks at 766,272
+KiB, so compressed PNG output adds about 1.7 MiB rather than a full packed
+frame.
+
 ## Implemented changes
 
 ### Default `-O2` build

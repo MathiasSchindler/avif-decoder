@@ -41,7 +41,7 @@ static int test_checked_arithmetic(void) {
     CHECK((capabilities & AVIFDEC_CAP_AV1_TILE_LIST) == 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_LARGE_SCALE_TILE) == 0U);
     CHECK(avifdec_memory_compare(
-        avifdec_version_string(), "1.1.0", 6U) == 0);
+        avifdec_version_string(), "1.2.0", 6U) == 0);
     CHECK(avifdec_size_add(3U, 4U, &result) && result == 7U);
     CHECK(!avifdec_size_add(SIZE_MAX, 1U, &result));
     CHECK(avifdec_size_multiply(7U, 9U, &result) && result == 63U);
@@ -1336,6 +1336,7 @@ static int test_avif_sample_transform(void) {
 static int test_avif_rgb_conversion(void) {
     uint16_t y[6] = { 1U, 2U, 3U, 4U, 5U, 6U };
     unsigned char rgb_pixels[18];
+    unsigned char rgb_row[6];
     unsigned char unspecified_pixels[3];
     unsigned char bt601_pixels[3];
     AvifdecImage image;
@@ -1386,6 +1387,16 @@ static int test_avif_rgb_conversion(void) {
             CHECK(rgb_pixels[3U * pixel + 1U] == expected[pixel]);
             CHECK(rgb_pixels[3U * pixel + 2U] == expected[pixel]);
         }
+        rgb.pixels = rgb_row;
+        for (pixel = 0U; pixel < 3U; ++pixel) {
+            CHECK(avifdec_image_to_rgb_row(
+                &image, &info, &rgb, (uint32_t)pixel,
+                &error) == AVIFDEC_OK);
+            CHECK(avifdec_memory_compare(
+                rgb_row, rgb_pixels + pixel * rgb.stride,
+                rgb.stride) == 0);
+        }
+        rgb.pixels = rgb_pixels;
     }
     {
         uint16_t color_y[1] = { 128U };
@@ -1442,6 +1453,11 @@ typedef struct {
     size_t size;
 } PngTestOutput;
 
+typedef struct {
+    const unsigned char *pixels;
+    size_t stride;
+} PngTestRows;
+
 static int png_test_write(void *user_data, const void *data, size_t size) {
     PngTestOutput *output = (PngTestOutput *)user_data;
 
@@ -1451,14 +1467,26 @@ static int png_test_write(void *user_data, const void *data, size_t size) {
     return 0;
 }
 
+static AvifdecStatus png_test_read_row(
+    void *user_data, uint32_t row, void *pixels, size_t size) {
+    const PngTestRows *rows = (const PngTestRows *)user_data;
+
+    avifdec_memory_copy(
+        pixels, rows->pixels + (size_t)row * rows->stride, size);
+    return AVIFDEC_OK;
+}
+
 static int test_png_writer(void) {
     static const uint16_t rgba16[4] = {
         0x0123U, 0x4567U, 0x89abU, 0xcdefU
     };
     static unsigned char wide_pixels[65535];
-    static unsigned char wide_png[65632];
+    static unsigned char wide_png[100000];
+    static unsigned char workspace[700000];
     unsigned char png[128];
     PngTestOutput output;
+    PngTestRows rows;
+    size_t workspace_required;
     size_t index;
 
     output.data = png;
@@ -1467,21 +1495,18 @@ static int test_png_writer(void) {
     CHECK(avifdec_png_write(
         png_test_write, &output, rgba16, sizeof(rgba16),
         1U, 1U, 4U, 16U, 0) == AVIFDEC_OK);
-    CHECK(output.size == 77U);
+    CHECK(output.size == 74U);
     CHECK(png[0] == 0x89U && png[1] == 'P' &&
           png[2] == 'N' && png[3] == 'G');
     CHECK(avifdec_load_u32be(png + 8U) == 13U);
     CHECK(png[24] == 16U && png[25] == 6U);
-    CHECK(avifdec_load_u32be(png + 33U) == 20U);
+    CHECK(avifdec_load_u32be(png + 33U) == 17U);
     CHECK(png[41] == 0x78U && png[42] == 0x01U);
-    CHECK(png[43] == 1U && png[44] == 9U && png[45] == 0U);
-    CHECK(png[48] == 0U);
-    CHECK(png[49] == 0x01U && png[50] == 0x23U);
-    CHECK(png[51] == 0x45U && png[52] == 0x67U);
-    CHECK(png[53] == 0x89U && png[54] == 0xabU);
-    CHECK(png[55] == 0xcdU && png[56] == 0xefU);
-    CHECK(png[69] == 'I' && png[70] == 'E' &&
-          png[71] == 'N' && png[72] == 'D');
+    CHECK((png[43] & 7U) == 3U);
+    CHECK(png[output.size - 8U] == 'I' &&
+          png[output.size - 7U] == 'E' &&
+          png[output.size - 6U] == 'N' &&
+          png[output.size - 5U] == 'D');
     CHECK(avifdec_png_write(
         png_test_write, &output, rgba16, 7U,
         1U, 1U, 4U, 16U, 0) == AVIFDEC_OVERFLOW);
@@ -1492,18 +1517,40 @@ static int test_png_writer(void) {
     output.data = wide_png;
     output.capacity = sizeof(wide_png);
     output.size = 0U;
-    CHECK(avifdec_png_write(
-        png_test_write, &output, wide_pixels, sizeof(wide_pixels),
+    rows.pixels = wide_pixels;
+    rows.stride = sizeof(wide_pixels);
+    CHECK(avifdec_png_workspace_requirement(
+        21845U, 3U, 8U, &workspace_required) == AVIFDEC_OK);
+    CHECK(workspace_required <= sizeof(workspace));
+    CHECK(avifdec_png_write_rows(
+        png_test_write, &output, png_test_read_row, &rows,
+        workspace, workspace_required - 1U,
+        21845U, 1U, 3U, 8U, 0) == AVIFDEC_OUT_OF_MEMORY);
+    CHECK(avifdec_png_write_rows(
+        png_test_write, &output, png_test_read_row, &rows,
+        workspace, workspace_required,
         21845U, 1U, 3U, 8U, 0) == AVIFDEC_OK);
-    CHECK(output.size == 65609U);
-    CHECK(png[43] == 1U);
-    CHECK(wide_png[43] == 0U);
-    CHECK(wide_png[44] == 0xffU && wide_png[45] == 0xffU);
-    CHECK(wide_png[46] == 0U && wide_png[47] == 0U);
-    CHECK(wide_png[65583] == 1U);
-    CHECK(wide_png[65584] == 1U && wide_png[65585] == 0U);
-    CHECK(wide_png[65586] == 0xfeU && wide_png[65587] == 0xffU);
-    CHECK(wide_png[65588] == wide_pixels[65534]);
+    CHECK(output.size < sizeof(wide_pixels) / 4U);
+    CHECK(wide_png[41] == 0x78U && wide_png[42] == 0x01U);
+    CHECK((wide_png[43] & 7U) == 3U);
+    {
+        uint32_t random = 1U;
+
+        for (index = 0U; index < sizeof(wide_pixels); ++index) {
+            random = random * 1664525U + 1013904223U;
+            wide_pixels[index] = (unsigned char)(random >> 24U);
+        }
+    }
+    output.size = 0U;
+    CHECK(avifdec_png_write_rows(
+        png_test_write, &output, png_test_read_row, &rows,
+        workspace, workspace_required,
+        21845U, 1U, 3U, 8U, 0) == AVIFDEC_OK);
+    CHECK(avifdec_load_u32be(wide_png + 33U) == 32768U);
+    CHECK(wide_png[32817U] == 'I' &&
+          wide_png[32818U] == 'D' &&
+          wide_png[32819U] == 'A' &&
+          wide_png[32820U] == 'T');
     return 0;
 }
 
@@ -3359,10 +3406,24 @@ static int test_av1_loop_restoration(void) {
     };
     uint8_t frame_type[3] = { 1U, 0U, 0U };
     uint16_t unit_size[3] = { 64U, 0U, 0U };
+    size_t unit_capacity;
     unsigned int depth_index;
     unsigned int plane;
     unsigned int set;
     unsigned int index;
+
+    CHECK(av1_restoration_unit_capacity(
+        65U, 33U, 1, 1, 1, &unit_capacity) == AVIFDEC_OK &&
+        unit_capacity == 2U);
+    CHECK(av1_restoration_unit_capacity(
+        65U, 33U, 0, 1, 1, &unit_capacity) == AVIFDEC_OK &&
+        unit_capacity == 4U);
+    CHECK(av1_restoration_unit_capacity(
+        65U, 33U, 0, 1, 0, &unit_capacity) == AVIFDEC_OK &&
+        unit_capacity == 4U);
+    CHECK(av1_restoration_unit_capacity(
+        65U, 33U, 0, 0, 0, &unit_capacity) == AVIFDEC_OK &&
+        unit_capacity == 6U);
 
     avifdec_memory_fill(&cdef, 0U, sizeof(cdef));
     avifdec_memory_fill(&deblocked, 0U, sizeof(deblocked));
@@ -4084,7 +4145,9 @@ static int test_av1_loop_restoration(void) {
 
         CHECK(avifdec_query(file, sizeof(file), 0, 0, 0U, &info, &error) ==
             AVIFDEC_OK);
-        CHECK(info.workspace_required == 639516U &&
+        CHECK(info.reduced_still_picture_header == 1U &&
+            info.workspace_plane_buffer_count == 2U &&
+            info.workspace_required == 344505U &&
             info.workspace_required <= sizeof(workspace));
         CHECK(avifdec_trace(file, sizeof(file), 0, workspace, sizeof(workspace),
                     &trace, &error) == AVIFDEC_OK);
@@ -4111,6 +4174,13 @@ static int test_av1_loop_restoration(void) {
         CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
                     sizeof(workspace), &untraced_image, 0, &error) ==
             AVIFDEC_OK);
+        CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
+                    info.workspace_required, &untraced_image, 0, &error) ==
+            AVIFDEC_OK);
+        CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
+                    info.workspace_required - 1U,
+                    &untraced_image, 0, &error) ==
+            AVIFDEC_OUT_OF_MEMORY);
         CHECK(traced_image.widths[0] == untraced_image.widths[0] &&
             traced_image.heights[0] == untraced_image.heights[0] &&
             traced_planes[0] == untraced_planes[0] &&

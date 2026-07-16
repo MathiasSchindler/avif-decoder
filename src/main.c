@@ -184,30 +184,79 @@ static int write_png_bytes(void *user_data, const void *data, size_t size) {
     return write_bytes(fd, data, size);
 }
 
+typedef struct {
+    const AvifdecImage *image;
+    const AvifdecImageInfo *info;
+    uint8_t format;
+    AvifdecError *error;
+} PngRgbRows;
+
+static AvifdecStatus read_png_rgb_row(
+    void *user_data, uint32_t row, void *pixels, size_t size) {
+    PngRgbRows *rows = (PngRgbRows *)user_data;
+    AvifdecRgbImage rgb;
+
+    rgb.pixels = pixels;
+    rgb.stride = size;
+    rgb.width = rows->info->presentation_width;
+    rgb.height = rows->info->presentation_height;
+    rgb.format = rows->format;
+    rgb.alpha_mode = AVIFDEC_ALPHA_STRAIGHT;
+    return avifdec_image_to_rgb_row(
+        rows->image, rows->info, &rgb, row, rows->error);
+}
+
 static AvifdecStatus write_png_file(
     const char *path,
-    const AvifdecRgbImage *rgb,
-    uint8_t bit_depth,
-    const AvifdecImageInfo *info) {
+    const AvifdecImage *image,
+    const AvifdecImageInfo *info,
+    AvifdecError *error) {
     AvifdecPngMetadata metadata;
+    PngRgbRows rows;
+    void *workspace;
+    size_t workspace_size;
+    uint8_t channels = info->has_alpha ? 4U : 3U;
+    uint8_t bit_depth =
+        info->bit_depth > 8U ||
+        (info->has_alpha && info->alpha_bit_depth > 8U)
+            ? 16U : 8U;
     AvifdecStatus status;
-    int fd = platform_open_write(path, 0644U);
+    int fd;
 
-    if (fd < 0) return AVIFDEC_IO_ERROR;
+    status = avifdec_png_workspace_requirement(
+        info->presentation_width, channels, bit_depth,
+        &workspace_size);
+    if (status != AVIFDEC_OK) return status;
+    workspace = platform_allocate_pages(workspace_size);
+    if (workspace == 0) return AVIFDEC_OUT_OF_MEMORY;
+    fd = platform_open_write(path, 0644U);
+    if (fd < 0) {
+        (void)platform_free_pages(workspace, workspace_size);
+        return AVIFDEC_IO_ERROR;
+    }
     metadata.pixel_aspect_h_spacing = info->pixel_aspect_h_spacing;
     metadata.pixel_aspect_v_spacing = info->pixel_aspect_v_spacing;
     metadata.color_primaries = info->color_primaries;
     metadata.transfer_characteristics = info->transfer_characteristics;
     metadata.has_nclx = info->has_nclx;
-    status = avifdec_png_write(
-        write_png_bytes, &fd, rgb->pixels, rgb->stride,
-        rgb->width, rgb->height,
-        rgb->format == AVIFDEC_RGBA8 ||
-        rgb->format == AVIFDEC_RGBA16 ? 4U : 3U,
-        bit_depth, &metadata);
+    rows.image = image;
+    rows.info = info;
+    rows.format = (uint8_t)(
+        channels == 4U
+            ? (bit_depth == 16U
+                ? AVIFDEC_RGBA16 : AVIFDEC_RGBA8)
+            : (bit_depth == 16U
+                ? AVIFDEC_RGB16 : AVIFDEC_RGB8));
+    rows.error = error;
+    status = avifdec_png_write_rows(
+        write_png_bytes, &fd, read_png_rgb_row, &rows,
+        workspace, workspace_size,
+        info->presentation_width, info->presentation_height,
+        channels, bit_depth, &metadata);
     if (platform_close(fd) != 0 && status == AVIFDEC_OK) {
         status = AVIFDEC_IO_ERROR;
     }
+    (void)platform_free_pages(workspace, workspace_size);
     return status;
 }
 
@@ -395,16 +444,9 @@ static AvifdecStatus write_sequence_png(
         AvifdecError *error) {
         AvifdecImage image;
         AvifdecEntropyTrace trace;
-        AvifdecRgbImage rgb;
         void *workspace = 0;
         void *image_memory = 0;
-        void *packed_memory = 0;
         size_t image_memory_size = 0U;
-        size_t packed_memory_size = 0U;
-        size_t channels;
-        size_t bytes_per_channel;
-        size_t row_bytes;
-        int packed_format;
         AvifdecStatus status;
 
         status = avifdec_sequence_query(
@@ -425,52 +467,10 @@ static AvifdecStatus write_sequence_png(
             error);
         if (status != AVIFDEC_OK) goto cleanup;
 
-        packed_format = frame->image.has_alpha
-            ? (frame->image.bit_depth > 8U ||
-               frame->image.alpha_bit_depth > 8U
-                ? AVIFDEC_RGBA16 : AVIFDEC_RGBA8)
-            : (frame->image.bit_depth > 8U
-                ? AVIFDEC_RGB16 : AVIFDEC_RGB8);
-        channels = packed_format == AVIFDEC_RGB8 ||
-            packed_format == AVIFDEC_RGB16 ? 3U : 4U;
-        bytes_per_channel =
-            packed_format == AVIFDEC_RGB16 ||
-            packed_format == AVIFDEC_RGBA16 ? 2U : 1U;
-        if (!avifdec_size_multiply(
-                frame->image.presentation_width, channels, &row_bytes) ||
-            !avifdec_size_multiply(
-                row_bytes, bytes_per_channel, &row_bytes) ||
-            !avifdec_size_multiply(
-                row_bytes, frame->image.presentation_height,
-                &packed_memory_size)) {
-            status = AVIFDEC_OVERFLOW;
-            goto cleanup;
-        }
-        packed_memory = platform_allocate_pages(packed_memory_size);
-        if (packed_memory == 0) {
-            status = AVIFDEC_OUT_OF_MEMORY;
-            goto cleanup;
-        }
-        rgb.pixels = packed_memory;
-        rgb.stride = row_bytes;
-        rgb.width = frame->image.presentation_width;
-        rgb.height = frame->image.presentation_height;
-        rgb.format = (uint8_t)packed_format;
-        rgb.alpha_mode = AVIFDEC_ALPHA_STRAIGHT;
-        status = avifdec_image_to_rgb(
-            &image, &frame->image, &rgb, error);
-        if (status == AVIFDEC_OK) {
-            status = write_png_file(
-                output_path, &rgb,
-                bytes_per_channel == 2U ? 16U : 8U,
-                &frame->image);
-        }
+        status = write_png_file(
+            output_path, &image, &frame->image, error);
 
     cleanup:
-        if (packed_memory != 0) {
-            (void)platform_free_pages(
-                packed_memory, packed_memory_size);
-        }
         if (image_memory != 0) {
             (void)platform_free_pages(
                 image_memory, image_memory_size);
@@ -805,16 +805,6 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        if (png_output) {
-            int is_16_bit =
-                image_info.bit_depth > 8U ||
-                (image_info.has_alpha &&
-                 image_info.alpha_bit_depth > 8U);
-
-            packed_format = image_info.has_alpha
-                ? (is_16_bit ? AVIFDEC_RGBA16 : AVIFDEC_RGBA8)
-                : (is_16_bit ? AVIFDEC_RGB16 : AVIFDEC_RGB8);
-        }
         workspace = platform_allocate_pages(image_info.workspace_required);
         if (workspace == 0) {
             (void)write_text(2, "avifdec: cannot allocate trace workspace\n");
@@ -824,7 +814,7 @@ int main(int argc, char **argv) {
             (void)platform_free_pages(data, size);
             return 1;
         }
-        if (raw_output || packed_format >= 0) {
+        if (raw_output || png_output || packed_format >= 0) {
             size_t luma_samples;
             size_t output_samples;
             size_t chroma_samples = 0U;
@@ -897,6 +887,10 @@ int main(int argc, char **argv) {
                                     output_path, &image) != 0) {
                                 status = AVIFDEC_IO_ERROR;
                             }
+                        } else if (png_output) {
+                            status = write_png_file(
+                                output_path, &image,
+                                &image_info, &error);
                         } else {
                             AvifdecRgbImage rgb;
                             size_t channels =
@@ -942,12 +936,7 @@ int main(int argc, char **argv) {
                                     &error);
                             }
                             if (status == AVIFDEC_OK) {
-                                if (png_output) {
-                                    status = write_png_file(
-                                        output_path, &rgb,
-                                        bytes_per_channel == 2U ? 16U : 8U,
-                                        &image_info);
-                                } else if (write_file(
+                                if (write_file(
                                         output_path, packed_memory,
                                         packed_memory_size) != 0) {
                                     status = AVIFDEC_IO_ERROR;
@@ -1176,21 +1165,24 @@ int main(int argc, char **argv) {
             (void)write_text(1, "\nraw_sample_bytes=");
             (void)write_unsigned(1, image.bit_depth == 8U ? 1U : 2U);
             (void)write_text(1, "\nraw_byte_order=little-endian\nraw_plane_order=YUV");
+        } else if (png_output) {
+            int png_16_bit =
+                image_info.bit_depth > 8U ||
+                (image_info.has_alpha &&
+                 image_info.alpha_bit_depth > 8U);
+
+            (void)write_text(1, "\npacked_format=");
+            (void)write_text(
+                1, image_info.has_alpha
+                    ? (png_16_bit ? "png-rgba16" : "png-rgba8")
+                    : (png_16_bit ? "png-rgb16" : "png-rgb8"));
         } else if (packed_format >= 0) {
             (void)write_text(1, "\npacked_format=");
-            if (png_output) {
-                (void)write_text(
-                    1, packed_format == AVIFDEC_RGB8 ? "png-rgb8" :
-                       packed_format == AVIFDEC_RGBA8 ? "png-rgba8" :
-                       packed_format == AVIFDEC_RGB16 ? "png-rgb16" :
-                       "png-rgba16");
-            } else {
-                (void)write_text(
-                    1, packed_format == AVIFDEC_RGB8 ? "rgb8" :
-                       packed_format == AVIFDEC_RGBA8 ? "rgba8" :
-                       packed_format == AVIFDEC_RGB16 ? "rgb16" :
-                       "rgba16");
-            }
+            (void)write_text(
+                1, packed_format == AVIFDEC_RGB8 ? "rgb8" :
+                   packed_format == AVIFDEC_RGBA8 ? "rgba8" :
+                   packed_format == AVIFDEC_RGB16 ? "rgb16" :
+                   "rgba16");
         }
         (void)write_text(1, "\n");
         if (output_memory != 0) {

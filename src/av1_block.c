@@ -28,6 +28,9 @@ static void av1_block_hash_u64(uint64_t *checksum, uint64_t value) {
 
 AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
                                              uint32_t height,
+                                             int monochrome,
+                                             int subsampling_x,
+                                             int subsampling_y,
                                              size_t *required) {
     size_t mi_columns;
     size_t mi_rows;
@@ -35,14 +38,27 @@ AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
     size_t grid_bytes;
     size_t context_bytes;
     size_t cdf_bytes;
+    size_t restoration_units;
+    size_t restoration_bytes;
+    AvifdecStatus status;
 
-    if (width == 0U || height == 0U || required == 0) return AVIFDEC_INVALID_ARGUMENT;
+    if (width == 0U || height == 0U || required == 0) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    status = av1_restoration_unit_capacity(
+        width, height, monochrome, subsampling_x, subsampling_y,
+        &restoration_units);
+    if (status != AVIFDEC_OK) return status;
     mi_columns = 2U * (((size_t)width + 7U) / 8U);
     mi_rows = 2U * (((size_t)height + 7U) / 8U);
     if (!avifdec_size_multiply(mi_rows, mi_columns, &cells) ||
         !avifdec_size_multiply(
-            cells, sizeof(Av1BlockCell) + 7U +
-                3U * sizeof(Av1RestorationUnit), &grid_bytes) ||
+            cells, sizeof(Av1BlockCell) + 7U, &grid_bytes) ||
+        !avifdec_size_multiply(
+            restoration_units, sizeof(Av1RestorationUnit),
+            &restoration_bytes) ||
+        !avifdec_size_add(
+            grid_bytes, restoration_bytes, &grid_bytes) ||
         !avifdec_size_add(mi_rows, mi_columns, &context_bytes) ||
         !avifdec_size_add(context_bytes, 64U, &context_bytes) ||
         !avifdec_size_multiply(context_bytes, 12U, &context_bytes) ||

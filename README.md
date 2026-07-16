@@ -7,9 +7,10 @@ library. Linux builds are static PIE executables without an interpreter. macOS
 builds use the system dyld as their process launcher but have no dynamic-library
 load commands.
 
-The decoder supports native planar YUV, packed RGB/RGBA, and PNG output. Its
-core API operates on immutable input memory and caller-owned workspace and
-output buffers, with explicit limits and structured errors for untrusted input.
+The decoder supports native planar YUV, packed RGB/RGBA, and compressed
+streaming PNG output. Its core API operates on immutable input memory and
+caller-owned workspace and output buffers, with explicit limits and structured
+errors for untrusted input.
 
 ## Build
 
@@ -142,8 +143,11 @@ PNG output is encoded internally without zlib or another image library.
 - `pasp` is preserved through a PNG `pHYs` chunk.
 - NCLX primaries and transfer characteristics are preserved through `cICP`.
 
-The encoder uses valid stored DEFLATE blocks rather than entropy compression,
-so its PNG files prioritize simplicity and independence over file size.
+The CLI converts one presentation row at a time, selects among the five PNG
+row filters, and feeds a fixed-Huffman LZ77 encoder adapted from newos's CC0
+compression code. Compressed bytes are emitted as bounded 32 KiB `IDAT`
+chunks. PNG output therefore does not allocate a complete packed RGB/RGBA
+image.
 
 ### Raw planar YUV
 
@@ -236,7 +240,7 @@ are reported through capability flags and `AVIFDEC_UNSUPPORTED`.
 
 ## Public API
 
-The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.1.0 is
+The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.2.0 is
 reported by:
 
 ```c
@@ -255,6 +259,14 @@ The usual workflow is:
 2. Allocate workspace and output planes.
 3. Call `avifdec_decode()`.
 4. Optionally call `avifdec_image_to_rgb()` for packed presentation output.
+
+`avifdec_image_to_rgb_row()` converts one presentation row into a caller-owned
+packed row buffer. `avifdec_png_workspace_requirement()` and
+`avifdec_png_write_rows()` provide adaptive-filtered streaming PNG output from
+a row callback. The PNG workspace contains the fixed 32 KiB LZ77 window,
+393,216-byte hash chains, a bounded `IDAT` buffer, and three image rows.
+`avifdec_png_write()` remains an allocation-free convenience API and emits a
+fixed-Huffman filter-0 stream from an existing packed image.
 
 `avifdec_trace()` performs full decoding without caller output planes and
 returns deterministic syntax and reconstruction checksums.
@@ -301,6 +313,12 @@ without keeping decoder state between API calls.
 
 `AvifdecImage` uses 16-bit sample storage for all source bit depths. Strides are
 measured in samples, not bytes.
+
+Reduced-still AV1 streams do not allocate inter-frame pixel references or
+motion fields. When CDEF, super-resolution, or restoration is an exact
+pass-through, their plane views alias the preceding stage. The queried
+`workspace_plane_buffer_count` records the conservative plane-buffer plan used
+for the returned workspace requirement.
 
 ### Limits and errors
 
@@ -358,7 +376,6 @@ A hosted coverage-guided harness is available at
 - ICC color transforms and transfer-function conversion are not applied.
 - Sequence edit lists are restricted to the normal single-entry form.
 - Sequence track matrices must be identity.
-- PNG encoding is intentionally uncompressed beyond stored DEFLATE framing.
 - Internal parallel decoding is currently limited to top-level AVIF grids,
   primary sample-transform output rows, and direct-primary AV1 CDEF and
   restoration rows.
@@ -368,6 +385,9 @@ A hosted coverage-guided harness is available at
 The project source code is released under the
 [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/)
 public-domain dedication.
+
+The freestanding platform substrate and the PNG fixed-Huffman/LZ77 design are
+adapted from the vendored CC0 newos project.
 
 Most of the source code was written by large language models, predominantly
 GPT-5.6 Sol, under human direction and review.

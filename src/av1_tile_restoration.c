@@ -78,6 +78,47 @@ static uint32_t av1_restoration_count_units(uint32_t unit_size,
     return count == 0U ? 1U : count;
 }
 
+AvifdecStatus av1_restoration_unit_capacity(
+    uint32_t width,
+    uint32_t height,
+    int monochrome,
+    int subsampling_x,
+    int subsampling_y,
+    size_t *capacity) {
+    size_t total = 0U;
+    unsigned int plane;
+
+    if (width == 0U || height == 0U || capacity == 0 ||
+        (monochrome != 0 && monochrome != 1) ||
+        (subsampling_x != 0 && subsampling_x != 1) ||
+        (subsampling_y != 0 && subsampling_y != 1)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    for (plane = 0U;
+         plane < (monochrome ? 1U : 3U);
+         ++plane) {
+        unsigned int sub_x =
+            plane == 0U ? 0U : (unsigned int)subsampling_x;
+        unsigned int sub_y =
+            plane == 0U ? 0U : (unsigned int)subsampling_y;
+        uint32_t plane_width =
+            (width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+        uint32_t plane_height =
+            (height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+        size_t plane_units;
+
+        if (!avifdec_size_multiply(
+                av1_restoration_count_units(32U, plane_width),
+                av1_restoration_count_units(32U, plane_height),
+                &plane_units) ||
+            !avifdec_size_add(total, plane_units, &total)) {
+            return AVIFDEC_OVERFLOW;
+        }
+    }
+    *capacity = total;
+    return AVIFDEC_OK;
+}
+
 void av1_restoration_reset_tile(Av1RestorationState *state) {
     static const int8_t wiener_mid[3] = { 3, -7, 15 };
     static const int8_t sgr_mid[2] = { -32, 31 };

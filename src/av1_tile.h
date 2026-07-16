@@ -419,6 +419,13 @@ AvifdecStatus av1_restoration_state_init(Av1RestorationState *state,
                                          int monochrome,
                                          int subsampling_x,
                                          int subsampling_y);
+AvifdecStatus av1_restoration_unit_capacity(
+    uint32_t width,
+    uint32_t height,
+    int monochrome,
+    int subsampling_x,
+    int subsampling_y,
+    size_t *capacity);
 void av1_restoration_reset_tile(Av1RestorationState *state);
 AvifdecStatus av1_tile_read_restoration(void *user_data,
                                         Av1SymbolDecoder *decoder,
@@ -472,6 +479,9 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                                       const Av1BlockTraceFields *block);
 AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
                                              uint32_t height,
+                                             int monochrome,
+                                             int subsampling_x,
+                                             int subsampling_y,
                                              size_t *required);
 AvifdecStatus av1_block_state_init(Av1BlockState *state,
                                    uint32_t mi_rows,

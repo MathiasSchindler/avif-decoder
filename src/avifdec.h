@@ -35,7 +35,7 @@ typedef enum {
 #define AVIFDEC_CAP_PARALLEL_EXECUTOR ((uint64_t)1U << 16)
 
 #define AVIFDEC_VERSION_MAJOR 1U
-#define AVIFDEC_VERSION_MINOR 1U
+#define AVIFDEC_VERSION_MINOR 2U
 #define AVIFDEC_VERSION_PATCH 0U
 
 typedef struct {
@@ -250,6 +250,7 @@ typedef struct {
     uint32_t num_ticks_per_picture_minus_1;
     uint32_t num_units_in_decoding_tick;
     uint8_t reduced_still_picture_header;
+    uint8_t workspace_plane_buffer_count;
     uint8_t film_grain_params_present;
     uint8_t film_grain_applied;
     uint8_t film_grain_update;
@@ -419,6 +420,11 @@ AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
                                    const AvifdecImageInfo *info,
                                    AvifdecRgbImage *rgb,
                                    AvifdecError *error);
+AvifdecStatus avifdec_image_to_rgb_row(const AvifdecImage *image,
+                                       const AvifdecImageInfo *info,
+                                       AvifdecRgbImage *rgb,
+                                       uint32_t row,
+                                       AvifdecError *error);
 
 const char *avifdec_version_string(void);
 
