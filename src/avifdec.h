@@ -35,7 +35,7 @@ typedef enum {
 #define AVIFDEC_CAP_PARALLEL_EXECUTOR ((uint64_t)1U << 16)
 
 #define AVIFDEC_VERSION_MAJOR 1U
-#define AVIFDEC_VERSION_MINOR 2U
+#define AVIFDEC_VERSION_MINOR 3U
 #define AVIFDEC_VERSION_PATCH 0U
 
 typedef struct {

@@ -99,6 +99,37 @@ check_case filtered-420-8 yuv420p filtered
 check_case filtered-420-10 yuv420p10le filtered
 check_case filtered-420-12 yuv420p12le filtered
 
+tile_source="$work/tiled.y4m"
+tile_avif="$work/tiled.avif"
+tile_serial="$work/tiled-serial.yuv"
+tile_threaded="$work/tiled-threaded.yuv"
+ffmpeg -hide_banner -loglevel error -f lavfi \
+    -i 'testsrc2=size=256x256:rate=1' -frames:v 1 -pix_fmt yuv420p \
+    -f yuv4mpegpipe -y "$tile_source"
+avifenc --qcolor 70 --jobs 1 --speed 6 --codec aom --cicp 2/2/6 \
+    -a tile-columns=1 -a tile-rows=1 \
+    "$tile_source" "$tile_avif" >/dev/null
+"$decoder" --workers 1 --raw "$tile_avif" "$tile_serial" \
+    >"$work/tiled-serial.out"
+"$decoder" --workers 4 --raw "$tile_avif" "$tile_threaded" \
+    >"$work/tiled-threaded.out"
+cmp "$tile_serial" "$tile_threaded" || {
+    echo "tiled: threaded planar YUV differs" >&2
+    exit 1
+}
+sed '/^workspace_required=/d; /^decode_workers=/d' \
+    "$work/tiled-serial.out" >"$work/tiled-serial-normalized.out"
+sed '/^workspace_required=/d; /^decode_workers=/d' \
+    "$work/tiled-threaded.out" >"$work/tiled-threaded-normalized.out"
+cmp "$work/tiled-serial-normalized.out" \
+    "$work/tiled-threaded-normalized.out" || {
+    echo "tiled: threaded trace differs" >&2
+    exit 1
+}
+grep -q '^tile_columns=2$' "$work/tiled-threaded.out"
+grep -q '^tile_rows=2$' "$work/tiled-threaded.out"
+echo "tiled: exact serial/threaded planar YUV and trace"
+
 part6_source="$work/part6-active.y4m"
 part6_ivf="$work/part6-active.ivf"
 part6_avif="$work/part6-active.avif"

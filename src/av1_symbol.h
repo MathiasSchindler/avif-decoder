@@ -6,6 +6,7 @@
 typedef struct {
     const AvifdecSpan *spans;
     size_t span_count;
+    const unsigned char *contiguous_data;
     size_t start;
     size_t size;
     size_t bit_position;

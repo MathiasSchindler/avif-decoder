@@ -3086,11 +3086,11 @@ static Av1TxSize av1_tile_chroma_tx_size(uint32_t width4,
 static const Av1BlockCell *av1_tile_cell_at(const Av1BlockState *state,
                                             int64_t row,
                                             int64_t column) {
-    size_t index;
+    const Av1BlockCell *cell;
+
     if (!av1_block_state_is_inside(state, row, column)) return 0;
-    index = (size_t)row * state->mi_columns + (size_t)column;
-    if (index >= state->cell_capacity || state->cells[index].width == 0U) return 0;
-    return &state->cells[index];
+    cell = av1_block_cell(state, (uint32_t)row, (uint32_t)column);
+    return cell != 0 && cell->width != 0U ? cell : 0;
 }
 
 static int av1_tile_mode_is_smooth(uint8_t mode) {
@@ -3437,7 +3437,11 @@ static AvifdecStatus av1_tile_record_inter_tx_leaf(
             if (index >= state->block_state->cell_capacity) {
                 return AVIFDEC_LIMIT_EXCEEDED;
             }
-            state->block_state->cells[index].tx_size = (uint8_t)tx_size;
+            Av1BlockCell *cell = av1_block_cell_mutable(
+                state->block_state, row, column);
+
+            if (cell == 0) return AVIFDEC_LIMIT_EXCEEDED;
+            cell->tx_size = (uint8_t)tx_size;
         }
     }
     {
@@ -4506,6 +4510,8 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                         state->dequant_params.qm_level = block->lossless != 0U
                             ? 15U : plane == 0U ? state->qm_y
                                   : plane == 1U ? state->qm_u : state->qm_v;
+                        state->dequant_params.qmatrix =
+                            state->qmatrices[plane];
                         status = av1_recon_dequantize(
                             state->quantized, packed_count, tx_size, tx_type,
                             &state->dequant_params, state->dequantized,

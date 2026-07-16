@@ -13,6 +13,7 @@
 #include "av1_recon.h"
 #include "av1_symbol.h"
 #include "av1_tile.h"
+#include "av1_tile_internal.h"
 #include "av1_warp.h"
 #include "avif_sato.h"
 #include "bmff.h"
@@ -41,7 +42,7 @@ static int test_checked_arithmetic(void) {
     CHECK((capabilities & AVIFDEC_CAP_AV1_TILE_LIST) == 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_LARGE_SCALE_TILE) == 0U);
     CHECK(avifdec_memory_compare(
-        avifdec_version_string(), "1.2.0", 6U) == 0);
+        avifdec_version_string(), "1.3.0", 6U) == 0);
     CHECK(avifdec_size_add(3U, 4U, &result) && result == 7U);
     CHECK(!avifdec_size_add(SIZE_MAX, 1U, &result));
     CHECK(avifdec_size_multiply(7U, 9U, &result) && result == 63U);
@@ -2122,7 +2123,7 @@ static AvifdecStatus out_of_order_parallel_for(
     state->min_chunk = min_chunk;
     ++state->calls;
     if (count <= 1U) return body(0U, count, 0U, arg);
-    tail_status = body(count - 1U, count, 1U, arg);
+    tail_status = body(count - 1U, count, 3U, arg);
     head_status = body(0U, count - 1U, 0U, arg);
     return tail_status != AVIFDEC_OK
         ? tail_status : head_status;
@@ -2595,8 +2596,13 @@ static int test_av1_symbol_decoder(void) {
     static const unsigned char one_data[2] = { 0xc0U, 0x00U };
     static const unsigned char zero_data[2] = { 0x20U, 0x00U };
     static const unsigned char bad_tail[2] = { 0xc0U, 0x01U };
-    AvifdecSpan spans[2];
+    static const unsigned char equivalence_data[16] = {
+        0x6dU, 0xa3U, 0x17U, 0xc8U, 0x52U, 0x99U, 0x04U, 0xeeU,
+        0x31U, 0x7bU, 0xd0U, 0x48U, 0xa5U, 0x16U, 0x80U, 0x00U
+    };
+    AvifdecSpan spans[3];
     Av1SymbolDecoder decoder;
+    Av1SymbolDecoder split_decoder;
     uint16_t cdf[3];
 
     spans[0].data = one_data;
@@ -2627,6 +2633,46 @@ static int test_av1_symbol_decoder(void) {
     CHECK(av1_symbol_init(&decoder, spans, 1U, 0U, 2U, 1) == AVIFDEC_OK);
     CHECK(av1_symbol_read_literal(&decoder, 1U) == 1U);
     CHECK(av1_symbol_exit(&decoder) == AVIFDEC_INVALID_DATA);
+
+    spans[0].data = equivalence_data;
+    spans[0].size = sizeof(equivalence_data);
+    spans[0].file_offset = 0U;
+    CHECK(av1_symbol_init(
+              &decoder, spans, 1U, 0U, sizeof(equivalence_data), 0) ==
+          AVIFDEC_OK);
+    spans[0].size = 3U;
+    spans[1].data = equivalence_data + 3U;
+    spans[1].size = 4U;
+    spans[1].file_offset = 3U;
+    spans[2].data = equivalence_data + 7U;
+    spans[2].size = sizeof(equivalence_data) - 7U;
+    spans[2].file_offset = 7U;
+    CHECK(av1_symbol_init(
+              &split_decoder, spans, 3U, 0U,
+              sizeof(equivalence_data), 0) == AVIFDEC_OK);
+    CHECK(decoder.contiguous_data != 0 &&
+          split_decoder.contiguous_data == 0);
+    cdf[0] = 9000U;
+    cdf[1] = 32768U;
+    cdf[2] = 0U;
+    {
+        uint16_t split_cdf[3] = { 9000U, 32768U, 0U };
+        unsigned int index;
+
+        for (index = 0U; index < 8U; ++index) {
+            unsigned int bits = index % 5U + 1U;
+
+            CHECK(av1_symbol_read_literal(&decoder, bits) ==
+                  av1_symbol_read_literal(&split_decoder, bits));
+            CHECK(av1_symbol_read(&decoder, cdf, 2U) ==
+                  av1_symbol_read(&split_decoder, split_cdf, 2U));
+            CHECK(cdf[0] == split_cdf[0] &&
+                  cdf[1] == split_cdf[1] &&
+                  cdf[2] == split_cdf[2]);
+        }
+    }
+    CHECK(av1_symbol_exit(&decoder) ==
+          av1_symbol_exit(&split_decoder));
     return 0;
 }
 
@@ -2841,9 +2887,29 @@ static int test_av1_intra_cdfs(void) {
 }
 
 static int test_av1_dequantization(void) {
+    static const uint64_t qmatrix_checksums[15][2] = {
+        { 0x730ce42d6021974eULL, 0x8b1321bf21de68b6ULL },
+        { 0x2e74e857158f7fa0ULL, 0x1bf5ed1bb3daec24ULL },
+        { 0x050ffea88c149c63ULL, 0xdd7b20fb50aa2ba4ULL },
+        { 0x3a7dcfdff3882339ULL, 0x376322fcf954a6d4ULL },
+        { 0xd77b200356a6101eULL, 0x589518744f4a6421ULL },
+        { 0xe3d47fd034e7ee85ULL, 0x8125c27b2684167fULL },
+        { 0xd78c8a89f53f66fcULL, 0x8c9cc51490f6c6aaULL },
+        { 0xf705f88c63149b0fULL, 0x9b72d1a736e534a2ULL },
+        { 0xb256559b099e6bd3ULL, 0x079bbb9e6e3b9f19ULL },
+        { 0x4e4a67a768129189ULL, 0x0dca801762ec8ba8ULL },
+        { 0x04a7f4484b475b49ULL, 0x94b4a5a72744369bULL },
+        { 0x00e5ef24f850d295ULL, 0x3b98324b71fd71e4ULL },
+        { 0x01fab794ac27ed71ULL, 0x8af5fb952a0d00e1ULL },
+        { 0x368160674f59dedfULL, 0x01097afa4634cd66ULL },
+        { 0x27fbe657f0026b32ULL, 0xf4c16d6b8619ed06ULL }
+    };
     int32_t quantized[1024];
     int32_t dequantized[1024];
+    uint8_t qmatrix[AV1_QM_TOTAL_SIZE];
     Av1DequantParams params;
+    unsigned int level;
+    unsigned int chroma;
 
     CHECK(av1_recon_dc_quant(8U, 0) == 4U);
     CHECK(av1_recon_dc_quant(10U, 255) == 5347U);
@@ -2851,6 +2917,24 @@ static int test_av1_dequantization(void) {
     CHECK(av1_recon_ac_quant(8U, 255) == 1828U);
     CHECK(av1_recon_ac_quant(10U, 255) == 7312U);
     CHECK(av1_recon_ac_quant(12U, 255) == 29247U);
+    for (level = 0U; level < 15U; ++level) {
+        for (chroma = 0U; chroma < 2U; ++chroma) {
+            uint64_t checksum = (uint64_t)1469598103934665603ULL;
+            size_t index;
+
+            CHECK(av1_recon_qmatrix_decode(
+                      (uint8_t)level, (uint8_t)chroma,
+                      qmatrix, sizeof(qmatrix)) == AVIFDEC_OK);
+            for (index = 0U; index < sizeof(qmatrix); ++index) {
+                checksum ^= qmatrix[index];
+                checksum *= (uint64_t)1099511628211ULL;
+            }
+            CHECK(checksum == qmatrix_checksums[level][chroma]);
+        }
+    }
+    CHECK(av1_recon_qmatrix_decode(
+              15U, 0U, qmatrix, sizeof(qmatrix)) ==
+          AVIFDEC_INVALID_ARGUMENT);
     avifdec_memory_fill(&params, 0U, sizeof(params));
     params.bit_depth = 8U;
     quantized[0] = -1;
@@ -3597,6 +3681,10 @@ static int test_av1_loop_restoration(void) {
     static int test_av1_block_state(void) {
         static const unsigned char zero_data[2] = { 0x20U, 0x00U };
         Av1BlockCell cells[6U * 8U];
+        union {
+            uint32_t alignment;
+            uint8_t bytes[sizeof(cells)];
+        } compact_cells;
         Av1BlockState state;
         Av1BlockAvailability availability;
         Av1BlockTraceFields fields;
@@ -3618,6 +3706,22 @@ static int test_av1_loop_restoration(void) {
         cdfs.skip[0][0] = 0U;
         CHECK(av1_tile_cdfs_checksum(&cdfs) != av1_tile_cdfs_checksum(&fresh_cdfs));
         av1_tile_cdfs_init(&cdfs);
+
+        CHECK(AV1_BLOCK_BASE_CELL_SIZE < sizeof(Av1BlockCell));
+        CHECK(av1_block_state_init_compact(
+                  &state, 6U, 8U,
+                  (Av1BlockCell *)(void *)compact_cells.bytes,
+                  48U, 0, 1, 1) == AVIFDEC_OK);
+        avifdec_memory_fill(&fields, 0U, sizeof(fields));
+        fields.row = 5U;
+        fields.column = 7U;
+        fields.width = 1U;
+        fields.height = 1U;
+        CHECK(av1_block_state_record(&state, &fields, 0) == AVIFDEC_OK);
+        CHECK(av1_block_cell(&state, 5U, 7U)->width == 1U);
+        CHECK((const uint8_t *)(const void *)av1_block_cell(&state, 5U, 7U) -
+                  compact_cells.bytes ==
+              47U * AV1_BLOCK_BASE_CELL_SIZE);
 
         CHECK(av1_block_state_init(&state, 6U, 8U, cells, 47U, 0, 1, 1) ==
             AVIFDEC_LIMIT_EXCEEDED);
@@ -4147,7 +4251,7 @@ static int test_av1_loop_restoration(void) {
             AVIFDEC_OK);
         CHECK(info.reduced_still_picture_header == 1U &&
             info.workspace_plane_buffer_count == 2U &&
-            info.workspace_required == 344505U &&
+            info.workspace_required == 354137U &&
             info.workspace_required <= sizeof(workspace));
         CHECK(avifdec_trace(file, sizeof(file), 0, workspace, sizeof(workspace),
                     &trace, &error) == AVIFDEC_OK);

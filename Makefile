@@ -98,6 +98,13 @@ OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
 OBJECTS := $(OBJECTS:.S=.o)
 CORE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(CORE_C_SOURCES:.c=.o))
 ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
+COLD_OBJECTS := \
+	$(BUILD_DIR)/src/av1_metadata.o \
+	$(BUILD_DIR)/src/avif_sequence.o \
+	$(BUILD_DIR)/src/bmff.o \
+	$(BUILD_DIR)/src/main.o \
+	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o \
+	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
@@ -107,6 +114,8 @@ THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
 	$(OBU_TRACE_OBJECTS:.o=.d) $(THREAD_UNIT_OBJECTS:.o=.d)
+
+$(COLD_OBJECTS): CFLAGS += -Os
 
 -include $(DEPENDENCIES)
 

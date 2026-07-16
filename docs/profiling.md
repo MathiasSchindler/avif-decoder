@@ -64,7 +64,11 @@ The large file requires 2,386,828,722 bytes of AVIF workspace. This is structura
 - approximately six bytes per visible pixel of additional state for 8-bit color;
 - a per-4x4-cell grid containing `Av1BlockCell`, block metadata, restoration units, CDFs, and contexts.
 
-`Av1BlockCell` is 172 bytes in this build. Its motion-vector candidates, warp parameters, palettes, and inter/compound state make the cell grid a major contributor. Reducing this memory requires a separate representation change with broad reference testing; merely removing zero fills would expose stale caller workspace and invalid reference pixels.
+`Av1BlockCell` is 172 bytes in this build. Reduced-still frames that do not
+permit intra block copy now use a 72-byte stride containing only dimensions,
+segmentation, intra modes, transform state, deltas, and palette predictors.
+Inter-capable frames and frames permitting intra block copy retain the full
+cell because motion vectors and reference state remain observable.
 
 ### Large-image workspace reductions
 
@@ -78,17 +82,20 @@ layout changes reduce its queried workspace:
 | Restoration units bounded at the minimum legal 32-pixel geometry | 2,308,649,742 bytes | 78,178,980 bytes |
 | Reduced-still reference planes and motion fields elided | 1,364,931,342 bytes | 943,718,400 bytes |
 | Identity filter and super-resolution planes aliased | 893,072,142 bytes | 471,859,200 bytes |
+| Reduced-still block cells use the 72-byte base stride | 654,301,742 bytes | 238,770,400 bytes |
+| Active quantizer matrices expand into caller workspace | 654,311,774 bytes | -10,032 bytes |
 
-The cumulative reduction is 1,493,756,580 bytes (62.6%, or 1,424.6 MiB).
+The cumulative reduction is 1,732,516,948 bytes (72.6%, or 1,652.3 MiB).
 Restoration capacity still covers every legal unit-size choice. Inter-frame
 streams retain all reference and motion allocations, and non-reduced streams
 retain the worst-case filter-plane layout because later frames may select
 different tools.
 
-The diagnostic command used for the original baseline now takes 4.51 seconds
-and 655,680 KiB maximum RSS, compared with 5.30 seconds and 2,063,424 KiB
-before these memory changes. A raw-output decode takes 4.62 seconds and
-766,272 KiB maximum RSS, including caller-owned decoded planes.
+The diagnostic command used for the original baseline now takes 4.13 seconds
+and 422,400 KiB maximum RSS, compared with 5.30 seconds and 2,063,424 KiB
+before these memory changes. A raw-output decode has a 4.22-second median and
+about 534.7 MiB maximum RSS, compared with 4.62 seconds and 766,272 KiB before
+the compact block grid.
 
 ### Streaming compressed PNG
 
@@ -298,6 +305,51 @@ an additional roughly 6% wall-time reduction on this workload. Widths 1 and 4
 again produced byte-identical planar output and unchanged CDEF/restoration
 checksums. The width-1 result is effectively unchanged within run-to-run
 variance, so the row-copy refactor does not provide a material serial speedup.
+
+## Balanced speed, binary-size, and memory pass
+
+The entropy reader now recognizes tile payloads contained in one input span,
+loads raw bits from a bounded byte window, uses a specialized equiprobable
+literal step, and retains the exact multi-span fallback. On the three-decode
+hosted profile, `av1_symbol_read` fell from 20.1% self time to 11.7%;
+`av1_symbol_raw_bits` and `av1_symbol_read_literal` account for another 6.7%.
+Coefficient parsing and residual reconstruction are now the largest serial
+costs. The large-fixture serial wall time fell from about 4.52 seconds before
+the entropy work to a 4.20-4.22 second median.
+
+The literal 100,320-byte quantizer-matrix table is generated as 44,824 bytes
+of exact Huffman-coded deltas plus a generated decode tree. At frame start the
+decoder expands only the selected Y, U, and V matrices into 10,032 bytes of
+caller workspace, so coefficient dequantization still performs direct indexed
+loads. Cold metadata, sequence, container, CLI, and platform translation units
+use `-Os`; hot entropy, coefficient, transform, prediction, and filter code
+remain at `-O2`.
+
+| Static PIE measurement | Before pass | After pass | Change |
+| --- | ---: | ---: | ---: |
+| File size | 468,656 bytes | 408,080 bytes | -60,576 bytes (-12.9%) |
+| Text and read-only data reported in the `size` text column | 436,885 bytes | 373,197 bytes | -63,688 bytes (-14.6%) |
+
+Complete AV1 bitstream tiles now run through the caller executor. Tile payload
+boundaries are parsed serially; each worker owns entropy CDFs, coefficient
+contexts, transform buffers, prediction buffers, palette maps, and restoration
+parser state. Frame planes, block grids, filter metadata, and restoration
+units receive tile-disjoint writes. Results and trace fragments are committed
+in tile order, the selected context-update CDF is retained deterministically,
+and frame filtering remains serial.
+
+Three raw-output runs of the eight-tile large fixture measured:
+
+| Workers | Median elapsed | User time | Maximum RSS | Decoder workspace |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.22 s | 4.06 s | 534.7 MiB | 654,311,774 bytes |
+| 2 | 2.52 s | 4.13 s | 534.6 MiB | 654,468,233 bytes |
+| 4 | 1.70 s | 4.25 s | 534.3 MiB | 654,762,705 bytes |
+
+Four workers reduce wall time by about 60% (2.48x) while adding 450,931 bytes
+of decoder workspace. Widths 1 and 4 produced byte-identical planar output and
+identical ordered diagnostic traces. The reference suite also generates a
+four-tile image and compares serial and threaded output and trace data.
 
 ## Validation
 

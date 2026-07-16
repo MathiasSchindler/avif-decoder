@@ -93,6 +93,15 @@ typedef struct {
     uint8_t palette_size_uv;
     uint8_t use_filter_intra;
     uint8_t filter_intra_mode;
+    int8_t angle_delta_y;
+    int8_t angle_delta_uv;
+    int8_t cfl_alpha_u;
+    int8_t cfl_alpha_v;
+    int8_t delta_lf[4];
+    uint16_t palette_colors_y[8];
+    uint16_t palette_colors_u[8];
+    uint16_t palette_colors_v[8];
+    int32_t warp_params[2][6];
     uint8_t ref_frame[2];
     uint8_t ref_mv_index;
     uint8_t mv_stack_count;
@@ -103,7 +112,6 @@ typedef struct {
     uint8_t interintra_wedge_index;
     uint8_t motion_mode;
     uint8_t use_intrabc;
-    int32_t warp_params[2][6];
     uint8_t compound_group_index;
     uint8_t compound_index;
     uint8_t compound_type;
@@ -112,15 +120,9 @@ typedef struct {
     uint8_t diff_mask_inverse;
     Av1MotionVector pred_mv[2];
     Av1MotionVector mv[2];
-    int8_t angle_delta_y;
-    int8_t angle_delta_uv;
-    int8_t cfl_alpha_u;
-    int8_t cfl_alpha_v;
-    int8_t delta_lf[4];
-    uint16_t palette_colors_y[8];
-    uint16_t palette_colors_u[8];
-    uint16_t palette_colors_v[8];
 } Av1BlockCell;
+
+#define AV1_BLOCK_BASE_CELL_SIZE offsetof(Av1BlockCell, warp_params)
 
 typedef struct {
     uint32_t mi_rows;
@@ -134,6 +136,7 @@ typedef struct {
     uint8_t subsampling_y;
     Av1BlockCell *cells;
     size_t cell_capacity;
+    size_t cell_stride;
 } Av1BlockState;
 
 typedef struct {
@@ -308,6 +311,7 @@ typedef struct {
     uint8_t qm_y;
     uint8_t qm_u;
     uint8_t qm_v;
+    const uint8_t *qmatrices[3];
     Av1BlockState *block_state;
     Av1FramePlanes frame_planes;
     Av1FramePlanes reference_planes[7];
@@ -482,6 +486,7 @@ AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
                                              int monochrome,
                                              int subsampling_x,
                                              int subsampling_y,
+                                             int compact_block_state,
                                              size_t *required);
 AvifdecStatus av1_block_state_init(Av1BlockState *state,
                                    uint32_t mi_rows,
@@ -491,6 +496,14 @@ AvifdecStatus av1_block_state_init(Av1BlockState *state,
                                    int monochrome,
                                    int subsampling_x,
                                    int subsampling_y);
+AvifdecStatus av1_block_state_init_compact(Av1BlockState *state,
+                                           uint32_t mi_rows,
+                                           uint32_t mi_columns,
+                                           Av1BlockCell *cells,
+                                           size_t cell_capacity,
+                                           int monochrome,
+                                           int subsampling_x,
+                                           int subsampling_y);
 AvifdecStatus av1_block_state_set_tile(Av1BlockState *state,
                                        uint32_t row_start,
                                        uint32_t row_end,

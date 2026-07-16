@@ -5,6 +5,7 @@
 #include "av1_predict.h"
 #include "av1_profile.h"
 #include "av1_tile.h"
+#include "av1_tile_internal.h"
 #include "base.h"
 #include "bmff.h"
 
@@ -179,6 +180,23 @@ typedef struct {
 } Av1ReferenceState;
 
 typedef struct {
+    Av1PartitionTrace partition;
+    Av1BlockTrace block;
+    Av1TileResidualState residual;
+    uint64_t cdf_checksum;
+    AvifdecStatus status;
+} Av1TileDecodeResult;
+
+typedef struct {
+    const Av1Bits *bits;
+    size_t tile;
+    size_t position;
+    size_t size;
+} Av1TileWorkItem;
+
+typedef struct Av1TileWorker Av1TileWorker;
+
+typedef struct Av1TraceState {
     AvifdecArena arena;
     AvifdecEntropyTrace *trace;
     Av1TileCdfs *frame_cdfs;
@@ -211,6 +229,7 @@ typedef struct {
     int32_t *quantized;
     int32_t *dequantized;
     int32_t *residual_scratch;
+    uint8_t *qmatrices[3];
     uint16_t *inter_pred0;
     uint16_t *inter_pred1;
     uint8_t *inter_mask;
@@ -232,6 +251,12 @@ typedef struct {
     size_t frame_plane_samples[3];
     size_t restoration_unit_capacity;
     const AvifdecExecutor *executor;
+    Av1TileWorker *tile_workers;
+    Av1TileWorkItem *tile_work_items;
+    Av1TileDecodeResult *tile_results;
+    size_t tile_worker_count;
+    size_t tile_capacity;
+    size_t planned_tile_capacity;
     AvifdecImage *image;
     uint32_t output_width;
     uint32_t output_height;
@@ -242,6 +267,10 @@ typedef struct {
     int initialized;
     int saved_context_update;
 } Av1TraceState;
+
+struct Av1TileWorker {
+    Av1TraceState state;
+};
 
 static AvifdecStatus av1_fail(AvifdecError *error,
                               AvifdecStatus status,
@@ -669,7 +698,8 @@ static void av1_store_current_motion(
             unsigned int list;
 
             if (column >= frame->mi_cols) column = frame->mi_cols - 1U;
-            cell = &state->cells[(size_t)row * frame->mi_cols + column];
+            cell = av1_block_cell(&state->block_state, row, column);
+            if (cell == 0) continue;
             saved = &state->current_motion[
                 (size_t)y8 * state->motion_field_stride + x8];
             for (list = 0U; list < 2U; ++list) {
@@ -1227,6 +1257,15 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     size_t reference_motion_samples;
     size_t temporal_motion_samples;
     size_t restoration_units;
+    size_t cell_stride;
+    size_t cell_bytes;
+    size_t tile_count;
+    size_t tile_capacity;
+    size_t worker_count;
+    size_t worker_index;
+    size_t tile_worker_bytes = 0U;
+    size_t tile_item_bytes = 0U;
+    size_t tile_result_bytes = 0U;
     unsigned int plane;
     int alias_cdef;
     int alias_superres;
@@ -1243,6 +1282,32 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     max_mi_rows = 2U * ((sequence->max_height + 7U) >> 3);
     if (max_mi_rows == 0U || max_mi_columns == 0U ||
         !avifdec_size_multiply(max_mi_rows, max_mi_columns, &cells)) {
+        return AVIFDEC_OVERFLOW;
+    }
+    if (!avifdec_size_multiply(
+            frame->tile_columns, frame->tile_rows, &tile_count)) {
+        return AVIFDEC_OVERFLOW;
+    }
+    tile_capacity = state->planned_tile_capacity > tile_count
+        ? state->planned_tile_capacity : tile_count;
+    worker_count = state->executor != 0 ? state->executor->worker_count : 1U;
+    if (tile_capacity < 2U || worker_count < 2U) worker_count = 1U;
+    if (worker_count > 1U &&
+        (!avifdec_size_multiply(
+             worker_count - 1U, sizeof(Av1TileWorker),
+             &tile_worker_bytes) ||
+         !avifdec_size_multiply(
+             tile_capacity, sizeof(Av1TileWorkItem), &tile_item_bytes) ||
+         !avifdec_size_multiply(
+             tile_capacity, sizeof(Av1TileDecodeResult),
+             &tile_result_bytes))) {
+        return AVIFDEC_OVERFLOW;
+    }
+    cell_stride = sequence->reduced_still_picture_header &&
+                          !frame->allow_intrabc
+                      ? AV1_BLOCK_BASE_CELL_SIZE
+                      : sizeof(Av1BlockCell);
+    if (!avifdec_size_multiply(cells, cell_stride, &cell_bytes)) {
         return AVIFDEC_OVERFLOW;
     }
     if (av1_restoration_unit_capacity(
@@ -1293,7 +1358,7 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
                 _Alignof(Av1TemporalMotion));
     }
     state->cells = (Av1BlockCell *)avifdec_arena_allocate(
-        &state->arena, cells * sizeof(*state->cells), _Alignof(Av1BlockCell));
+        &state->arena, cell_bytes, _Alignof(Av1BlockCell));
     state->block_widths = (uint8_t *)avifdec_arena_allocate(
         &state->arena, cells, _Alignof(uint8_t));
     state->block_heights = (uint8_t *)avifdec_arena_allocate(
@@ -1320,6 +1385,10 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         &state->arena, 1024U * sizeof(int32_t), _Alignof(int32_t));
     state->residual_scratch = (int32_t *)avifdec_arena_allocate(
         &state->arena, 4096U * sizeof(int32_t), _Alignof(int32_t));
+    for (plane = 0U; plane < 3U; ++plane) {
+        state->qmatrices[plane] = (uint8_t *)avifdec_arena_allocate(
+            &state->arena, AV1_QM_TOTAL_SIZE, _Alignof(uint8_t));
+    }
     state->inter_pred0 = (uint16_t *)avifdec_arena_allocate(
         &state->arena, 128U * 128U * sizeof(uint16_t), _Alignof(uint16_t));
     state->inter_pred1 = (uint16_t *)avifdec_arena_allocate(
@@ -1370,6 +1439,70 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         if (state->frame_planes.data[plane] != 0) {
             avifdec_memory_fill(state->frame_planes.data[plane], 0U,
                                 plane_samples * sizeof(uint16_t));
+        }
+    }
+    if (worker_count > 1U) {
+        state->tile_workers = (Av1TileWorker *)avifdec_arena_allocate(
+            &state->arena, tile_worker_bytes,
+            _Alignof(Av1TileWorker));
+        state->tile_work_items = (Av1TileWorkItem *)avifdec_arena_allocate(
+            &state->arena, tile_item_bytes,
+            _Alignof(Av1TileWorkItem));
+        state->tile_results = (Av1TileDecodeResult *)avifdec_arena_allocate(
+            &state->arena, tile_result_bytes,
+            _Alignof(Av1TileDecodeResult));
+        state->tile_worker_count = worker_count;
+        state->tile_capacity = tile_capacity;
+        for (worker_index = 0U; worker_index + 1U < worker_count;
+             ++worker_index) {
+            Av1TraceState *worker = &state->tile_workers[worker_index].state;
+
+            avifdec_memory_fill(worker, 0U, sizeof(*worker));
+            worker->tile_cdfs = (Av1TileCdfs *)avifdec_arena_allocate(
+                &state->arena, sizeof(*worker->tile_cdfs),
+                _Alignof(Av1TileCdfs));
+            worker->quantized = (int32_t *)avifdec_arena_allocate(
+                &state->arena, 1024U * sizeof(int32_t), _Alignof(int32_t));
+            worker->dequantized = (int32_t *)avifdec_arena_allocate(
+                &state->arena, 1024U * sizeof(int32_t), _Alignof(int32_t));
+            worker->residual_scratch = (int32_t *)avifdec_arena_allocate(
+                &state->arena, 4096U * sizeof(int32_t), _Alignof(int32_t));
+            worker->inter_pred0 = (uint16_t *)avifdec_arena_allocate(
+                &state->arena, 128U * 128U * sizeof(uint16_t),
+                _Alignof(uint16_t));
+            worker->inter_pred1 = (uint16_t *)avifdec_arena_allocate(
+                &state->arena, 128U * 128U * sizeof(uint16_t),
+                _Alignof(uint16_t));
+            worker->inter_mask = (uint8_t *)avifdec_arena_allocate(
+                &state->arena, 128U * 128U, _Alignof(uint8_t));
+            worker->palette_map = (uint8_t *)avifdec_arena_allocate(
+                &state->arena, 64U * 64U, _Alignof(uint8_t));
+            worker->palette_map_uv = (uint8_t *)avifdec_arena_allocate(
+                &state->arena, 64U * 64U, _Alignof(uint8_t));
+            for (plane = 0U;
+                 plane < (sequence->monochrome ? 1U : 3U);
+                 ++plane) {
+                Av1CoeffPlaneContext *context =
+                    &worker->coeff_contexts.plane[plane];
+
+                *context = planes[plane];
+                context->above_level_context =
+                    (uint8_t *)avifdec_arena_allocate(
+                        &state->arena, context->above_capacity,
+                        _Alignof(uint8_t));
+                context->above_dc_context =
+                    (uint8_t *)avifdec_arena_allocate(
+                        &state->arena, context->above_capacity,
+                        _Alignof(uint8_t));
+                context->left_level_context =
+                    (uint8_t *)avifdec_arena_allocate(
+                        &state->arena, context->left_capacity,
+                        _Alignof(uint8_t));
+                context->left_dc_context =
+                    (uint8_t *)avifdec_arena_allocate(
+                        &state->arena, context->left_capacity,
+                        _Alignof(uint8_t));
+            }
         }
     }
     for (plane = 0U; plane < (sequence->monochrome ? 1U : 3U); ++plane) {
@@ -1521,6 +1654,8 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
                 AV1_NUM_REF_FRAMES - 1U].data[2] == 0)))) ||
         state->quantized == 0 ||
         state->dequantized == 0 || state->residual_scratch == 0 ||
+        state->qmatrices[0] == 0 || state->qmatrices[1] == 0 ||
+        state->qmatrices[2] == 0 ||
         state->inter_pred0 == 0 || state->inter_pred1 == 0 ||
         state->inter_mask == 0) {
         return state->arena.status;
@@ -1529,10 +1664,16 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     state->restoration_unit_capacity = restoration_units;
     avifdec_memory_fill(state->cdef_indices, 0xffU, state->cell_count);
     if (av1_coeff_context_init(&state->coeff_contexts, planes) != AVIFDEC_OK ||
-        av1_block_state_init(&state->block_state, frame->mi_rows, frame->mi_cols,
-                             state->cells, cells, sequence->monochrome,
-                             sequence->subsampling_x,
-                             sequence->subsampling_y) != AVIFDEC_OK) {
+        (sequence->reduced_still_picture_header && !frame->allow_intrabc
+             ? av1_block_state_init_compact(
+                   &state->block_state, frame->mi_rows, frame->mi_cols,
+                   state->cells, cells, sequence->monochrome,
+                   sequence->subsampling_x, sequence->subsampling_y)
+             : av1_block_state_init(
+                   &state->block_state, frame->mi_rows, frame->mi_cols,
+                   state->cells, cells, sequence->monochrome,
+                   sequence->subsampling_x, sequence->subsampling_y)) !=
+            AVIFDEC_OK) {
         return AVIFDEC_INVALID_DATA;
     }
     av1_tile_cdfs_init_frame(state->frame_cdfs, frame->base_q_index);
@@ -1578,11 +1719,32 @@ static AvifdecStatus av1_trace_begin_frame(
     state->saved_context_update = 0U;
     status = av1_trace_prepare(state, sequence, frame);
     if (status != AVIFDEC_OK) return status;
-    status = av1_block_state_init(
-        &state->block_state, frame->mi_rows, frame->mi_cols,
-        state->cells, state->cell_count, sequence->monochrome,
-        sequence->subsampling_x, sequence->subsampling_y);
+    status = sequence->reduced_still_picture_header && !frame->allow_intrabc
+                 ? av1_block_state_init_compact(
+                       &state->block_state, frame->mi_rows, frame->mi_cols,
+                       state->cells, state->cell_count, sequence->monochrome,
+                       sequence->subsampling_x, sequence->subsampling_y)
+                 : av1_block_state_init(
+                       &state->block_state, frame->mi_rows, frame->mi_cols,
+                       state->cells, state->cell_count, sequence->monochrome,
+                       sequence->subsampling_x, sequence->subsampling_y);
     if (status != AVIFDEC_OK) return status;
+    avifdec_memory_fill(state->block_widths, 0U, state->cell_count);
+    avifdec_memory_fill(state->block_heights, 0U, state->cell_count);
+    if (frame->using_qmatrix) {
+        const uint8_t levels[3] = {
+            frame->qm_y, frame->qm_u, frame->qm_v
+        };
+
+        for (plane = 0U; plane < 3U; ++plane) {
+            if (levels[plane] < 15U) {
+                status = av1_recon_qmatrix_decode(
+                    levels[plane], plane != 0U,
+                    state->qmatrices[plane], AV1_QM_TOTAL_SIZE);
+                if (status != AVIFDEC_OK) return status;
+            }
+        }
+    }
     status = av1_restoration_state_init(
         &state->restoration, state->restoration_units,
         state->restoration_unit_capacity, frame->upscaled_width,
@@ -1878,7 +2040,8 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
                                      const Av1Bits *bits,
                                      size_t tile,
                                      size_t position,
-                                     size_t tile_size) {
+                                     size_t tile_size,
+                                     Av1TileDecodeResult *result) {
     Av1TilePartitionConfig partition_config;
     Av1TileModeConfig mode_config;
     Av1PartitionTrace partition_trace;
@@ -1890,6 +2053,7 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     AvifdecStatus status;
     Av1DequantParams dequant_params;
 
+    if (result == 0) return AVIFDEC_INVALID_ARGUMENT;
     status = av1_trace_prepare(state, sequence, frame);
     if (status != AVIFDEC_OK) return status;
     for (plane = 0U; plane < 3U; ++plane) {
@@ -1906,8 +2070,6 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     }
     status = av1_coeff_context_init(&state->coeff_contexts, planes);
     if (status != AVIFDEC_OK) return status;
-    avifdec_memory_fill(state->block_widths, 0U, state->cell_count);
-    avifdec_memory_fill(state->block_heights, 0U, state->cell_count);
     status = av1_block_state_set_tile(
         &state->block_state, frame->mi_row_starts[tile_row],
         frame->mi_row_starts[tile_row + 1U],
@@ -1936,6 +2098,9 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
         &state->block_state, &state->frame_planes,
         state->palette_map, state->palette_map_uv, 64U * 64U);
     if (status != AVIFDEC_OK) return status;
+    for (plane = 0U; plane < 3U; ++plane) {
+        state->residual.qmatrices[plane] = state->qmatrices[plane];
+    }
     state->residual.current_frame_width = frame->frame_width;
     state->residual.current_frame_height = frame->frame_height;
     state->residual.current_order_hint = frame->order_hint;
@@ -2051,89 +2216,175 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
         &partition_config, &mode_config, state->frame_cdfs, state->tile_cdfs,
         &partition_trace);
     if (status != AVIFDEC_OK) return status;
-    if (state->trace_enabled &&
-        (state->trace->tile_count == SIZE_MAX ||
-        state->trace->partition_nodes > SIZE_MAX - partition_trace.partition_nodes ||
-        state->trace->block_count > SIZE_MAX - state->block_trace.block_count ||
-        state->trace->inter_block_count >
-            SIZE_MAX - state->block_trace.inter_block_count ||
-        state->trace->compound_block_count >
-            SIZE_MAX - state->block_trace.compound_block_count ||
-        state->trace->transform_count > SIZE_MAX - state->residual.transform_count ||
-        state->trace->nonzero_transform_count >
-            SIZE_MAX - state->residual.nonzero_transform_count ||
-        state->trace->coefficient_count >
-            SIZE_MAX - state->residual.coefficient_count)) {
-        return AVIFDEC_OVERFLOW;
-    }
-    if (state->trace_enabled) {
-        ++state->trace->tile_count;
-        state->trace->partition_nodes += partition_trace.partition_nodes;
-        state->trace->block_count += state->block_trace.block_count;
-        state->trace->inter_block_count += state->block_trace.inter_block_count;
-        state->trace->compound_block_count +=
-            state->block_trace.compound_block_count;
-        state->trace->transform_count += state->residual.transform_count;
-        state->trace->nonzero_transform_count +=
-            state->residual.nonzero_transform_count;
-        state->trace->coefficient_count += state->residual.coefficient_count;
-        state->trace->transform_size_mask |= state->residual.transform_size_mask;
-        state->trace->transform_type_mask |= state->residual.transform_type_mask;
-        av1_trace_hash(state->trace, tile);
-        av1_trace_hash(state->trace, partition_trace.checksum);
-        av1_trace_hash(state->trace, state->block_trace.checksum);
-        av1_trace_hash(state->trace, state->residual.checksum);
-        av1_trace_hash_value(&state->trace->quantized_checksum,
-                             state->residual.quantized_checksum);
-        av1_trace_hash_value(&state->trace->mode_checksum,
-                             state->block_trace.mode_checksum);
-        av1_trace_hash_value(&state->trace->inter_mode_checksum,
-                             state->block_trace.inter_mode_checksum);
-        av1_trace_hash_value(&state->trace->mv_stack_checksum,
-                             state->block_trace.mv_stack_checksum);
-        av1_trace_hash_value(&state->trace->mv_checksum,
-                             state->block_trace.mv_checksum);
-        av1_trace_hash_value(&state->trace->predictor_checksum,
-                             state->residual.predictor_checksum);
-        av1_trace_hash_value(&state->trace->dequantized_checksum,
-                             state->residual.dequantized_checksum);
-        av1_trace_hash_value(&state->trace->residual_checksum,
-                             state->residual.residual_checksum);
-        av1_trace_hash(state->trace, av1_tile_cdfs_checksum(state->tile_cdfs));
-    }
+    result->partition = partition_trace;
+    result->block = state->block_trace;
+    result->residual = state->residual;
+    result->cdf_checksum = av1_tile_cdfs_checksum(state->tile_cdfs);
     if (tile == frame->context_update_tile_id) {
         avifdec_memory_copy(state->context_update_cdfs, state->tile_cdfs,
                             sizeof(*state->context_update_cdfs));
         state->saved_context_update = 1;
     }
-    if (tile + 1U == (size_t)frame->tile_columns * frame->tile_rows) {
-        if (state->trace_enabled) {
-            unsigned int checksum_plane;
-            unsigned int plane_count = sequence->monochrome ? 1U : 3U;
-            for (checksum_plane = 0U; checksum_plane < plane_count;
-                 ++checksum_plane) {
-                unsigned int sub_x = checksum_plane == 0U ? 0U
-                    : sequence->subsampling_x;
-                unsigned int sub_y = checksum_plane == 0U ? 0U
-                    : sequence->subsampling_y;
-                uint32_t visible_width = (frame->frame_width +
-                    ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-                uint32_t visible_height = (frame->frame_height +
-                    ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-                uint64_t plane_checksum;
-                status = av1_predict_checksum(
-                    state->frame_planes.data[checksum_plane],
-                    state->frame_planes.stride[checksum_plane],
-                    visible_width, visible_height, (uint8_t)checksum_plane,
-                    &plane_checksum);
-                if (status != AVIFDEC_OK) return status;
-                av1_trace_hash_value(
-                    &state->trace->reconstruction_checksum,
-                    plane_checksum);
-            }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus av1_trace_commit_tile(
+    Av1TraceState *state,
+    size_t tile,
+    const Av1TileDecodeResult *result) {
+    AvifdecEntropyTrace *trace;
+
+    if (!state->trace_enabled) return AVIFDEC_OK;
+    trace = state->trace;
+    if (trace->tile_count == SIZE_MAX ||
+        trace->partition_nodes >
+            SIZE_MAX - result->partition.partition_nodes ||
+        trace->block_count > SIZE_MAX - result->block.block_count ||
+        trace->inter_block_count >
+            SIZE_MAX - result->block.inter_block_count ||
+        trace->compound_block_count >
+            SIZE_MAX - result->block.compound_block_count ||
+        trace->transform_count >
+            SIZE_MAX - result->residual.transform_count ||
+        trace->nonzero_transform_count >
+            SIZE_MAX - result->residual.nonzero_transform_count ||
+        trace->coefficient_count >
+            SIZE_MAX - result->residual.coefficient_count) {
+        return AVIFDEC_OVERFLOW;
+    }
+    ++trace->tile_count;
+    trace->partition_nodes += result->partition.partition_nodes;
+    trace->block_count += result->block.block_count;
+    trace->inter_block_count += result->block.inter_block_count;
+    trace->compound_block_count += result->block.compound_block_count;
+    trace->transform_count += result->residual.transform_count;
+    trace->nonzero_transform_count +=
+        result->residual.nonzero_transform_count;
+    trace->coefficient_count += result->residual.coefficient_count;
+    trace->transform_size_mask |= result->residual.transform_size_mask;
+    trace->transform_type_mask |= result->residual.transform_type_mask;
+    av1_trace_hash(trace, tile);
+    av1_trace_hash(trace, result->partition.checksum);
+    av1_trace_hash(trace, result->block.checksum);
+    av1_trace_hash(trace, result->residual.checksum);
+    av1_trace_hash_value(
+        &trace->quantized_checksum, result->residual.quantized_checksum);
+    av1_trace_hash_value(
+        &trace->mode_checksum, result->block.mode_checksum);
+    av1_trace_hash_value(
+        &trace->inter_mode_checksum, result->block.inter_mode_checksum);
+    av1_trace_hash_value(
+        &trace->mv_stack_checksum, result->block.mv_stack_checksum);
+    av1_trace_hash_value(
+        &trace->mv_checksum, result->block.mv_checksum);
+    av1_trace_hash_value(
+        &trace->predictor_checksum, result->residual.predictor_checksum);
+    av1_trace_hash_value(
+        &trace->dequantized_checksum,
+        result->residual.dequantized_checksum);
+    av1_trace_hash_value(
+        &trace->residual_checksum, result->residual.residual_checksum);
+    av1_trace_hash(trace, result->cdf_checksum);
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus av1_trace_finish_tiles(
+    Av1TraceState *state,
+    const Av1Sequence *sequence,
+    const Av1Frame *frame) {
+    AvifdecStatus status;
+
+    if (state->trace_enabled) {
+        unsigned int checksum_plane;
+        unsigned int plane_count = sequence->monochrome ? 1U : 3U;
+
+        for (checksum_plane = 0U; checksum_plane < plane_count;
+             ++checksum_plane) {
+            unsigned int sub_x = checksum_plane == 0U ? 0U
+                : sequence->subsampling_x;
+            unsigned int sub_y = checksum_plane == 0U ? 0U
+                : sequence->subsampling_y;
+            uint32_t visible_width = (frame->frame_width +
+                ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+            uint32_t visible_height = (frame->frame_height +
+                ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+            uint64_t plane_checksum;
+
+            status = av1_predict_checksum(
+                state->frame_planes.data[checksum_plane],
+                state->frame_planes.stride[checksum_plane],
+                visible_width, visible_height, (uint8_t)checksum_plane,
+                &plane_checksum);
+            if (status != AVIFDEC_OK) return status;
+            av1_trace_hash_value(
+                &state->trace->reconstruction_checksum, plane_checksum);
         }
-        status = av1_trace_finish_frame(state, sequence, frame);
-        if (status != AVIFDEC_OK) return status;
+    }
+    return av1_trace_finish_frame(state, sequence, frame);
+}
+
+typedef struct {
+    Av1TraceState *state;
+    const Av1Sequence *sequence;
+    const Av1Frame *frame;
+    size_t count;
+} Av1TileParallelContext;
+
+static void av1_trace_prepare_tile_worker(Av1TraceState *worker,
+                                          const Av1TraceState *state) {
+    Av1TileCdfs *tile_cdfs = worker->tile_cdfs;
+    Av1CoeffContextState coeff_contexts = worker->coeff_contexts;
+    int32_t *quantized = worker->quantized;
+    int32_t *dequantized = worker->dequantized;
+    int32_t *residual_scratch = worker->residual_scratch;
+    uint16_t *inter_pred0 = worker->inter_pred0;
+    uint16_t *inter_pred1 = worker->inter_pred1;
+    uint8_t *inter_mask = worker->inter_mask;
+    uint8_t *palette_map = worker->palette_map;
+    uint8_t *palette_map_uv = worker->palette_map_uv;
+
+    *worker = *state;
+    worker->tile_cdfs = tile_cdfs;
+    worker->coeff_contexts = coeff_contexts;
+    worker->quantized = quantized;
+    worker->dequantized = dequantized;
+    worker->residual_scratch = residual_scratch;
+    worker->inter_pred0 = inter_pred0;
+    worker->inter_pred1 = inter_pred1;
+    worker->inter_mask = inter_mask;
+    worker->palette_map = palette_map;
+    worker->palette_map_uv = palette_map_uv;
+    worker->tile_workers = 0;
+    worker->tile_work_items = 0;
+    worker->tile_results = 0;
+    worker->tile_worker_count = 1U;
+    worker->tile_capacity = 0U;
+}
+
+static AvifdecStatus av1_trace_tile_range(size_t begin,
+                                          size_t end,
+                                          size_t worker_index,
+                                          void *arg) {
+    Av1TileParallelContext *parallel = (Av1TileParallelContext *)arg;
+    Av1TraceState *worker;
+    size_t index;
+
+    if (parallel == 0 || worker_index >= parallel->state->tile_worker_count ||
+        begin > end || end > parallel->count) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    worker = worker_index == 0U
+        ? parallel->state
+        : &parallel->state->tile_workers[worker_index - 1U].state;
+    for (index = begin; index < end; ++index) {
+        const Av1TileWorkItem *item =
+            &parallel->state->tile_work_items[index];
+        Av1TileDecodeResult *result =
+            &parallel->state->tile_results[index];
+
+        result->status = av1_trace_tile(
+            worker, parallel->sequence, parallel->frame,
+            item->bits, item->tile, item->position, item->size, result);
     }
     return AVIFDEC_OK;
 }
@@ -2150,6 +2401,8 @@ static AvifdecStatus av1_parse_tile_group(Av1Bits *bits,
     size_t position;
     size_t remaining;
     size_t tile;
+    size_t group_count;
+    int parallel_tiles;
 
     if (num_tiles == 0U) return AVIFDEC_INVALID_DATA;
     if (num_tiles > 1U && av1_bits_read(bits, 1U)) {
@@ -2164,6 +2417,12 @@ static AvifdecStatus av1_parse_tile_group(Av1Bits *bits,
     }
     position = bits->start + bits->bit_position / 8U;
     remaining = bits->size - bits->bit_position / 8U;
+    group_count = tile_end - tile_start + 1U;
+    parallel_tiles = trace_state != 0 &&
+        trace_state->executor != 0 &&
+        trace_state->tile_worker_count > 1U &&
+        group_count > 1U &&
+        group_count <= trace_state->tile_capacity;
     for (tile = tile_start; tile <= tile_end; ++tile) {
         size_t tile_size;
 
@@ -2191,9 +2450,25 @@ static AvifdecStatus av1_parse_tile_group(Av1Bits *bits,
         }
         if (tile_size == 0U || tile_size > remaining) return AVIFDEC_TRUNCATED;
         if (trace_state != 0) {
-            AvifdecStatus status = av1_trace_tile(
-                trace_state, sequence, frame, bits, tile, position, tile_size);
-            if (status != AVIFDEC_OK) return status;
+            if (parallel_tiles) {
+                Av1TileWorkItem *item =
+                    &trace_state->tile_work_items[tile - tile_start];
+
+                item->bits = bits;
+                item->tile = tile;
+                item->position = position;
+                item->size = tile_size;
+            } else {
+                Av1TileDecodeResult result;
+                AvifdecStatus status = av1_trace_tile(
+                    trace_state, sequence, frame, bits, tile, position,
+                    tile_size, &result);
+                if (status == AVIFDEC_OK) {
+                    status =
+                        av1_trace_commit_tile(trace_state, tile, &result);
+                }
+                if (status != AVIFDEC_OK) return status;
+            }
         }
         position += tile_size;
         remaining -= tile_size;
@@ -2203,7 +2478,50 @@ static AvifdecStatus av1_parse_tile_group(Av1Bits *bits,
         }
     }
     if (remaining != 0U) return AVIFDEC_INVALID_DATA;
+    if (parallel_tiles) {
+        Av1TileParallelContext parallel;
+        AvifdecStatus executor_status;
+        size_t worker_index;
+        size_t index;
+
+        for (worker_index = 1U;
+             worker_index < trace_state->tile_worker_count;
+             ++worker_index) {
+            av1_trace_prepare_tile_worker(
+                &trace_state->tile_workers[worker_index - 1U].state,
+                trace_state);
+        }
+        parallel.state = trace_state;
+        parallel.sequence = sequence;
+        parallel.frame = frame;
+        parallel.count = group_count;
+        executor_status = trace_state->executor->parallel_for(
+            trace_state->executor->user_data, group_count, 1U,
+            av1_trace_tile_range, &parallel);
+        if (executor_status != AVIFDEC_OK) return executor_status;
+        for (index = 0U; index < group_count; ++index) {
+            Av1TileDecodeResult *result =
+                &trace_state->tile_results[index];
+            const Av1TileWorkItem *item =
+                &trace_state->tile_work_items[index];
+            AvifdecStatus status = result->status;
+
+            if (status == AVIFDEC_OK) {
+                status = av1_trace_commit_tile(
+                    trace_state, item->tile, result);
+            }
+            if (status != AVIFDEC_OK) return status;
+            if (item->tile == frame->context_update_tile_id) {
+                trace_state->saved_context_update = 1U;
+            }
+        }
+    }
     *next_tile = tile_end + 1U;
+    if (trace_state != 0 && *next_tile == num_tiles) {
+        AvifdecStatus status =
+            av1_trace_finish_tiles(trace_state, sequence, frame);
+        if (status != AVIFDEC_OK) return status;
+    }
     return AVIFDEC_OK;
 }
 
@@ -3057,6 +3375,7 @@ static AvifdecStatus av1_workspace_requirement(
     const AvifdecImageInfo *info,
     uint32_t width,
     uint32_t height,
+    size_t worker_count,
     size_t *required) {
     size_t pixels;
     size_t tile_workspace;
@@ -3068,6 +3387,7 @@ static AvifdecStatus av1_workspace_requirement(
     size_t result;
 
     if (info == 0 || required == 0 || width == 0U || height == 0U ||
+        worker_count == 0U ||
         (info->superblock_size != 64U &&
          info->superblock_size != 128U)) {
         return AVIFDEC_INVALID_ARGUMENT;
@@ -3109,10 +3429,13 @@ static AvifdecStatus av1_workspace_requirement(
         av1_tile_workspace_requirement(
             width, height, info->monochrome,
             info->subsampling_x, info->subsampling_y,
+            info->reduced_still_picture_header && !info->allow_intrabc,
             &tile_workspace) != AVIFDEC_OK ||
         !avifdec_size_add(result, tile_workspace, &result) ||
         !avifdec_size_add(
-            result, 6144U * sizeof(int32_t) + _Alignof(int32_t) - 1U,
+            result, 6144U * sizeof(int32_t) +
+                        3U * AV1_QM_TOTAL_SIZE +
+                        _Alignof(int32_t) - 1U,
             &result) ||
         !avifdec_size_add(
             result, 2U * 128U * 128U * sizeof(uint16_t) +
@@ -3135,6 +3458,80 @@ static AvifdecStatus av1_workspace_requirement(
             return AVIFDEC_OVERFLOW;
         }
     }
+    if (worker_count > 1U && info->tile_count != 0U) {
+        AvifdecArena sizing;
+        size_t tile_count;
+        size_t active_workers;
+        size_t worker_index;
+        size_t max_mi_columns = 2U * (((size_t)width + 7U) / 8U);
+        size_t max_mi_rows = 2U * (((size_t)height + 7U) / 8U);
+        size_t superblock_mi =
+            info->superblock_size == 128U ? 32U : 16U;
+        size_t padded_width4 =
+            ((max_mi_columns + superblock_mi - 1U) / superblock_mi) *
+            superblock_mi;
+        size_t padded_height4 =
+            ((max_mi_rows + superblock_mi - 1U) / superblock_mi) *
+            superblock_mi;
+
+        tile_count = info->tile_count;
+        active_workers = worker_count;
+        if (active_workers > 1U) {
+            avifdec_arena_init_sizing(&sizing);
+            (void)avifdec_arena_allocate(
+                &sizing,
+                (active_workers - 1U) * sizeof(Av1TileWorker),
+                _Alignof(Av1TileWorker));
+            (void)avifdec_arena_allocate(
+                &sizing, tile_count * sizeof(Av1TileWorkItem),
+                _Alignof(Av1TileWorkItem));
+            (void)avifdec_arena_allocate(
+                &sizing, tile_count * sizeof(Av1TileDecodeResult),
+                _Alignof(Av1TileDecodeResult));
+            for (worker_index = 1U; worker_index < active_workers;
+                 ++worker_index) {
+                unsigned int plane;
+
+                (void)avifdec_arena_allocate(
+                    &sizing, sizeof(Av1TileCdfs),
+                    _Alignof(Av1TileCdfs));
+                (void)avifdec_arena_allocate(
+                    &sizing, 6144U * sizeof(int32_t),
+                    _Alignof(int32_t));
+                (void)avifdec_arena_allocate(
+                    &sizing, 2U * 128U * 128U * sizeof(uint16_t),
+                    _Alignof(uint16_t));
+                (void)avifdec_arena_allocate(
+                    &sizing, 128U * 128U + 2U * 64U * 64U,
+                    _Alignof(uint8_t));
+                for (plane = 0U;
+                     plane < (info->monochrome ? 1U : 3U);
+                     ++plane) {
+                    unsigned int sub_x =
+                        plane == 0U ? 0U : info->subsampling_x;
+                    unsigned int sub_y =
+                        plane == 0U ? 0U : info->subsampling_y;
+                    size_t width4 =
+                        (padded_width4 + ((size_t)1U << sub_x) - 1U) >>
+                        sub_x;
+                    size_t height4 =
+                        (padded_height4 + ((size_t)1U << sub_y) - 1U) >>
+                        sub_y;
+
+                    (void)avifdec_arena_allocate(
+                        &sizing, 2U * width4 + 2U * height4,
+                        _Alignof(uint8_t));
+                }
+            }
+            if (sizing.status != AVIFDEC_OK ||
+                !avifdec_size_add(
+                    result, avifdec_arena_required(&sizing), &result) ||
+                !avifdec_size_add(
+                    result, _Alignof(Av1TileWorker) - 1U, &result)) {
+                return AVIFDEC_OVERFLOW;
+            }
+        }
+    }
     *required = result;
     return AVIFDEC_OK;
 }
@@ -3144,7 +3541,7 @@ AvifdecStatus avifdec_av1_workspace_requirement(
     size_t *required) {
     if (info == 0) return AVIFDEC_INVALID_ARGUMENT;
     return av1_workspace_requirement(
-        info, info->width, info->height, required);
+        info, info->width, info->height, 1U, required);
 }
 
 static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
@@ -3152,6 +3549,7 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                                       const AvifdecLimits *limits,
                                       AvifdecImageInfo *info,
                                       AvifdecError *error,
+                                      size_t workspace_worker_count,
                                       Av1TraceState *trace_state) {
     Av1Stream stream;
     Av1Sequence sequence;
@@ -3379,6 +3777,10 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
         } else if (obu_type == AV1_OBU_FRAME_HEADER || obu_type == AV1_OBU_FRAME) {
             if (!seen_sequence || frame_open) {
                 return av1_fail(error, AVIFDEC_INVALID_DATA, header_offset, obu_type);
+            }
+            if (sequence.still_picture && frame_count != 0U) {
+                return av1_fail(
+                    error, AVIFDEC_INVALID_DATA, header_offset, obu_type);
             }
             if (frame_count >= max_frames) {
                 return av1_fail(
@@ -3724,6 +4126,7 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
         AvifdecStatus requirement_status =
             av1_workspace_requirement(
                 info, sequence.max_width, sequence.max_height,
+                workspace_worker_count,
                 &info->workspace_required);
         if (requirement_status != AVIFDEC_OK) {
             return av1_fail(
@@ -3754,12 +4157,23 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     return AVIFDEC_OK;
 }
 
+AvifdecStatus avifdec_av1_query_ex(const AvifdecSpan *spans,
+                                   size_t span_count,
+                                   const AvifdecLimits *limits,
+                                   size_t worker_count,
+                                   AvifdecImageInfo *info,
+                                   AvifdecError *error) {
+    return av1_parse_stream(
+        spans, span_count, limits, info, error, worker_count, 0);
+}
+
 AvifdecStatus avifdec_av1_query(const AvifdecSpan *spans,
                                 size_t span_count,
                                 const AvifdecLimits *limits,
                                 AvifdecImageInfo *info,
                                 AvifdecError *error) {
-    return av1_parse_stream(spans, span_count, limits, info, error, 0);
+    return avifdec_av1_query_ex(
+        spans, span_count, limits, 1U, info, error);
 }
 
 AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
@@ -3800,7 +4214,8 @@ AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
         limits == 0 ? 0U : limits->spatial_layer;
     state.output_spatial_layer_set =
         limits == 0 ? 0U : limits->spatial_layer_set;
-    return av1_parse_stream(spans, span_count, limits, info, error, &state);
+    return av1_parse_stream(
+        spans, span_count, limits, info, error, 1U, &state);
 }
 
 AvifdecStatus avifdec_av1_decode_ex(
@@ -3848,6 +4263,7 @@ AvifdecStatus avifdec_av1_decode_ex(
     state.trace = trace;
     state.trace_enabled = trace_enabled;
     state.executor = executor;
+    state.planned_tile_capacity = info->tile_count;
     state.image = image;
     state.output_width = info->width;
     state.output_height = info->height;
@@ -3855,7 +4271,9 @@ AvifdecStatus avifdec_av1_decode_ex(
         limits == 0 ? 0U : limits->spatial_layer;
     state.output_spatial_layer_set =
         limits == 0 ? 0U : limits->spatial_layer_set;
-    return av1_parse_stream(spans, span_count, limits, info, error, &state);
+    return av1_parse_stream(
+        spans, span_count, limits, info, error,
+        executor == 0 ? 1U : executor->worker_count, &state);
 }
 
 AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,

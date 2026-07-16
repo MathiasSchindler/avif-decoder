@@ -21,7 +21,6 @@ static int av1_symbol_byte_at(const Av1SymbolDecoder *decoder,
 
 static uint32_t av1_symbol_raw_bits(Av1SymbolDecoder *decoder, unsigned int count) {
     uint32_t value = 0U;
-    unsigned int index;
 
     if (decoder->status != AVIFDEC_OK) return 0U;
     if (count > 32U || decoder->bit_position > decoder->size * 8U ||
@@ -29,36 +28,57 @@ static uint32_t av1_symbol_raw_bits(Av1SymbolDecoder *decoder, unsigned int coun
         decoder->status = count > 32U ? AVIFDEC_INVALID_ARGUMENT : AVIFDEC_TRUNCATED;
         return 0U;
     }
-    for (index = 0U; index < count; ++index) {
-        size_t position = decoder->bit_position++;
-        uint8_t byte;
+    if (count != 0U && decoder->contiguous_data != 0) {
+        size_t byte_offset = decoder->bit_position >> 3U;
+        unsigned int leading =
+            (unsigned int)(decoder->bit_position & 7U);
+        unsigned int byte_count =
+            (leading + count + 7U) >> 3U;
+        unsigned int trailing =
+            byte_count * 8U - leading - count;
+        uint64_t window = 0U;
+        unsigned int index;
 
-        if (!av1_symbol_byte_at(decoder, decoder->start + position / 8U, &byte)) {
-            decoder->status = AVIFDEC_TRUNCATED;
-            return 0U;
+        for (index = 0U; index < byte_count; ++index) {
+            window = (window << 8U) |
+                decoder->contiguous_data[byte_offset + index];
         }
-        value = (value << 1) | ((byte >> (7U - position % 8U)) & 1U);
+        window >>= trailing;
+        value = count == 32U
+            ? (uint32_t)window
+            : (uint32_t)(window & (((uint64_t)1U << count) - 1U));
+        decoder->bit_position += count;
+    } else {
+        unsigned int index;
+
+        for (index = 0U; index < count; ++index) {
+            size_t position = decoder->bit_position++;
+            uint8_t byte;
+
+            if (!av1_symbol_byte_at(
+                    decoder, decoder->start + position / 8U, &byte)) {
+                decoder->status = AVIFDEC_TRUNCATED;
+                return 0U;
+            }
+            value = (value << 1U) |
+                ((byte >> (7U - position % 8U)) & 1U);
+        }
     }
     return value;
 }
 
 static unsigned int av1_symbol_floor_log2(uint32_t value) {
-    unsigned int result = 0U;
-
-    while (value > 1U) {
-        value >>= 1;
-        ++result;
-    }
-    return result;
+    return 31U - (unsigned int)__builtin_clz(value);
 }
 
 static void av1_symbol_update_cdf(uint16_t *cdf, size_t symbols, size_t symbol) {
     unsigned int rate = 3U + (cdf[symbols] > 15U) + (cdf[symbols] > 31U);
+    unsigned int symbol_bits =
+        av1_symbol_floor_log2((uint32_t)symbols);
     uint32_t target = 0U;
     size_t index;
 
-    rate += av1_symbol_floor_log2((uint32_t)symbols) < 2U
-            ? av1_symbol_floor_log2((uint32_t)symbols) : 2U;
+    rate += symbol_bits < 2U ? symbol_bits : 2U;
     for (index = 0U; index + 1U < symbols; ++index) {
         if (index == symbol) target = AV1_CDF_PROB_TOP;
         if (target < cdf[index]) {
@@ -78,6 +98,7 @@ AvifdecStatus av1_symbol_init(Av1SymbolDecoder *decoder,
                               int disable_cdf_update) {
     size_t stream_size = 0U;
     size_t index;
+    size_t local_start;
     unsigned int initial_bits;
     uint32_t buffer;
 
@@ -92,6 +113,7 @@ AvifdecStatus av1_symbol_init(Av1SymbolDecoder *decoder,
     if (start > stream_size || size > stream_size - start) return AVIFDEC_TRUNCATED;
     decoder->spans = spans;
     decoder->span_count = span_count;
+    decoder->contiguous_data = 0;
     decoder->start = start;
     decoder->size = size;
     decoder->bit_position = 0U;
@@ -99,11 +121,60 @@ AvifdecStatus av1_symbol_init(Av1SymbolDecoder *decoder,
     decoder->max_bits = (int64_t)(size * 8U) - 15;
     decoder->status = AVIFDEC_OK;
     decoder->disable_cdf_update = disable_cdf_update != 0;
+    local_start = start;
+    for (index = 0U; index < span_count; ++index) {
+        if (local_start <= spans[index].size &&
+            size <= spans[index].size - local_start) {
+            decoder->contiguous_data =
+                spans[index].data + local_start;
+            break;
+        }
+        if (local_start < spans[index].size) break;
+        local_start -= spans[index].size;
+    }
     initial_bits = size * 8U < 15U ? (unsigned int)(size * 8U) : 15U;
     buffer = av1_symbol_raw_bits(decoder, initial_bits);
     if (decoder->status != AVIFDEC_OK) return decoder->status;
     decoder->value = (AV1_CDF_PROB_TOP - 1U) ^ (buffer << (15U - initial_bits));
     return AVIFDEC_OK;
+}
+
+static uint32_t av1_symbol_read_bool(Av1SymbolDecoder *decoder) {
+    uint32_t current;
+    uint32_t symbol;
+    unsigned int bits;
+    unsigned int read_bits;
+    uint32_t new_data;
+
+    if (decoder == 0 || decoder->status != AVIFDEC_OK) {
+        if (decoder == 0) return 0U;
+        return 0U;
+    }
+    current = (decoder->range >> 1U) & ~((uint32_t)127U);
+    current += AV1_EC_MIN_PROB;
+    if (decoder->value >= current) {
+        symbol = 0U;
+        decoder->range -= current;
+        decoder->value -= current;
+    } else {
+        symbol = 1U;
+        decoder->range = current;
+    }
+    if (decoder->range == 0U) {
+        decoder->status = AVIFDEC_INVALID_DATA;
+        return 0U;
+    }
+    bits = 15U - av1_symbol_floor_log2(decoder->range);
+    decoder->range <<= bits;
+    read_bits = decoder->max_bits > 0
+        ? (unsigned int)(decoder->max_bits < (int64_t)bits
+            ? decoder->max_bits : (int64_t)bits)
+        : 0U;
+    new_data = av1_symbol_raw_bits(decoder, read_bits);
+    decoder->value = (new_data << (bits - read_bits)) ^
+        (((decoder->value + 1U) << bits) - 1U);
+    decoder->max_bits -= bits;
+    return symbol;
 }
 
 uint32_t av1_symbol_read(Av1SymbolDecoder *decoder, uint16_t *cdf, size_t symbols) {
@@ -164,7 +235,6 @@ uint32_t av1_symbol_read(Av1SymbolDecoder *decoder, uint16_t *cdf, size_t symbol
 }
 
 uint32_t av1_symbol_read_literal(Av1SymbolDecoder *decoder, unsigned int bits) {
-    static const uint16_t bool_cdf[3] = { 16384U, 32768U, 0U };
     uint32_t value = 0U;
     unsigned int index;
 
@@ -173,12 +243,7 @@ uint32_t av1_symbol_read_literal(Av1SymbolDecoder *decoder, unsigned int bits) {
         return 0U;
     }
     for (index = 0U; index < bits; ++index) {
-        uint16_t cdf[3];
-
-        cdf[0] = bool_cdf[0];
-        cdf[1] = bool_cdf[1];
-        cdf[2] = bool_cdf[2];
-        value = (value << 1) | av1_symbol_read(decoder, cdf, 2U);
+        value = (value << 1U) | av1_symbol_read_bool(decoder);
     }
     return value;
 }

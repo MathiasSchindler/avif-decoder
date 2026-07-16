@@ -6,6 +6,9 @@
 const Av1BlockCell *av1_block_cell(const Av1BlockState *state,
                                    uint32_t row,
                                    uint32_t column);
+Av1BlockCell *av1_block_cell_mutable(Av1BlockState *state,
+                                     uint32_t row,
+                                     uint32_t column);
 
 AvifdecStatus av1_tile_read_palette_info(
     Av1SymbolDecoder *decoder,

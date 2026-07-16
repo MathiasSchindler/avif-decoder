@@ -1360,6 +1360,7 @@ static AvifdecStatus avif_query_av1_item(
     uint32_t item_id,
     AvifdecSpan *spans,
     size_t span_capacity,
+    size_t worker_count,
     AvifdecImageInfo *info) {
     AvifLocation location;
     AvifdecLimits item_limits = context->limits;
@@ -1389,8 +1390,8 @@ static AvifdecStatus avif_query_av1_item(
         item_limits.spatial_layer = info->selected_layer;
         item_limits.spatial_layer_set = 1U;
     }
-    status = avifdec_av1_query(
-        spans, info->extent_count, &item_limits, info,
+    status = avifdec_av1_query_ex(
+        spans, info->extent_count, &item_limits, worker_count, info,
         context->error);
     if (status != AVIFDEC_OK) return status;
     if (info->has_a1op &&
@@ -2147,7 +2148,7 @@ static AvifdecStatus avif_query_item_with_workers(
     if (item_type == AVIFDEC_FOURCC('a', 'v', '0', '1')) {
         return avif_query_av1_item(
             context, item_id, context->query_spans,
-            AVIF_MAX_RESOLVED_SPANS, info);
+            AVIF_MAX_RESOLVED_SPANS, worker_count, info);
     }
     if (item_type == AVIFDEC_FOURCC('g', 'r', 'i', 'd')) {
         return avif_query_grid_item(
@@ -2679,7 +2680,7 @@ static AvifdecStatus avif_decode_item(
         AvifdecLimits item_limits = context->limits;
         AvifdecStatus status = avif_query_av1_item(
             context, item_id, context->query_spans,
-            AVIF_MAX_RESOLVED_SPANS, &info);
+            AVIF_MAX_RESOLVED_SPANS, avif_executor_width(executor), &info);
 
         if (status != AVIFDEC_OK) return status;
         if (info.has_a1op) {
@@ -3027,7 +3028,7 @@ static AvifdecStatus avif_trace_item(
         AvifdecLimits item_limits = context->limits;
         AvifdecStatus status = avif_query_av1_item(
             context, item_id, context->query_spans,
-            AVIF_MAX_RESOLVED_SPANS, &info);
+            AVIF_MAX_RESOLVED_SPANS, 1U, &info);
 
         if (status != AVIFDEC_OK) return status;
         if (info.has_a1op) {
@@ -3177,7 +3178,8 @@ AvifdecStatus avifdec_query_ex(
     if (primary_item_type == AVIFDEC_FOURCC('a', 'v', '0', '1')) {
         status = avif_query_av1_item(
             &context, primary_id, resolved_spans,
-            AVIF_MAX_RESOLVED_SPANS, info);
+            AVIF_MAX_RESOLVED_SPANS,
+            avif_executor_width(executor), info);
     } else {
         status = avif_query_item_with_workers(
             &context, primary_id, 0U,

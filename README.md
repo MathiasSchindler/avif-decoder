@@ -53,9 +53,9 @@ input, `make test` reports the skipped check and runs the rest of the suite.
 Makefile interface.
 
 The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
-tiles, sample-transform output rows, and AV1 CDEF row units through the
-imported newos clone/futex task-pool substrate. AV1 restoration copying and
-filtering use the same row-unit executor:
+tiles, AV1 bitstream tiles, sample-transform output rows, and AV1 CDEF row
+units through the imported newos clone/futex task-pool substrate. AV1
+restoration copying and filtering use the same row-unit executor:
 
 ```sh
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
@@ -240,7 +240,7 @@ are reported through capability flags and `AVIFDEC_UNSUPPORTED`.
 
 ## Public API
 
-The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.2.0 is
+The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.3.0 is
 reported by:
 
 ```c
@@ -275,17 +275,19 @@ returns deterministic syntax and reconstruction checksums.
 `AvifdecExecutor`. The executor is a structured `parallel_for` callback owned
 by the caller; the decoder still performs no allocation and retains no thread
 state. The current parallel regions cover independent tiles of a top-level
-primary grid, independent output rows of a primary sample transform, and
-two-mi-row CDEF units plus four-luma-row restoration units in a direct primary
-AV1 item. Sample-transform input images remain serial. Nested derived images,
-auxiliary alpha, sequences, RGB conversion, loop filtering, super-resolution,
-and AV1 bitstream tiles remain serial.
+primary grid, independent AV1 bitstream tiles, independent output rows of a
+primary sample transform, and two-mi-row CDEF units plus four-luma-row
+restoration units in a direct primary AV1 item. Sample-transform input images
+remain serial. Nested derived images, auxiliary alpha, sequences, RGB
+conversion, loop filtering, and super-resolution remain serial.
 
 Parallel grid query results include one copied parser context, tile buffer,
 and child decoder workspace per executor worker. Sample-transform row
 parallelism, CDEF row parallelism, and restoration row parallelism add no
-decoder workspace. Callers must use the workspace requirement returned for the
-same executor width used during decoding.
+decoder workspace. Direct AV1 tile threading adds bounded entropy,
+coefficient-context, prediction, and transform scratch per additional active
+worker, but shares frame planes and block grids. Callers must use the workspace
+requirement returned for the same executor width used during decoding.
 
 ### Image sequences
 
@@ -318,7 +320,10 @@ Reduced-still AV1 streams do not allocate inter-frame pixel references or
 motion fields. When CDEF, super-resolution, or restoration is an exact
 pass-through, their plane views alias the preceding stage. The queried
 `workspace_plane_buffer_count` records the conservative plane-buffer plan used
-for the returned workspace requirement.
+for the returned workspace requirement. Reduced-still frames without intra
+block copy store only the 72-byte intra/base prefix of each 172-byte block
+cell; frames that allow intra block copy retain the full cell because that
+tool requires motion-vector state.
 
 ### Limits and errors
 

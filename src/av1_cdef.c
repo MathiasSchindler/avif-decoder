@@ -1,4 +1,5 @@
 #include "av1_filter.h"
+#include "av1_tile_internal.h"
 #include "base.h"
 
 static const uint8_t av1_cdef_uv_direction[2][2][8] = {
@@ -35,12 +36,13 @@ static unsigned int av1_cdef_floor_log2(unsigned int value) {
 static const Av1BlockCell *av1_cdef_cell(const Av1BlockState *blocks,
                                           uint32_t row,
                                           uint32_t column) {
-    size_t index = (size_t)row * blocks->mi_columns + column;
-    if (row >= blocks->mi_rows || column >= blocks->mi_columns ||
-        index >= blocks->cell_capacity || blocks->cells[index].width == 0U) {
+    const Av1BlockCell *cell;
+
+    if (row >= blocks->mi_rows || column >= blocks->mi_columns) {
         return 0;
     }
-    return &blocks->cells[index];
+    cell = av1_block_cell(blocks, row, column);
+    return cell != 0 && cell->width != 0U ? cell : 0;
 }
 
 AvifdecStatus av1_cdef_find_direction(const uint16_t *source,

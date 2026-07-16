@@ -58,6 +58,12 @@ AvifdecStatus avifdec_av1_query(const AvifdecSpan *spans,
                                 const AvifdecLimits *limits,
                                 AvifdecImageInfo *info,
                                 AvifdecError *error);
+AvifdecStatus avifdec_av1_query_ex(const AvifdecSpan *spans,
+                                   size_t span_count,
+                                   const AvifdecLimits *limits,
+                                   size_t worker_count,
+                                   AvifdecImageInfo *info,
+                                   AvifdecError *error);
 AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
                                 size_t span_count,
                                 const AvifdecLimits *limits,

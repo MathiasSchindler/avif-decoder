@@ -23,13 +23,15 @@ unexpected behavior. The project has not received a production security audit.
 
 Optional threading adds worker-stack requirements. Grid threading also
 multiplies decoder workspace by the selected width; sample-transform and CDEF
-and restoration row threading do not. Applications should cap executor width,
-enforce their own memory budgets, and retain a width-1 fallback for untrusted
-or unusually large inputs.
+and restoration row threading do not. Direct AV1 bitstream-tile threading
+shares frame-sized storage and adds bounded per-worker decode scratch.
+Applications should cap executor width, enforce their own memory budgets, and
+retain a width-1 fallback for untrusted or unusually large inputs.
 
 Reduced-still queries may return substantially smaller AV1 workspace because
 inter-frame references are impossible and exact pass-through filter planes can
-alias. Applications must still allocate the complete queried requirement and
+alias. Frames permitting intra block copy retain full motion-bearing block
+cells. Applications must still allocate the complete queried requirement and
 must not reuse a plan across different inputs or executor widths.
 
 Adaptive compressed PNG output requires the separate

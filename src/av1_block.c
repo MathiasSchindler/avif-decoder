@@ -8,13 +8,25 @@ static size_t av1_block_index(const Av1BlockState *state,
     return (size_t)row * state->mi_columns + column;
 }
 
+static Av1BlockCell *av1_block_cell_at(Av1BlockState *state, size_t index) {
+    uint8_t *cells = (uint8_t *)state->cells;
+
+    if (index >= state->cell_capacity) return 0;
+    return (Av1BlockCell *)(void *)(cells + index * state->cell_stride);
+}
+
 const Av1BlockCell *av1_block_cell(const Av1BlockState *state,
                                    uint32_t row,
                                    uint32_t column) {
     size_t index = av1_block_index(state, row, column);
 
-    if (index >= state->cell_capacity) return 0;
-    return &state->cells[index];
+    return av1_block_cell_at((Av1BlockState *)(void *)state, index);
+}
+
+Av1BlockCell *av1_block_cell_mutable(Av1BlockState *state,
+                                     uint32_t row,
+                                     uint32_t column) {
+    return av1_block_cell_at(state, av1_block_index(state, row, column));
 }
 
 static void av1_block_hash_u64(uint64_t *checksum, uint64_t value) {
@@ -31,6 +43,7 @@ AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
                                              int monochrome,
                                              int subsampling_x,
                                              int subsampling_y,
+                                             int compact_block_state,
                                              size_t *required) {
     size_t mi_columns;
     size_t mi_rows;
@@ -45,6 +58,9 @@ AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
     if (width == 0U || height == 0U || required == 0) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
+    if (compact_block_state != 0 && compact_block_state != 1) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
     status = av1_restoration_unit_capacity(
         width, height, monochrome, subsampling_x, subsampling_y,
         &restoration_units);
@@ -53,7 +69,11 @@ AvifdecStatus av1_tile_workspace_requirement(uint32_t width,
     mi_rows = 2U * (((size_t)height + 7U) / 8U);
     if (!avifdec_size_multiply(mi_rows, mi_columns, &cells) ||
         !avifdec_size_multiply(
-            cells, sizeof(Av1BlockCell) + 7U, &grid_bytes) ||
+        cells,
+        (compact_block_state
+             ? AV1_BLOCK_BASE_CELL_SIZE
+             : sizeof(Av1BlockCell)) + 7U,
+        &grid_bytes) ||
         !avifdec_size_multiply(
             restoration_units, sizeof(Av1RestorationUnit),
             &restoration_bytes) ||
@@ -86,17 +106,20 @@ static void av1_block_hash_u32(Av1BlockTrace *trace, uint32_t value) {
     }
 }
 
-AvifdecStatus av1_block_state_init(Av1BlockState *state,
-                                   uint32_t mi_rows,
-                                   uint32_t mi_columns,
-                                   Av1BlockCell *cells,
-                                   size_t cell_capacity,
-                                   int monochrome,
-                                   int subsampling_x,
-                                   int subsampling_y) {
+static AvifdecStatus av1_block_state_init_internal(Av1BlockState *state,
+                                                  uint32_t mi_rows,
+                                                  uint32_t mi_columns,
+                                                  Av1BlockCell *cells,
+                                                  size_t cell_capacity,
+                                                  size_t cell_stride,
+                                                  int monochrome,
+                                                  int subsampling_x,
+                                                  int subsampling_y) {
     size_t required;
 
     if (state == 0 || cells == 0 || mi_rows == 0U || mi_columns == 0U ||
+        (cell_stride != AV1_BLOCK_BASE_CELL_SIZE &&
+         cell_stride != sizeof(Av1BlockCell)) ||
         (monochrome != 0 && monochrome != 1) ||
         (subsampling_x != 0 && subsampling_x != 1) ||
         (subsampling_y != 0 && subsampling_y != 1)) {
@@ -107,7 +130,7 @@ AvifdecStatus av1_block_state_init(Av1BlockState *state,
     }
     if (required > cell_capacity) return AVIFDEC_LIMIT_EXCEEDED;
     avifdec_memory_fill(state, 0U, sizeof(*state));
-    avifdec_memory_fill(cells, 0U, required * sizeof(*cells));
+    avifdec_memory_fill(cells, 0U, required * cell_stride);
     state->mi_rows = mi_rows;
     state->mi_columns = mi_columns;
     state->tile_row_end = mi_rows;
@@ -117,7 +140,34 @@ AvifdecStatus av1_block_state_init(Av1BlockState *state,
     state->subsampling_y = (uint8_t)subsampling_y;
     state->cells = cells;
     state->cell_capacity = cell_capacity;
+    state->cell_stride = cell_stride;
     return AVIFDEC_OK;
+}
+
+AvifdecStatus av1_block_state_init(Av1BlockState *state,
+                                   uint32_t mi_rows,
+                                   uint32_t mi_columns,
+                                   Av1BlockCell *cells,
+                                   size_t cell_capacity,
+                                   int monochrome,
+                                   int subsampling_x,
+                                   int subsampling_y) {
+    return av1_block_state_init_internal(
+        state, mi_rows, mi_columns, cells, cell_capacity,
+        sizeof(Av1BlockCell), monochrome, subsampling_x, subsampling_y);
+}
+
+AvifdecStatus av1_block_state_init_compact(Av1BlockState *state,
+                                           uint32_t mi_rows,
+                                           uint32_t mi_columns,
+                                           Av1BlockCell *cells,
+                                           size_t cell_capacity,
+                                           int monochrome,
+                                           int subsampling_x,
+                                           int subsampling_y) {
+    return av1_block_state_init_internal(
+        state, mi_rows, mi_columns, cells, cell_capacity,
+        AV1_BLOCK_BASE_CELL_SIZE, monochrome, subsampling_x, subsampling_y);
 }
 
 AvifdecStatus av1_block_state_set_tile(Av1BlockState *state,
@@ -282,8 +332,10 @@ AvifdecStatus av1_block_state_record(Av1BlockState *state,
         for (column = fields->column; column < column_end; ++column) {
             size_t index = av1_block_index(state, row, column);
 
-            if (index >= state->cell_capacity) return AVIFDEC_LIMIT_EXCEEDED;
-            state->cells[index] = cell;
+            Av1BlockCell *destination = av1_block_cell_at(state, index);
+
+            if (destination == 0) return AVIFDEC_LIMIT_EXCEEDED;
+            avifdec_memory_copy(destination, &cell, state->cell_stride);
         }
     }
     if (trace == 0) return AVIFDEC_OK;

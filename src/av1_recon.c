@@ -1,8 +1,6 @@
 #include "av1_recon.h"
 #include "base.h"
 
-enum { AV1_QM_TOTAL_SIZE = 3344 };
-
 static const int16_t av1_cos128_lookup[65] = {
     4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036,
     4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
@@ -41,6 +39,51 @@ uint16_t av1_recon_ac_quant(uint8_t bit_depth, int q_index) {
     if (bit_depth != 8U && bit_depth != 10U && bit_depth != 12U) return 0U;
     return av1_ac_qlookup[av1_recon_bit_depth_index(bit_depth)]
                          [av1_recon_clip_qindex(q_index)];
+}
+
+AvifdecStatus av1_recon_qmatrix_decode(uint8_t level,
+                                       uint8_t chroma,
+                                       uint8_t *matrix,
+                                       size_t matrix_capacity) {
+    size_t matrix_index;
+    size_t start;
+    size_t end;
+    size_t bit_position = 0U;
+    size_t output_index;
+
+    if (level >= 15U || chroma > 1U || matrix == 0 ||
+        matrix_capacity < AV1_QM_TOTAL_SIZE) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    matrix_index = (size_t)level * 2U + chroma;
+    start = av1_qm_compressed_offsets[matrix_index];
+    end = av1_qm_compressed_offsets[matrix_index + 1U];
+    if (start >= end || end > sizeof(av1_qm_compressed)) {
+        return AVIFDEC_INVALID_DATA;
+    }
+    matrix[0] = av1_qm_compressed[start];
+    for (output_index = 1U; output_index < AV1_QM_TOTAL_SIZE;
+         ++output_index) {
+        int node = AV1_QM_TREE_ROOT;
+
+        while (node >= 0) {
+            size_t byte_index = start + 1U + bit_position / 8U;
+            unsigned int bit;
+
+            if (byte_index >= end ||
+                (size_t)node >= sizeof(av1_qm_tree) /
+                                    sizeof(av1_qm_tree[0])) {
+                return AVIFDEC_INVALID_DATA;
+            }
+            bit = (av1_qm_compressed[byte_index] >>
+                   (7U - (unsigned int)(bit_position & 7U))) & 1U;
+            ++bit_position;
+            node = av1_qm_tree[node][bit];
+        }
+        matrix[output_index] =
+            (uint8_t)(matrix[output_index - 1U] + (uint8_t)(-node - 1));
+    }
+    return AVIFDEC_OK;
 }
 
 static unsigned int av1_recon_dq_denom(Av1TxSize tx_size) {
@@ -123,10 +166,10 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
         if (params->using_qmatrix != 0U && tx_type < AV1_TX_IDTX &&
             params->qm_level < 15U) {
             size_t qm_index = (size_t)av1_qm_offset[tx_size] + index;
-            if (qm_index >= AV1_QM_TOTAL_SIZE) return AVIFDEC_INVALID_DATA;
-            q2 = (q * av1_quantizer_matrix[params->qm_level]
-                                             [params->plane > 0U][qm_index] +
-                  16U) >> 5;
+            if (qm_index >= AV1_QM_TOTAL_SIZE || params->qmatrix == 0) {
+                return AVIFDEC_INVALID_DATA;
+            }
+            q2 = (q * params->qmatrix[qm_index] + 16U) >> 5;
         }
         product = (int64_t)quantized[index] * q2;
         magnitude = product < 0 ? (uint64_t)(-product) : (uint64_t)product;

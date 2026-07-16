@@ -3,6 +3,8 @@
 
 #include "av1_coeff.h"
 
+enum { AV1_QM_TOTAL_SIZE = 3344 };
+
 typedef struct {
     uint8_t bit_depth;
     uint8_t q_index;
@@ -14,6 +16,7 @@ typedef struct {
     int8_t delta_q_u_ac;
     int8_t delta_q_v_dc;
     int8_t delta_q_v_ac;
+    const uint8_t *qmatrix;
 } Av1DequantParams;
 
 typedef enum {
@@ -25,6 +28,10 @@ typedef enum {
 
 uint16_t av1_recon_dc_quant(uint8_t bit_depth, int q_index);
 uint16_t av1_recon_ac_quant(uint8_t bit_depth, int q_index);
+AvifdecStatus av1_recon_qmatrix_decode(uint8_t level,
+                                       uint8_t chroma,
+                                       uint8_t *matrix,
+                                       size_t matrix_capacity);
 AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
                                    size_t quantized_count,
                                    Av1TxSize tx_size,
