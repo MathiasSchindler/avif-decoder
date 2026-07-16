@@ -4248,6 +4248,8 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                 size_t max_y4 = (state->mi_rows + sub_y) >> sub_y;
                 uint32_t plane_width4 = chunk_width4 >> sub_x;
                 uint32_t plane_height4 = chunk_height4 >> sub_y;
+                uint32_t plane_block_width4 = block->width >> sub_x;
+                uint32_t plane_block_height4 = block->height >> sub_y;
                 Av1TxSize tx_size;
                 uint32_t step_x;
                 uint32_t step_y;
@@ -4256,6 +4258,8 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
 
                 if (plane_width4 == 0U) plane_width4 = 1U;
                 if (plane_height4 == 0U) plane_height4 = 1U;
+                if (plane_block_width4 == 0U) plane_block_width4 = 1U;
+                if (plane_block_height4 == 0U) plane_block_height4 = 1U;
                 tx_size = block->lossless ? AV1_TX_4X4
                           : plane == 0U ? (Av1TxSize)block->tx_size
                           : av1_tile_chroma_tx_size(plane_width4, plane_height4);
@@ -4414,8 +4418,9 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                         selector.y4 = y4;
                         status = av1_coeff_parse_block_select(
                             decoder, &state->cdfs->coeff, state->coeff_contexts,
-                            plane, tx_size, tx_type, (size_t)plane_width4 << 2,
-                            (size_t)plane_height4 << 2, x4, y4,
+                            plane, tx_size, tx_type,
+                            (size_t)plane_block_width4 << 2,
+                            (size_t)plane_block_height4 << 2, x4, y4,
                             plane == 0U ? av1_tile_select_tx_type : 0,
                             plane == 0U ? &selector : 0,
                             state->quantized, state->quantized_capacity, &result);

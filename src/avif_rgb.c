@@ -122,7 +122,7 @@ static int avif_rgb_matrix(uint16_t coefficients,
         matrix->green_cb = 12276;
         matrix->green_cr = 30679;
         matrix->blue_cb = 121609;
-    } else if (coefficients == 6U) {
+    } else if (coefficients == 2U || coefficients == 6U) {
         matrix->red_cr = 91881;
         matrix->green_cb = 22553;
         matrix->green_cr = 46802;

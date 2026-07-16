@@ -1250,6 +1250,8 @@ static int test_avif_sample_transform(void) {
 static int test_avif_rgb_conversion(void) {
     uint16_t y[6] = { 1U, 2U, 3U, 4U, 5U, 6U };
     unsigned char rgb_pixels[18];
+    unsigned char unspecified_pixels[3];
+    unsigned char bt601_pixels[3];
     AvifdecImage image;
     AvifdecImageInfo info;
     AvifdecRgbImage rgb;
@@ -1298,6 +1300,52 @@ static int test_avif_rgb_conversion(void) {
             CHECK(rgb_pixels[3U * pixel + 1U] == expected[pixel]);
             CHECK(rgb_pixels[3U * pixel + 2U] == expected[pixel]);
         }
+    }
+    {
+        uint16_t color_y[1] = { 128U };
+        uint16_t color_u[1] = { 64U };
+        uint16_t color_v[1] = { 192U };
+
+        avifdec_memory_fill(&image, 0U, sizeof(image));
+        avifdec_memory_fill(&info, 0U, sizeof(info));
+        avifdec_memory_fill(&rgb, 0U, sizeof(rgb));
+        image.planes[0] = color_y;
+        image.planes[1] = color_u;
+        image.planes[2] = color_v;
+        image.strides[0] = 1U;
+        image.strides[1] = 1U;
+        image.strides[2] = 1U;
+        image.widths[0] = 1U;
+        image.widths[1] = 1U;
+        image.widths[2] = 1U;
+        image.heights[0] = 1U;
+        image.heights[1] = 1U;
+        image.heights[2] = 1U;
+        image.bit_depth = 8U;
+        info.width = 1U;
+        info.height = 1U;
+        info.bit_depth = 8U;
+        info.channel_count = 3U;
+        info.color_range = 1U;
+        info.crop.width = 1U;
+        info.crop.height = 1U;
+        info.presentation_width = 1U;
+        info.presentation_height = 1U;
+        rgb.pixels = unspecified_pixels;
+        rgb.stride = 3U;
+        rgb.width = 1U;
+        rgb.height = 1U;
+        rgb.format = AVIFDEC_RGB8;
+        info.matrix_coefficients = 2U;
+        CHECK(avifdec_image_to_rgb(
+            &image, &info, &rgb, &error) == AVIFDEC_OK);
+        rgb.pixels = bt601_pixels;
+        info.matrix_coefficients = 6U;
+        CHECK(avifdec_image_to_rgb(
+            &image, &info, &rgb, &error) == AVIFDEC_OK);
+        CHECK(avifdec_memory_compare(
+            unspecified_pixels, bt601_pixels,
+            sizeof(unspecified_pixels)) == 0);
     }
     return 0;
 }
