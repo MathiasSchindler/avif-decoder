@@ -23,6 +23,9 @@
 static int test_checked_arithmetic(void) {
     size_t result;
     uint64_t capabilities = avifdec_capabilities();
+    AvifdecExecutor executor;
+    AvifdecImageInfo info;
+    AvifdecError error;
 
     CHECK((capabilities & AVIFDEC_CAP_AV1_ANNEX_B) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_METADATA) != 0U);
@@ -34,16 +37,21 @@ static int test_checked_arithmetic(void) {
     CHECK((capabilities & AVIFDEC_CAP_AVIF_SAMPLE_TRANSFORM) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_RGB_CONVERSION) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_AVIF_SEQUENCE) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_PARALLEL_EXECUTOR) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_TILE_LIST) == 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_LARGE_SCALE_TILE) == 0U);
     CHECK(avifdec_memory_compare(
-        avifdec_version_string(), "1.0.0", 6U) == 0);
+        avifdec_version_string(), "1.1.0", 6U) == 0);
     CHECK(avifdec_size_add(3U, 4U, &result) && result == 7U);
     CHECK(!avifdec_size_add(SIZE_MAX, 1U, &result));
     CHECK(avifdec_size_multiply(7U, 9U, &result) && result == 63U);
     CHECK(!avifdec_size_multiply(SIZE_MAX, 2U, &result));
     CHECK(avifdec_size_align(17U, 16U, &result) && result == 32U);
     CHECK(!avifdec_size_align(17U, 3U, &result));
+    avifdec_memory_fill(&executor, 0U, sizeof(executor));
+    CHECK(avifdec_query_ex(
+        0, 0U, 0, &executor, 0, 0U,
+        &info, &error) == AVIFDEC_INVALID_ARGUMENT);
     return 0;
 }
 

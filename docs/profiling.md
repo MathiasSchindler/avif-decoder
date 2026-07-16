@@ -116,6 +116,42 @@ System `perf` produced reliable flat samples for the normal static PIE. NewOS `p
 
 The NewOS profiler runtime in the tested checkout also reused a shared static environment buffer: reading `NEWOS_PROFILE_MAX_EVENTS` overwrote the path returned for `NEWOS_PROFILE`. NewOS host `strace` did not have a functioning Linux ptrace backend in this checkout, so system `strace` was used instead.
 
+## Top-level grid threading
+
+The 1.1 executor API keeps serial decoding as the default and optionally
+dispatches independent top-level AVIF grid tiles through the newos task-pool
+model. The Linux/x86-64 CLI exposes this with `--workers`; macOS currently uses
+the serial backend.
+
+A 2x2 benchmark was generated from four 2048x2048 crops of
+`images/tribu-large.jpg`, encoded with:
+
+```sh
+avifenc --qcolor 55 --jobs 1 --codec aom --yuv 420 --grid 2x2 \
+    t00.png t01.png t10.png t11.png grid.avif
+```
+
+Three warm runs per width used:
+
+```sh
+/usr/bin/time -f 'elapsed=%e user=%U sys=%S maxrss_kb=%M' \
+    build/x86_64/avifdec --workers WIDTH --raw grid.avif /dev/null
+```
+
+| Workers | Median elapsed | User time | Maximum RSS | Decoder workspace |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.81 s | 1.72 s | 287 MiB | 269,790,871 bytes |
+| 2 | 1.07 s | 1.74 s | 513 MiB | 539,796,237 bytes |
+| 4 | 0.64 s | 1.81 s | 976 MiB | 1,079,591,453 bytes |
+
+Width 4 reduced wall time by about 65% (2.8x speedup) while increasing
+workspace almost exactly fourfold. All widths produced identical raw output,
+entropy checksums, and restoration checksums. Because the memory tradeoff is
+substantial, CLI threading remains explicit rather than automatic.
+
+The resulting static PIE is 459,552 bytes on the measurement build, 9,440
+bytes (2.1%) above the previously recorded 450,112-byte optimized binary.
+
 ## Validation
 
 Run the complete suite without overriding `CFLAGS` on the `make test` command line:

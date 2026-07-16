@@ -1,6 +1,7 @@
 #include "bmff.h"
 #include "platform.h"
 #include "png.h"
+#include "task_pool.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -284,6 +285,46 @@ static int bmff_has_brand(
     return 0;
 }
 
+typedef struct {
+    AvifdecParallelBody body;
+    void *arg;
+} CliParallelCall;
+
+static int cli_parallel_body(
+    size_t begin,
+    size_t end,
+    unsigned int worker_index,
+    void *arg) {
+    CliParallelCall *call = (CliParallelCall *)arg;
+
+    return (int)call->body(
+        begin, end, worker_index, call->arg);
+}
+
+static AvifdecStatus cli_parallel_for(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifdecParallelBody body,
+    void *arg) {
+    CliParallelCall call;
+    int status;
+
+    if (user_data == 0 || body == 0) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    call.body = body;
+    call.arg = arg;
+    status = rt_parallel_for(
+        (RtTaskPool *)user_data, count, min_chunk,
+        cli_parallel_body, &call);
+    if (status < (int)AVIFDEC_OK ||
+        status > (int)AVIFDEC_UNSUPPORTED) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    return (AvifdecStatus)status;
+}
+
 static AvifdecStatus allocate_image_planes(
     const AvifdecImageInfo *info,
     AvifdecImage *image,
@@ -513,7 +554,23 @@ int main(int argc, char **argv) {
     int packed_alpha_mode = AVIFDEC_ALPHA_STRAIGHT;
     const char *input_path;
     const char *output_path = 0;
+    size_t requested_workers = 1U;
+    RtTaskPool task_pool;
+    AvifdecExecutor executor;
+    const AvifdecExecutor *decode_executor = 0;
+    int task_pool_initialized = 0;
 
+    if (argc >= 3 && text_equal(argv[1], "--workers")) {
+        if (!text_to_size(argv[2], &requested_workers) ||
+            requested_workers >
+                AVIFDEC_EXECUTOR_MAX_WORKERS) {
+            (void)write_text(
+                2, "avifdec: invalid worker count\n");
+            return 2;
+        }
+        argc -= 2;
+        argv += 2;
+    }
     if (argc == 3 && text_equal(argv[1], "--boxes")) {
         boxes_only = 1;
         input_path = argv[2];
@@ -566,7 +623,7 @@ int main(int argc, char **argv) {
         output_path = argv[3];
     } else if (argc != 2) {
         (void)write_text(2,
-            "usage: avifdec [--boxes INPUT.avif | --raw INPUT.avif OUTPUT.yuv | --raw-frame INDEX INPUT.avif OUTPUT.yuv | --png INPUT.avif OUTPUT.png | --png-frame INDEX INPUT.avif OUTPUT.png | --rgb INPUT.avif OUTPUT.rgb | --rgba INPUT.avif OUTPUT.rgba | --rgba-premul INPUT.avif OUTPUT.rgba | --rgb16 INPUT.avif OUTPUT.rgb16 | --rgba16 INPUT.avif OUTPUT.rgba16 | --rgba16-premul INPUT.avif OUTPUT.rgba16 | INPUT.avif]\n");
+            "usage: avifdec [--workers N] [--boxes INPUT.avif | --raw INPUT.avif OUTPUT.yuv | --raw-frame INDEX INPUT.avif OUTPUT.yuv | --png INPUT.avif OUTPUT.png | --png-frame INDEX INPUT.avif OUTPUT.png | --rgb INPUT.avif OUTPUT.rgb | --rgba INPUT.avif OUTPUT.rgba | --rgba-premul INPUT.avif OUTPUT.rgba | --rgb16 INPUT.avif OUTPUT.rgb16 | --rgba16 INPUT.avif OUTPUT.rgba16 | --rgba16-premul INPUT.avif OUTPUT.rgba16 | INPUT.avif]\n");
         return 2;
     } else {
         input_path = argv[1];
@@ -671,6 +728,50 @@ int main(int argc, char **argv) {
             (void)platform_free_pages(data, size);
             return 1;
         }
+        if ((raw_output || png_output || packed_format >= 0) &&
+            image_info.is_grid &&
+            (image_info.grid_rows > 1U ||
+             image_info.grid_columns > 1U) &&
+            requested_workers != 1U) {
+            size_t tile_count;
+            size_t worker_count = requested_workers;
+
+            if (!avifdec_size_multiply(
+                    image_info.grid_rows,
+                    image_info.grid_columns,
+                    &tile_count)) {
+                (void)platform_free_pages(data, size);
+                return 1;
+            }
+            if (worker_count == 0U) {
+                worker_count =
+                    rt_task_pool_available_width();
+            }
+            if (worker_count > tile_count) {
+                worker_count = tile_count;
+            }
+            if (worker_count > 1U &&
+                rt_task_pool_init(
+                    &task_pool,
+                    (unsigned int)worker_count) == 0 &&
+                rt_task_pool_width(&task_pool) > 1U) {
+                task_pool_initialized = 1;
+                executor.user_data = &task_pool;
+                executor.worker_count =
+                    rt_task_pool_width(&task_pool);
+                executor.parallel_for = cli_parallel_for;
+                decode_executor = &executor;
+                status = avifdec_query_ex(
+                    data, size, 0, decode_executor,
+                    0, 0U, &image_info, &error);
+                if (status != AVIFDEC_OK) {
+                    print_error(&error);
+                    rt_task_pool_destroy(&task_pool);
+                    (void)platform_free_pages(data, size);
+                    return 1;
+                }
+            }
+        }
         if (png_output) {
             int is_16_bit =
                 image_info.bit_depth > 8U ||
@@ -684,6 +785,9 @@ int main(int argc, char **argv) {
         workspace = platform_allocate_pages(image_info.workspace_required);
         if (workspace == 0) {
             (void)write_text(2, "avifdec: cannot allocate trace workspace\n");
+            if (task_pool_initialized) {
+                rt_task_pool_destroy(&task_pool);
+            }
             (void)platform_free_pages(data, size);
             return 1;
         }
@@ -750,8 +854,9 @@ int main(int argc, char **argv) {
                             2U * chroma_samples;
                         image.alpha_stride = image_info.width;
                     }
-                    status = avifdec_decode(
-                        data, size, 0, workspace, image_info.workspace_required,
+                    status = avifdec_decode_ex(
+                        data, size, 0, decode_executor,
+                        workspace, image_info.workspace_required,
                         &image, &entropy_trace, &error);
                     if (status == AVIFDEC_OK) {
                         if (raw_output) {
@@ -840,6 +945,9 @@ int main(int argc, char **argv) {
                     packed_memory, packed_memory_size);
             }
             (void)platform_free_pages(workspace, image_info.workspace_required);
+            if (task_pool_initialized) {
+                rt_task_pool_destroy(&task_pool);
+            }
             (void)platform_free_pages(data, size);
             return 1;
         }
@@ -973,6 +1081,10 @@ int main(int argc, char **argv) {
         (void)write_unsigned(1, image_info.reduced_tx_set);
         (void)write_text(1, "\nworkspace_required=");
         (void)write_unsigned(1, image_info.workspace_required);
+        (void)write_text(1, "\ndecode_workers=");
+        (void)write_unsigned(
+            1, decode_executor == 0
+                ? 1U : decode_executor->worker_count);
         (void)write_text(1, "\nentropy_tiles=");
         (void)write_unsigned(1, entropy_trace.tile_count);
         (void)write_text(1, "\nentropy_partition_nodes=");
@@ -1055,6 +1167,9 @@ int main(int argc, char **argv) {
             (void)platform_free_pages(packed_memory, packed_memory_size);
         }
         (void)platform_free_pages(workspace, image_info.workspace_required);
+        if (task_pool_initialized) {
+            rt_task_pool_destroy(&task_pool);
+        }
     }
     (void)platform_free_pages(data, size);
     if (print_context.io_failed) return 1;

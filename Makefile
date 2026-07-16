@@ -11,6 +11,7 @@ TARGET := $(BUILD_DIR)/avifdec
 STRICT_UNIT := $(BUILD_DIR)/unit
 HOST_UNIT := build/host/unit
 OBU_TRACE := $(BUILD_DIR)/obu-trace
+THREAD_UNIT := $(BUILD_DIR)/thread-unit
 WASM_BUILD_DIR := build/wasm
 WASM_LOADER := $(WASM_BUILD_DIR)/avif-decoder.js
 WASM_BINARY := $(WASM_BUILD_DIR)/avif-decoder.wasm
@@ -89,7 +90,9 @@ CORE_C_SOURCES := \
 	src/av1_tile_palette.c src/av1_block.c \
 	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
 	src/av1_restoration_filter.c
-C_SOURCES := src/main.c $(CORE_C_SOURCES) $(PLATFORM_DIR)/io.c
+RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
+C_SOURCES := src/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
+	$(PLATFORM_DIR)/io.c
 SOURCES := $(C_SOURCES) $(ARCH_SOURCES)
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
 OBJECTS := $(OBJECTS:.S=.o)
@@ -98,8 +101,12 @@ ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
+THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
+	$(BUILD_DIR)/src/task_pool.o $(BUILD_DIR)/src/base.o \
+	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o \
+	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
-	$(OBU_TRACE_OBJECTS:.o=.d)
+	$(OBU_TRACE_OBJECTS:.o=.d) $(THREAD_UNIT_OBJECTS:.o=.d)
 
 -include $(DEPENDENCIES)
 
@@ -118,6 +125,11 @@ $(STRICT_UNIT): $(STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
 $(OBU_TRACE): $(OBU_TRACE_OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
 	$(CC) $(OBU_TRACE_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+$(THREAD_UNIT): $(THREAD_UNIT_OBJECTS) $(LINK_TOOLS)
+	@mkdir -p $(@D)
+	$(CC) $(THREAD_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
 $(MACHO_DYLIB_REMOVER): tools/macho_dylib_remover.c
@@ -185,12 +197,14 @@ $(GENERATED_CHECK): tools/generate-av1-coeff-tables.pl \
 	cmp $(FILM_GRAIN_TABLE) $(FILM_GRAIN_TABLE_CHECK)
 	@touch $@
 
-test: $(TEST_GENERATED_CHECK) $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE)
+test: $(TEST_GENERATED_CHECK) $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) \
+		$(OBU_TRACE) $(THREAD_UNIT)
 	@if test -z "$(TEST_GENERATED_CHECK)"; then \
 		printf '%s\n' 'Skipping generated-table reproduction checks: docs/av1.html is unavailable.'; \
 	fi
 	$(STRICT_UNIT)
 	$(HOST_UNIT)
+	$(THREAD_UNIT)
 	sh tests/smoke.sh $(TARGET)
 	sh tests/features.sh $(TARGET)
 	sh tests/corpus.sh $(TARGET)

@@ -91,6 +91,17 @@ avifenc --lossless --jobs 1 --codec aom --yuv 444 --grid 2x2 \
     "$work/grid.avif" >/dev/null
 render_rgb "$work/grid.avif" grid
 [ "$(wc -c < "$work/grid-ours.rgb")" -eq 15762 ]
+"$decoder" --workers 1 --rgb "$work/grid.avif" \
+    "$work/grid-worker1.rgb" >"$work/grid-worker1.out"
+"$decoder" --workers 4 --rgb "$work/grid.avif" \
+    "$work/grid-worker4.rgb" >"$work/grid-worker4.out"
+cmp "$work/grid-worker1.rgb" "$work/grid-worker4.rgb"
+grep -q '^decode_workers=1$' "$work/grid-worker1.out"
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+    grep -q '^decode_workers=4$' "$work/grid-worker4.out"
+else
+    grep -q '^decode_workers=1$' "$work/grid-worker4.out"
+fi
 output=$("$decoder" "$work/grid.avif")
 printf '%s\n' "$output" | grep -q '^primary_item_type=grid$'
 printf '%s\n' "$output" | grep -q '^grid_rows=2$'

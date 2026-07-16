@@ -82,9 +82,9 @@ _start:
     lea 8(%rsp), %rsi
     call main
     mov %eax, %edi
-    mov $60, %eax
+    mov $231, %eax
     syscall
 .Lrelocation_failure:
     mov $127, %edi
-    mov $60, %eax
+    mov $231, %eax
     syscall

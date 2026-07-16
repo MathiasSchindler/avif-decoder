@@ -32,9 +32,10 @@ typedef enum {
 #define AVIFDEC_CAP_RGB_CONVERSION ((uint64_t)1U << 13)
 #define AVIFDEC_CAP_AVIF_TONE_MAP_METADATA ((uint64_t)1U << 14)
 #define AVIFDEC_CAP_AVIF_SEQUENCE ((uint64_t)1U << 15)
+#define AVIFDEC_CAP_PARALLEL_EXECUTOR ((uint64_t)1U << 16)
 
 #define AVIFDEC_VERSION_MAJOR 1U
-#define AVIFDEC_VERSION_MINOR 0U
+#define AVIFDEC_VERSION_MINOR 1U
 #define AVIFDEC_VERSION_PATCH 0U
 
 typedef struct {
@@ -68,6 +69,35 @@ typedef struct {
     uint8_t spatial_layer;
     uint8_t spatial_layer_set;
 } AvifdecLimits;
+
+#define AVIFDEC_EXECUTOR_MAX_WORKERS 32U
+
+/*
+ * Optional structured parallel execution.
+ *
+ * parallel_for must invoke body exactly once for every index in [0, count),
+ * wait for all invocations before returning, and pass a worker_index smaller
+ * than worker_count. Calls sharing a worker_index must not overlap. The
+ * decoder never retains the executor or callback arguments after return.
+ */
+typedef AvifdecStatus (*AvifdecParallelBody)(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg);
+
+typedef AvifdecStatus (*AvifdecParallelFor)(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifdecParallelBody body,
+    void *arg);
+
+typedef struct {
+    void *user_data;
+    size_t worker_count;
+    AvifdecParallelFor parallel_for;
+} AvifdecExecutor;
 
 typedef struct {
     const unsigned char *data;
@@ -349,6 +379,15 @@ AvifdecStatus avifdec_query(const void *data,
                             AvifdecImageInfo *info,
                             AvifdecError *error);
 
+AvifdecStatus avifdec_query_ex(const void *data,
+                               size_t size,
+                               const AvifdecLimits *limits,
+                               const AvifdecExecutor *executor,
+                               AvifdecSpan *spans,
+                               size_t span_capacity,
+                               AvifdecImageInfo *info,
+                               AvifdecError *error);
+
 AvifdecStatus avifdec_trace(const void *data,
                             size_t size,
                             const AvifdecLimits *limits,
@@ -365,6 +404,16 @@ AvifdecStatus avifdec_decode(const void *data,
                              AvifdecImage *image,
                              AvifdecEntropyTrace *trace,
                              AvifdecError *error);
+
+AvifdecStatus avifdec_decode_ex(const void *data,
+                                size_t size,
+                                const AvifdecLimits *limits,
+                                const AvifdecExecutor *executor,
+                                void *workspace,
+                                size_t workspace_size,
+                                AvifdecImage *image,
+                                AvifdecEntropyTrace *trace,
+                                AvifdecError *error);
 
 AvifdecStatus avifdec_image_to_rgb(const AvifdecImage *image,
                                    const AvifdecImageInfo *info,

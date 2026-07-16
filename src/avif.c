@@ -80,6 +80,45 @@ typedef struct {
     int failed;
 } AvifContext;
 
+typedef struct {
+    AvifContext *context;
+    unsigned char *tile_memory;
+    size_t tile_memory_size;
+    void *child_workspace;
+    size_t child_workspace_size;
+} AvifGridWorker;
+
+typedef struct {
+    AvifdecStatus status;
+    AvifdecError error;
+    AvifdecEntropyTrace trace;
+    uint8_t completed;
+} AvifGridResult;
+
+_Static_assert(
+    _Alignof(AvifContext) <= AVIF_WORKSPACE_BASE_ALIGNMENT,
+    "AvifContext alignment exceeds workspace sizing slack");
+_Static_assert(
+    _Alignof(AvifGridWorker) <= AVIF_WORKSPACE_BASE_ALIGNMENT,
+    "AvifGridWorker alignment exceeds workspace sizing slack");
+_Static_assert(
+    _Alignof(AvifGridResult) <= AVIF_WORKSPACE_BASE_ALIGNMENT,
+    "AvifGridResult alignment exceeds workspace sizing slack");
+
+static int avif_executor_valid(
+    const AvifdecExecutor *executor) {
+    return executor == 0 ||
+           (executor->parallel_for != 0 &&
+            executor->worker_count != 0U &&
+            executor->worker_count <=
+                AVIFDEC_EXECUTOR_MAX_WORKERS);
+}
+
+static size_t avif_executor_width(
+    const AvifdecExecutor *executor) {
+    return executor == 0 ? 1U : executor->worker_count;
+}
+
 static AvifdecStatus avif_fail(AvifContext *context,
                                AvifdecStatus status,
                                size_t offset,
@@ -1367,6 +1406,12 @@ static AvifdecStatus avif_query_item(AvifContext *context,
                                       uint32_t item_id,
                                       size_t depth,
                                       AvifdecImageInfo *info);
+static AvifdecStatus avif_query_item_with_workers(
+    AvifContext *context,
+    uint32_t item_id,
+    size_t depth,
+    size_t worker_count,
+    AvifdecImageInfo *info);
 
 static AvifdecStatus avif_query_alpha_item(AvifContext *context,
                                             uint32_t master_item_id,
@@ -1518,6 +1563,7 @@ static AvifdecStatus avif_image_storage_size(
 static AvifdecStatus avif_query_grid_item(AvifContext *context,
                                            uint32_t item_id,
                                            size_t depth,
+                                           size_t worker_count,
                                            AvifdecImageInfo *info) {
     AvifLocation location;
     unsigned char payload[12];
@@ -1529,6 +1575,7 @@ static AvifdecStatus avif_query_grid_item(AvifContext *context,
     uint32_t first_tile_id = 0U;
     AvifdecImageInfo first_tile = { 0 };
     size_t tile_storage = 0U;
+    size_t tile_workspace = 0U;
     size_t tile_peak = 0U;
     size_t pixels;
     AvifdecStatus status;
@@ -1676,15 +1723,23 @@ static AvifdecStatus avif_query_grid_item(AvifContext *context,
             }
         }
         status = avif_image_storage_size(&tile, &tile_bytes);
-        if (status != AVIFDEC_OK ||
+        if (status != AVIFDEC_OK) {
+            return status;
+        }
+        if (tile_bytes > tile_storage) {
+            tile_storage = tile_bytes;
+        }
+        if (tile.workspace_required > tile_workspace) {
+            tile_workspace = tile.workspace_required;
+        }
+        if (!avifdec_size_add(
+                tile_bytes, _Alignof(uint16_t) - 1U,
+                &peak) ||
             !avifdec_size_add(
-                tile_bytes, _Alignof(uint16_t) - 1U, &tile_bytes) ||
-            !avifdec_size_add(
-                tile_bytes, tile.workspace_required, &peak)) {
+                peak, tile.workspace_required, &peak)) {
             return avif_fail(context, AVIFDEC_OVERFLOW,
                              context->ipco.offset, reference->type);
         }
-        if (tile_bytes > tile_storage) tile_storage = tile_bytes;
         if (peak > tile_peak) tile_peak = peak;
         ++reference_count;
     }
@@ -1768,6 +1823,62 @@ static AvifdecStatus avif_query_grid_item(AvifContext *context,
                          AVIFDEC_FOURCC('i', 's', 'p', 'e'));
     }
     (void)tile_storage;
+    if (worker_count > 1U && required_tiles > 1U) {
+        AvifdecArena sizing;
+        size_t worker_bytes;
+        size_t tile_id_bytes;
+        size_t result_bytes;
+        size_t worker_index;
+        size_t required;
+
+        if (!avifdec_size_multiply(
+                worker_count, sizeof(AvifGridWorker),
+                &worker_bytes) ||
+            !avifdec_size_multiply(
+                required_tiles, sizeof(uint32_t),
+                &tile_id_bytes) ||
+            !avifdec_size_multiply(
+                required_tiles, sizeof(AvifGridResult),
+                &result_bytes)) {
+            return avif_fail(
+                context, AVIFDEC_OVERFLOW,
+                context->ipco.offset,
+                AVIFDEC_FOURCC('g', 'r', 'i', 'd'));
+        }
+        avifdec_arena_init_sizing(&sizing);
+        (void)avifdec_arena_allocate(
+            &sizing, worker_bytes,
+            _Alignof(AvifGridWorker));
+        (void)avifdec_arena_allocate(
+            &sizing, tile_id_bytes,
+            _Alignof(uint32_t));
+        (void)avifdec_arena_allocate(
+            &sizing, result_bytes,
+            _Alignof(AvifGridResult));
+        for (worker_index = 0U;
+             worker_index < worker_count;
+             ++worker_index) {
+            (void)avifdec_arena_allocate(
+                &sizing, sizeof(AvifContext),
+                _Alignof(AvifContext));
+            (void)avifdec_arena_allocate(
+                &sizing, tile_storage,
+                _Alignof(uint16_t));
+            (void)avifdec_arena_allocate(
+                &sizing, tile_workspace, 1U);
+        }
+        required = avifdec_arena_required(&sizing);
+        if (sizing.status != AVIFDEC_OK ||
+            !avifdec_size_add(
+                required,
+                AVIF_WORKSPACE_BASE_ALIGNMENT - 1U,
+                &info->workspace_required)) {
+            return avif_fail(
+                context, AVIFDEC_OVERFLOW,
+                context->ipco.offset,
+                AVIFDEC_FOURCC('g', 'r', 'i', 'd'));
+        }
+    }
     return AVIFDEC_OK;
 }
 
@@ -2012,10 +2123,12 @@ static AvifdecStatus avif_query_tone_map_item(
     return AVIFDEC_OK;
 }
 
-static AvifdecStatus avif_query_item(AvifContext *context,
-                                      uint32_t item_id,
-                                      size_t depth,
-                                      AvifdecImageInfo *info) {
+static AvifdecStatus avif_query_item_with_workers(
+    AvifContext *context,
+    uint32_t item_id,
+    size_t depth,
+    size_t worker_count,
+    AvifdecImageInfo *info) {
     int item_index;
     uint32_t item_type;
 
@@ -2038,7 +2151,7 @@ static AvifdecStatus avif_query_item(AvifContext *context,
     }
     if (item_type == AVIFDEC_FOURCC('g', 'r', 'i', 'd')) {
         return avif_query_grid_item(
-            context, item_id, depth, info);
+            context, item_id, depth, worker_count, info);
     }
     if (item_type == AVIFDEC_FOURCC('s', 'a', 't', 'o')) {
         return avif_query_sato_item(
@@ -2050,6 +2163,15 @@ static AvifdecStatus avif_query_item(AvifContext *context,
     }
     return avif_fail(context, AVIFDEC_UNSUPPORTED,
                      context->iinf.offset, item_type);
+}
+
+static AvifdecStatus avif_query_item(
+    AvifContext *context,
+    uint32_t item_id,
+    size_t depth,
+    AvifdecImageInfo *info) {
+    return avif_query_item_with_workers(
+        context, item_id, depth, 1U, info);
 }
 
 static AvifdecStatus avif_bind_image_storage(
@@ -2157,10 +2279,324 @@ static void avif_copy_grid_tile(const AvifdecImageInfo *grid_info,
     }
 }
 
+static void avif_finish_grid_image(
+    const AvifdecImageInfo *grid_info,
+    AvifdecImage *image) {
+    image->widths[0] = grid_info->width;
+    image->heights[0] = grid_info->height;
+    image->bit_depth = grid_info->bit_depth;
+    image->monochrome = grid_info->monochrome;
+    image->subsampling_x = grid_info->subsampling_x;
+    image->subsampling_y = grid_info->subsampling_y;
+    if (!grid_info->monochrome) {
+        image->widths[1] =
+            (grid_info->width +
+             ((uint32_t)1U <<
+              grid_info->subsampling_x) - 1U) >>
+            grid_info->subsampling_x;
+        image->widths[2] = image->widths[1];
+        image->heights[1] =
+            (grid_info->height +
+             ((uint32_t)1U <<
+              grid_info->subsampling_y) - 1U) >>
+            grid_info->subsampling_y;
+        image->heights[2] = image->heights[1];
+    }
+}
+
 static AvifdecStatus avif_decode_item(
     AvifContext *context,
     uint32_t item_id,
     size_t depth,
+    const AvifdecExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace);
+
+typedef struct {
+    AvifGridWorker *workers;
+    size_t worker_count;
+    const uint32_t *tile_ids;
+    AvifGridResult *results;
+    size_t depth;
+    const AvifdecImageInfo *grid_info;
+    AvifdecImage *output;
+    int trace_enabled;
+} AvifGridParallelContext;
+
+static AvifdecStatus avif_decode_grid_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    AvifGridParallelContext *parallel =
+        (AvifGridParallelContext *)arg;
+    AvifGridWorker *worker;
+    size_t tile_index;
+
+    if (parallel == 0 ||
+        worker_index >= parallel->worker_count) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    worker = &parallel->workers[worker_index];
+    for (tile_index = begin; tile_index < end; ++tile_index) {
+        AvifGridResult *result =
+            &parallel->results[tile_index];
+        AvifdecImageInfo tile_info;
+        AvifdecImage tile_image;
+        AvifdecStatus status;
+
+        avifdec_memory_fill(result, 0U, sizeof(*result));
+        worker->context->error = &result->error;
+        worker->context->failed = 0;
+        status = avif_query_item(
+            worker->context,
+            parallel->tile_ids[tile_index],
+            parallel->depth + 1U, &tile_info);
+        if (status == AVIFDEC_OK) {
+            status = avif_bind_image_storage(
+                worker->tile_memory,
+                worker->tile_memory_size,
+                &tile_info, &tile_image);
+        }
+        if (status == AVIFDEC_OK) {
+            status = avif_decode_item(
+                worker->context,
+                parallel->tile_ids[tile_index],
+                parallel->depth + 1U, 0,
+                worker->child_workspace,
+                worker->child_workspace_size,
+                &tile_image,
+                parallel->trace_enabled
+                    ? &result->trace : 0);
+        }
+        if (status == AVIFDEC_OK) {
+            avif_copy_grid_tile(
+                parallel->grid_info, &tile_image,
+                parallel->output, tile_index);
+        } else if (result->error.status == AVIFDEC_OK) {
+            result->error.status = status;
+        }
+        result->status = status;
+        result->completed = 1U;
+    }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus avif_grid_propagate_error(
+    AvifContext *context,
+    const AvifGridResult *result,
+    AvifdecStatus status) {
+    if (context->error != 0 &&
+        context->error->status == AVIFDEC_OK) {
+        if (result != 0 &&
+            result->error.status != AVIFDEC_OK) {
+            *context->error = result->error;
+        } else {
+            context->error->status = status;
+            context->error->offset = context->iref.offset;
+            context->error->context =
+                AVIFDEC_FOURCC('g', 'r', 'i', 'd');
+        }
+    }
+    context->failed = 1;
+    return status;
+}
+
+static void avif_grid_trace_add(
+    AvifdecEntropyTrace *trace,
+    const AvifdecEntropyTrace *tile) {
+    trace->frame_count += tile->frame_count;
+    trace->tile_count += tile->tile_count;
+    trace->partition_nodes += tile->partition_nodes;
+    trace->block_count += tile->block_count;
+    trace->transform_count += tile->transform_count;
+    trace->coefficient_count += tile->coefficient_count;
+    trace->checksum =
+        (trace->checksum * 0x100000001b3ULL) ^
+        tile->checksum;
+    trace->restoration_checksum =
+        (trace->restoration_checksum *
+         0x100000001b3ULL) ^
+        tile->restoration_checksum;
+}
+
+static AvifdecStatus avif_decode_grid_parallel(
+    AvifContext *context,
+    uint32_t item_id,
+    size_t depth,
+    const AvifdecExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    const AvifdecImageInfo *grid_info) {
+    AvifdecArena arena;
+    AvifGridParallelContext parallel;
+    AvifGridWorker *workers;
+    AvifGridResult *results;
+    uint32_t *tile_ids;
+    size_t worker_bytes;
+    size_t result_bytes;
+    size_t tile_id_bytes;
+    size_t tile_count;
+    size_t tile_memory_size = 0U;
+    size_t child_workspace_size = 0U;
+    size_t reference_index;
+    size_t tile_index = 0U;
+    size_t worker_index;
+    AvifdecStatus status;
+
+    if (!avifdec_size_multiply(
+            grid_info->grid_rows,
+            grid_info->grid_columns,
+            &tile_count) ||
+        !avifdec_size_multiply(
+            executor->worker_count,
+            sizeof(*workers), &worker_bytes) ||
+        !avifdec_size_multiply(
+            tile_count, sizeof(*results),
+            &result_bytes) ||
+        !avifdec_size_multiply(
+            tile_count, sizeof(*tile_ids),
+            &tile_id_bytes)) {
+        return avif_grid_propagate_error(
+            context, 0, AVIFDEC_OVERFLOW);
+    }
+    avifdec_arena_init(&arena, workspace, workspace_size);
+    workers = (AvifGridWorker *)avifdec_arena_allocate(
+        &arena, worker_bytes, _Alignof(AvifGridWorker));
+    tile_ids = (uint32_t *)avifdec_arena_allocate(
+        &arena, tile_id_bytes, _Alignof(uint32_t));
+    results = (AvifGridResult *)avifdec_arena_allocate(
+        &arena, result_bytes, _Alignof(AvifGridResult));
+    if (arena.status != AVIFDEC_OK ||
+        workers == 0 || tile_ids == 0 || results == 0) {
+        return avif_grid_propagate_error(
+            context, 0, arena.status);
+    }
+    for (reference_index = 0U;
+         reference_index < context->reference_count;
+         ++reference_index) {
+        const AvifReference *reference =
+            &context->references[reference_index];
+
+        if (reference->type !=
+                AVIFDEC_FOURCC('d', 'i', 'm', 'g') ||
+            reference->from_item_id != item_id) {
+            continue;
+        }
+        if (tile_index >= tile_count) {
+            return avif_grid_propagate_error(
+                context, 0, AVIFDEC_INVALID_DATA);
+        }
+        tile_ids[tile_index++] = reference->to_item_id;
+    }
+    if (tile_index != tile_count) {
+        return avif_grid_propagate_error(
+            context, 0, AVIFDEC_INVALID_DATA);
+    }
+    for (tile_index = 0U;
+         tile_index < tile_count;
+         ++tile_index) {
+        AvifdecImageInfo tile_info;
+        size_t storage;
+
+        status = avif_query_item(
+            context, tile_ids[tile_index],
+            depth + 1U, &tile_info);
+        if (status != AVIFDEC_OK) return status;
+        status = avif_image_storage_size(
+            &tile_info, &storage);
+        if (status != AVIFDEC_OK) return status;
+        if (storage > tile_memory_size) {
+            tile_memory_size = storage;
+        }
+        if (tile_info.workspace_required >
+            child_workspace_size) {
+            child_workspace_size =
+                tile_info.workspace_required;
+        }
+    }
+    avifdec_memory_fill(results, 0U, result_bytes);
+    avifdec_memory_fill(workers, 0U, worker_bytes);
+    for (worker_index = 0U;
+         worker_index < executor->worker_count;
+         ++worker_index) {
+        workers[worker_index].context =
+            (AvifContext *)avifdec_arena_allocate(
+                &arena, sizeof(AvifContext),
+                _Alignof(AvifContext));
+        workers[worker_index].tile_memory =
+            (unsigned char *)avifdec_arena_allocate(
+                &arena, tile_memory_size,
+                _Alignof(uint16_t));
+        workers[worker_index].child_workspace =
+            avifdec_arena_allocate(
+                &arena, child_workspace_size, 1U);
+        workers[worker_index].tile_memory_size =
+            tile_memory_size;
+        workers[worker_index].child_workspace_size =
+            child_workspace_size;
+        if (arena.status != AVIFDEC_OK ||
+            workers[worker_index].context == 0 ||
+            workers[worker_index].tile_memory == 0 ||
+            workers[worker_index].child_workspace == 0) {
+            return avif_grid_propagate_error(
+                context, 0, arena.status);
+        }
+        /*
+         * Parsed tables and span storage are inline. The worker only needs
+         * its error pointer redirected before each decode.
+         */
+        avifdec_memory_copy(
+            workers[worker_index].context,
+            context, sizeof(*context));
+    }
+    if (trace != 0) {
+        avifdec_memory_fill(trace, 0U, sizeof(*trace));
+    }
+    parallel.workers = workers;
+    parallel.worker_count = executor->worker_count;
+    parallel.tile_ids = tile_ids;
+    parallel.results = results;
+    parallel.depth = depth;
+    parallel.grid_info = grid_info;
+    parallel.output = image;
+    parallel.trace_enabled = trace != 0;
+    status = executor->parallel_for(
+        executor->user_data, tile_count, 1U,
+        avif_decode_grid_range, &parallel);
+    if (status != AVIFDEC_OK) {
+        return avif_grid_propagate_error(
+            context, 0, status);
+    }
+    for (tile_index = 0U;
+         tile_index < tile_count;
+         ++tile_index) {
+        if (!results[tile_index].completed) {
+            return avif_grid_propagate_error(
+                context, 0, AVIFDEC_INVALID_ARGUMENT);
+        }
+        if (results[tile_index].status != AVIFDEC_OK) {
+            return avif_grid_propagate_error(
+                context, &results[tile_index],
+                results[tile_index].status);
+        }
+        if (trace != 0) {
+            avif_grid_trace_add(
+                trace, &results[tile_index].trace);
+        }
+    }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus avif_decode_item(
+    AvifContext *context,
+    uint32_t item_id,
+    size_t depth,
+    const AvifdecExecutor *executor,
     void *workspace,
     size_t workspace_size,
     AvifdecImage *image,
@@ -2212,11 +2648,24 @@ static AvifdecStatus avif_decode_item(
         size_t reference_index;
         uint32_t first_tile_id = 0U;
         AvifdecStatus status = avif_query_grid_item(
-            context, item_id, depth, &grid_info);
+            context, item_id, depth,
+            avif_executor_width(executor), &grid_info);
 
         if (status != AVIFDEC_OK) return status;
         status = avif_validate_output_image(&grid_info, image);
         if (status != AVIFDEC_OK) return status;
+        if (executor != 0 &&
+            executor->worker_count > 1U &&
+            (grid_info.grid_rows > 1U ||
+             grid_info.grid_columns > 1U)) {
+            status = avif_decode_grid_parallel(
+                context, item_id, depth, executor,
+                workspace, workspace_size, image, trace,
+                &grid_info);
+            if (status != AVIFDEC_OK) return status;
+            avif_finish_grid_image(&grid_info, image);
+            return AVIFDEC_OK;
+        }
         for (reference_index = 0U;
              reference_index < context->reference_count;
              ++reference_index) {
@@ -2269,7 +2718,7 @@ static AvifdecStatus avif_decode_item(
                 tile_memory, tile_bytes, &tile_info, &tile_image);
             if (status != AVIFDEC_OK) return status;
             status = avif_decode_item(
-                context, reference->to_item_id, depth + 1U,
+                context, reference->to_item_id, depth + 1U, 0,
                 child_workspace, arena.size - arena.used,
                 &tile_image, trace == 0 ? 0 : &tile_trace);
             if (status != AVIFDEC_OK) return status;
@@ -2293,24 +2742,7 @@ static AvifdecStatus avif_decode_item(
             }
             ++tile_index;
         }
-        image->widths[0] = grid_info.width;
-        image->heights[0] = grid_info.height;
-        image->bit_depth = grid_info.bit_depth;
-        image->monochrome = grid_info.monochrome;
-        image->subsampling_x = grid_info.subsampling_x;
-        image->subsampling_y = grid_info.subsampling_y;
-        if (!grid_info.monochrome) {
-            image->widths[1] =
-                (grid_info.width +
-                 ((uint32_t)1U << grid_info.subsampling_x) - 1U) >>
-                grid_info.subsampling_x;
-            image->widths[2] = image->widths[1];
-            image->heights[1] =
-                (grid_info.height +
-                 ((uint32_t)1U << grid_info.subsampling_y) - 1U) >>
-                grid_info.subsampling_y;
-            image->heights[2] = image->heights[1];
-        }
+        avif_finish_grid_image(&grid_info, image);
         return AVIFDEC_OK;
     }
     if (item_type == AVIFDEC_FOURCC('s', 'a', 't', 'o')) {
@@ -2397,7 +2829,7 @@ static AvifdecStatus avif_decode_item(
             AvifdecEntropyTrace input_trace;
 
             status = avif_decode_item(
-                context, input_ids[input_index], depth + 1U,
+                context, input_ids[input_index], depth + 1U, 0,
                 child_workspace, arena.size - arena.used,
                 &input_images[input_index],
                 trace == 0 ? 0 : &input_trace);
@@ -2495,7 +2927,7 @@ static AvifdecStatus avif_decode_item(
         if (status != AVIFDEC_OK) return status;
         return avif_decode_item(
             context, tone_map.tone_map_base_item_id,
-            depth + 1U, workspace, workspace_size,
+            depth + 1U, 0, workspace, workspace_size,
             image, trace);
     }
     return avif_fail(context, AVIFDEC_UNSUPPORTED,
@@ -2547,7 +2979,7 @@ static AvifdecStatus avif_trace_item(
         AvifdecImageInfo grid_info;
         size_t reference_index;
         AvifdecStatus status = avif_query_grid_item(
-            context, item_id, depth, &grid_info);
+            context, item_id, depth, 1U, &grid_info);
 
         if (status != AVIFDEC_OK) return status;
         avifdec_memory_fill(trace, 0U, sizeof(*trace));
@@ -2642,13 +3074,15 @@ static AvifdecStatus avif_trace_item(
                      context->iinf.offset, item_type);
 }
 
-AvifdecStatus avifdec_query(const void *data,
-                            size_t size,
-                            const AvifdecLimits *limits,
-                            AvifdecSpan *spans,
-                            size_t span_capacity,
-                            AvifdecImageInfo *info,
-                            AvifdecError *error) {
+AvifdecStatus avifdec_query_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifdecSpan *spans,
+    size_t span_capacity,
+    AvifdecImageInfo *info,
+    AvifdecError *error) {
     AvifContext context;
     AvifdecSpan resolved_spans[AVIF_MAX_RESOLVED_SPANS];
     AvifdecStatus status;
@@ -2657,7 +3091,9 @@ AvifdecStatus avifdec_query(const void *data,
     int primary_item_index;
     uint32_t primary_item_type;
 
-    if (info == 0 || (data == 0 && size != 0U) || (spans == 0 && span_capacity != 0U)) {
+    if (info == 0 || !avif_executor_valid(executor) ||
+        (data == 0 && size != 0U) ||
+        (spans == 0 && span_capacity != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
     avifdec_memory_fill(info, 0U, sizeof(*info));
@@ -2676,7 +3112,9 @@ AvifdecStatus avifdec_query(const void *data,
             &context, primary_id, resolved_spans,
             AVIF_MAX_RESOLVED_SPANS, info);
     } else {
-        status = avif_query_item(&context, primary_id, 0U, info);
+        status = avif_query_item_with_workers(
+            &context, primary_id, 0U,
+            avif_executor_width(executor), info);
         if (status == AVIFDEC_OK && spans != 0) {
             AvifLocation location;
             AvifdecImageInfo payload_info;
@@ -2716,6 +3154,19 @@ AvifdecStatus avifdec_query(const void *data,
     return AVIFDEC_OK;
 }
 
+AvifdecStatus avifdec_query(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    AvifdecSpan *spans,
+    size_t span_capacity,
+    AvifdecImageInfo *info,
+    AvifdecError *error) {
+    return avifdec_query_ex(
+        data, size, limits, 0, spans,
+        span_capacity, info, error);
+}
+
 AvifdecStatus avifdec_trace(const void *data,
                             size_t size,
                             const AvifdecLimits *limits,
@@ -2742,31 +3193,37 @@ AvifdecStatus avifdec_trace(const void *data,
         &context, primary_id, 0U, workspace, workspace_size, trace);
 }
 
-AvifdecStatus avifdec_decode(const void *data,
-                             size_t size,
-                             const AvifdecLimits *limits,
-                             void *workspace,
-                             size_t workspace_size,
-                             AvifdecImage *image,
-                             AvifdecEntropyTrace *trace,
-                             AvifdecError *error) {
+AvifdecStatus avifdec_decode_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecError *error) {
     AvifdecImageInfo info;
     AvifContext context;
     uint32_t primary_id;
     AvifdecStatus status;
 
-    if (image == 0 || (data == 0 && size != 0U) ||
+    if (image == 0 || !avif_executor_valid(executor) ||
+        (data == 0 && size != 0U) ||
         (workspace == 0 && workspace_size != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
-    status = avifdec_query(data, size, limits, 0, 0U, &info, error);
+    status = avifdec_query_ex(
+        data, size, limits, executor,
+        0, 0U, &info, error);
     if (status != AVIFDEC_OK) return status;
     if (workspace_size < info.workspace_required) return AVIFDEC_OUT_OF_MEMORY;
     status = avif_open_context(
         &context, data, size, limits, &primary_id, error);
     if (status != AVIFDEC_OK) return status;
     status = avif_decode_item(
-        &context, primary_id, 0U, workspace, workspace_size,
+        &context, primary_id, 0U, executor,
+        workspace, workspace_size,
         image, trace);
     if (status != AVIFDEC_OK || !info.has_alpha) return status;
     {
@@ -2788,7 +3245,7 @@ AvifdecStatus avifdec_decode(const void *data,
         alpha_image.planes[0] = image->alpha_plane;
         alpha_image.strides[0] = image->alpha_stride;
         status = avif_decode_item(
-            &context, info.alpha_item_id, 0U,
+            &context, info.alpha_item_id, 0U, 0,
             workspace, workspace_size, &alpha_image, 0);
         if (status != AVIFDEC_OK) return status;
         image->alpha_width = alpha_image.widths[0];
@@ -2798,4 +3255,18 @@ AvifdecStatus avifdec_decode(const void *data,
         image->alpha_premultiplied = info.alpha_premultiplied;
     }
     return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_decode(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecError *error) {
+    return avifdec_decode_ex(
+        data, size, limits, 0, workspace,
+        workspace_size, image, trace, error);
 }

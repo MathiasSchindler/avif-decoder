@@ -51,6 +51,17 @@ input, `make test` reports the skipped check and runs the rest of the suite.
 `make`, `make test`, `make wasm`, and `make clean` are the complete public
 Makefile interface.
 
+The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
+tiles through the imported newos clone/futex task-pool substrate:
+
+```sh
+build/x86_64/avifdec --workers 4 --png grid.avif grid.png
+```
+
+The default is one worker. `--workers 0` selects the available CPU count,
+capped by the grid tile count and 32 workers. macOS and non-grid inputs
+currently use the serial path.
+
 ### Browser experiment
 
 An experimental WebAssembly build exposes the same decoder core through a
@@ -223,7 +234,7 @@ are reported through capability flags and `AVIFDEC_UNSUPPORTED`.
 
 ## Public API
 
-The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.0.0 is
+The API is declared in [`src/avifdec.h`](src/avifdec.h). Version 1.1.0 is
 reported by:
 
 ```c
@@ -245,6 +256,17 @@ The usual workflow is:
 
 `avifdec_trace()` performs full decoding without caller output planes and
 returns deterministic syntax and reconstruction checksums.
+
+`avifdec_query_ex()` and `avifdec_decode_ex()` accept an optional
+`AvifdecExecutor`. The executor is a structured `parallel_for` callback owned
+by the caller; the decoder still performs no allocation and retains no thread
+state. The current parallel region covers independent tiles of a top-level
+primary grid. Nested derived images, auxiliary alpha, sequences, RGB
+conversion, filters, and AV1 bitstream tiles remain serial.
+
+Parallel query results include one copied parser context, tile buffer, and
+child decoder workspace per executor worker. Callers must use the workspace
+requirement returned for the same executor width used during decoding.
 
 ### Image sequences
 
@@ -311,6 +333,8 @@ presentation, RGB, film-grain, and sequence surfaces.
 - timed image-sequence tests covering dependent-frame seeking, varied
   durations, finite/infinite repetition, compact sample tables, straight and
   premultiplied alpha, repeated decoding, and malformed tables.
+- native clone/futex task-pool tests and byte-exact width-1/width-4 grid
+  comparisons on Linux/x86-64.
 
 The trusted test programs are development-time or test-time tools only. They
 are never linked into `avifdec`.
@@ -328,6 +352,7 @@ A hosted coverage-guided harness is available at
 - Sequence edit lists are restricted to the normal single-entry form.
 - Sequence track matrices must be identity.
 - PNG encoding is intentionally uncompressed beyond stored DEFLATE framing.
+- Internal parallel decoding is currently limited to top-level AVIF grids.
 
 ## License and authorship
 

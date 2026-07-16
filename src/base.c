@@ -29,11 +29,12 @@ uint64_t avifdec_capabilities(void) {
            AVIFDEC_CAP_AVIF_SAMPLE_TRANSFORM |
            AVIFDEC_CAP_RGB_CONVERSION |
            AVIFDEC_CAP_AVIF_TONE_MAP_METADATA |
-           AVIFDEC_CAP_AVIF_SEQUENCE;
+           AVIFDEC_CAP_AVIF_SEQUENCE |
+           AVIFDEC_CAP_PARALLEL_EXECUTOR;
 }
 
 const char *avifdec_version_string(void) {
-    return "1.0.0";
+    return "1.1.0";
 }
 
 int avifdec_size_add(size_t left, size_t right, size_t *result) {
