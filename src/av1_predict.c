@@ -101,6 +101,8 @@ AvifdecStatus av1_predict_prepare_references(const uint16_t *plane,
                                               size_t plane_stride,
                                               uint32_t plane_width,
                                               uint32_t plane_height,
+                                              uint32_t reference_width,
+                                              uint32_t reference_height,
                                               uint32_t x,
                                               uint32_t y,
                                               uint32_t width,
@@ -118,8 +120,11 @@ AvifdecStatus av1_predict_prepare_references(const uint16_t *plane,
     uint16_t middle;
 
     if (plane == 0 || prepared == 0 || plane_stride < plane_width ||
-        plane_width == 0U || plane_height == 0U || x >= plane_width ||
-        y >= plane_height || width > plane_width - x || height > plane_height - y ||
+        plane_width == 0U || plane_height == 0U ||
+        reference_width == 0U || reference_width > plane_width ||
+        reference_height == 0U || reference_height > plane_height ||
+        x >= reference_width || y >= reference_height ||
+        width > plane_width - x || height > plane_height - y ||
         av1_predict_size_index(width) < 0 || av1_predict_size_index(height) < 0 ||
         (bit_depth != 8U && bit_depth != 10U && bit_depth != 12U) ||
         have_above > 1U || have_left > 1U || have_above_right > 1U ||
@@ -139,7 +144,7 @@ AvifdecStatus av1_predict_prepare_references(const uint16_t *plane,
             uint32_t limit = x + (have_above_right ? 2U * width : width) - 1U;
             uint32_t sample_x;
 
-            if (limit >= plane_width) limit = plane_width - 1U;
+            if (limit >= reference_width) limit = reference_width - 1U;
             sample_x = x + index;
             if (sample_x > limit) sample_x = limit;
             above[index] = plane[(size_t)(y - 1U) * plane_stride + sample_x];
@@ -151,7 +156,7 @@ AvifdecStatus av1_predict_prepare_references(const uint16_t *plane,
             uint32_t limit = y + (have_below_left ? 2U * height : height) - 1U;
             uint32_t sample_y;
 
-            if (limit >= plane_height) limit = plane_height - 1U;
+            if (limit >= reference_height) limit = reference_height - 1U;
             sample_y = y + index;
             if (sample_y > limit) sample_y = limit;
             left[index] = plane[(size_t)sample_y * plane_stride + x - 1U];
@@ -691,6 +696,10 @@ static uint16_t av1_predict_clip(int32_t value, uint8_t bit_depth) {
 
 static uint32_t av1_predict_cfl_luma(const uint16_t *luma,
                                      size_t stride,
+                                     uint32_t luma_width,
+                                     uint32_t luma_height,
+                                     uint32_t luma_x,
+                                     uint32_t luma_y,
                                      uint32_t row,
                                      uint32_t column,
                                      uint8_t subsampling_x,
@@ -698,8 +707,13 @@ static uint32_t av1_predict_cfl_luma(const uint16_t *luma,
     uint32_t sum = 0U;
     uint32_t delta_y;
     uint32_t delta_x;
-    uint32_t luma_row = row << subsampling_y;
-    uint32_t luma_column = column << subsampling_x;
+    uint32_t luma_row = luma_y + (row << subsampling_y);
+    uint32_t luma_column = luma_x + (column << subsampling_x);
+    uint32_t maximum_row = luma_height - (1U << subsampling_y);
+    uint32_t maximum_column = luma_width - (1U << subsampling_x);
+
+    if (luma_row > maximum_row) luma_row = maximum_row;
+    if (luma_column > maximum_column) luma_column = maximum_column;
 
     for (delta_y = 0U; delta_y <= subsampling_y; ++delta_y) {
         for (delta_x = 0U; delta_x <= subsampling_x; ++delta_x) {
@@ -714,6 +728,10 @@ AvifdecStatus av1_predict_cfl(uint16_t *destination,
                               size_t destination_stride,
                               const uint16_t *luma,
                               size_t luma_stride,
+                              uint32_t luma_width,
+                              uint32_t luma_height,
+                              uint32_t luma_x,
+                              uint32_t luma_y,
                               uint32_t width,
                               uint32_t height,
                               uint8_t subsampling_x,
@@ -730,15 +748,18 @@ AvifdecStatus av1_predict_cfl(uint16_t *destination,
 
     if (destination == 0 || luma == 0 || width_index < 0 || height_index < 0 ||
         destination_stride < width || subsampling_x > 1U || subsampling_y > 1U ||
-        luma_stride < (size_t)(width << subsampling_x) ||
+        luma_width < (1U << subsampling_x) ||
+        luma_height < (1U << subsampling_y) || luma_stride < luma_width ||
+        luma_x >= luma_width || luma_y >= luma_height ||
         alpha < -16 || alpha > 16 ||
         (bit_depth != 8U && bit_depth != 10U && bit_depth != 12U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
     for (row = 0U; row < height; ++row) {
         for (column = 0U; column < width; ++column) {
-            luma_sum += av1_predict_cfl_luma(luma, luma_stride, row, column,
-                                             subsampling_x, subsampling_y);
+            luma_sum += av1_predict_cfl_luma(
+                luma, luma_stride, luma_width, luma_height, luma_x, luma_y,
+                row, column, subsampling_x, subsampling_y);
         }
     }
     sample_count = width * height;
@@ -746,7 +767,8 @@ AvifdecStatus av1_predict_cfl(uint16_t *destination,
     for (row = 0U; row < height; ++row) {
         for (column = 0U; column < width; ++column) {
             uint32_t luma_value = av1_predict_cfl_luma(
-                luma, luma_stride, row, column, subsampling_x, subsampling_y);
+                luma, luma_stride, luma_width, luma_height, luma_x, luma_y,
+                row, column, subsampling_x, subsampling_y);
             int32_t scaled = av1_predict_round_signed(
                 (int32_t)alpha * ((int32_t)luma_value - (int32_t)luma_average), 6U);
             size_t offset = (size_t)row * destination_stride + column;

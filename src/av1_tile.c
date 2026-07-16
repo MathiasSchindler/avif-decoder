@@ -3101,29 +3101,25 @@ static uint8_t av1_tile_intra_filter_type(const Av1TileResidualState *state,
                                           const Av1BlockTraceFields *block,
                                           unsigned int plane,
                                           const Av1BlockAvailability *availability) {
+    unsigned int sub_x = plane == 0U ? 0U : state->subsampling_x;
+    unsigned int sub_y = plane == 0U ? 0U : state->subsampling_y;
+    int64_t base_row = (int64_t)(block->row & ~sub_y);
+    int64_t base_column = (int64_t)(block->column & ~sub_x);
     int above_smooth = 0;
     int left_smooth = 0;
 
     if (plane == 0U ? availability->above : availability->above_chroma) {
-        int64_t row = (int64_t)block->row - 1;
-        int64_t column = (int64_t)block->column;
+        int64_t row = base_row - 1;
+        int64_t column = base_column + sub_x;
         const Av1BlockCell *cell;
-        if (plane != 0U) {
-            if (state->subsampling_x && !(column & 1)) ++column;
-            if (state->subsampling_y && (row & 1)) --row;
-        }
         cell = av1_tile_cell_at(state->block_state, row, column);
         if (cell != 0) above_smooth = av1_tile_mode_is_smooth(
             plane == 0U ? cell->y_mode : cell->uv_mode);
     }
     if (plane == 0U ? availability->left : availability->left_chroma) {
-        int64_t row = (int64_t)block->row;
-        int64_t column = (int64_t)block->column - 1;
+        int64_t row = base_row + sub_y;
+        int64_t column = base_column - 1;
         const Av1BlockCell *cell;
-        if (plane != 0U) {
-            if (state->subsampling_x && (column & 1)) --column;
-            if (state->subsampling_y && !(row & 1)) ++row;
-        }
         cell = av1_tile_cell_at(state->block_state, row, column);
         if (cell != 0) left_smooth = av1_tile_mode_is_smooth(
             plane == 0U ? cell->y_mode : cell->uv_mode);
@@ -3152,6 +3148,8 @@ static AvifdecStatus av1_tile_predict_chunk(
     uint32_t y = ((block->row >> sub_y) + plane_offset_y4) << 2;
     uint32_t width = plane_width4 << 2;
     uint32_t height = plane_height4 << 2;
+    uint32_t block_base_column = block->column;
+    uint32_t block_base_row = block->row;
     uint8_t mode = plane == 0U ? block->y_mode : block->uv_mode;
     int8_t angle_delta = plane == 0U ? block->angle_delta_y
                                      : block->angle_delta_uv;
@@ -3163,6 +3161,10 @@ static AvifdecStatus av1_tile_predict_chunk(
     uint16_t *destination;
     AvifdecStatus status;
 
+    if (plane != 0U) {
+        block_base_column &= ~sub_x;
+        block_base_row &= ~sub_y;
+    }
     if (width < 4U) width += 2U;
     if (height < 4U) height += 2U;
     if (plane_data == 0 || x > state->frame_planes.width[plane] ||
@@ -3180,9 +3182,9 @@ static AvifdecStatus av1_tile_predict_chunk(
     have_left = plane_offset_x4 != 0U ||
         (plane == 0U ? availability.left : availability.left_chroma);
     if (have_above) {
-        int64_t reference_row = (int64_t)block->row +
+        int64_t reference_row = (int64_t)block_base_row +
                                 (int64_t)(plane_offset_y4 << sub_y) - 1;
-        int64_t reference_column = (int64_t)block->column +
+        int64_t reference_column = (int64_t)block_base_column +
                                    (int64_t)((plane_offset_x4 +
                                        plane_width4) << sub_x);
         if (plane_offset_y4 != 0U) {
@@ -3197,10 +3199,10 @@ static AvifdecStatus av1_tile_predict_chunk(
         }
     }
     if (have_left) {
-        int64_t reference_row = (int64_t)block->row +
+        int64_t reference_row = (int64_t)block_base_row +
                                 (int64_t)((plane_offset_y4 +
                                     plane_height4) << sub_y);
-        int64_t reference_column = (int64_t)block->column +
+        int64_t reference_column = (int64_t)block_base_column +
                                    (int64_t)(plane_offset_x4 << sub_x) - 1;
         have_below_left = plane_offset_x4 == 0U &&
             av1_tile_cell_at(state->block_state, reference_row,
@@ -3208,7 +3210,10 @@ static AvifdecStatus av1_tile_predict_chunk(
     }
     status = av1_predict_prepare_references(
         plane_data, stride, state->frame_planes.width[plane],
-        state->frame_planes.height[plane], x, y, width, height,
+        state->frame_planes.height[plane],
+        (uint32_t)(((state->mi_columns + sub_x) >> sub_x) << 2),
+        (uint32_t)(((state->mi_rows + sub_y) >> sub_y) << 2),
+        x, y, width, height,
         state->dequant_params.bit_depth, have_above, have_left,
         have_above_right, have_below_left, &prepared);
     if (status != AVIFDEC_OK) return status;
@@ -3250,11 +3255,11 @@ static AvifdecStatus av1_tile_predict_chunk(
         if (status != AVIFDEC_OK || mode != 13U) return status;
         return av1_predict_cfl(
             destination, stride,
-            state->frame_planes.data[0] +
-                (size_t)(y << state->subsampling_y) *
-                    state->frame_planes.stride[0] +
-                (x << state->subsampling_x),
-            state->frame_planes.stride[0], width, height,
+            state->frame_planes.data[0], state->frame_planes.stride[0],
+            (uint32_t)(state->mi_columns << 2),
+            (uint32_t)(state->mi_rows << 2),
+            x << state->subsampling_x, y << state->subsampling_y,
+            width, height,
             state->subsampling_x, state->subsampling_y,
             plane == 1U ? block->cfl_alpha_u : block->cfl_alpha_v,
             state->dequant_params.bit_depth);
@@ -4376,6 +4381,9 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                         if (predict_height4 > plane_height4 - y) {
                             predict_height4 = plane_height4 - y;
                         }
+                        if (x4 >= max_x4 || y4 >= max_y4) {
+                            continue;
+                        }
                         if (!block->is_inter) {
                             status = av1_tile_predict_chunk(
                                 state, block, plane,
@@ -4383,9 +4391,6 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                                 ((chunk_y << 4) >> sub_y) + y,
                                 predict_width4, predict_height4);
                             if (status != AVIFDEC_OK) return status;
-                        }
-                        if (x4 >= max_x4 || y4 >= max_y4) {
-                            continue;
                         }
                         status = av1_tile_store_loop_filter_tx_size(
                             state, plane, x4, y4, tx_size);

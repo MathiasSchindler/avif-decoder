@@ -482,25 +482,39 @@ static int test_av1_directional_predictors(void) {
 static int test_av1_cfl_predictor(void) {
     uint16_t luma[64];
     uint16_t destination[16];
+    uint16_t edge_prediction[16];
     uint32_t index;
 
     for (index = 0U; index < 64U; ++index) luma[index] = (uint16_t)index;
     for (index = 0U; index < 16U; ++index) destination[index] = 100U;
-    CHECK(av1_predict_cfl(destination, 4U, luma, 4U, 4U, 4U,
+    CHECK(av1_predict_cfl(destination, 4U, luma, 4U, 4U, 4U, 0U, 0U, 4U, 4U,
               0U, 0U, 8, 8U) == AVIFDEC_OK);
     CHECK(destination[0] == 92U && destination[7] == 99U &&
           destination[8] == 101U && destination[15] == 108U);
 
     for (index = 0U; index < 16U; ++index) destination[index] = 100U;
-    CHECK(av1_predict_cfl(destination, 4U, luma, 8U, 4U, 4U,
+    CHECK(av1_predict_cfl(destination, 4U, luma, 8U, 8U, 8U, 0U, 0U, 4U, 4U,
               1U, 1U, -8, 10U) == AVIFDEC_OK);
     CHECK(destination[0] == 127U && destination[15] == 73U);
     for (index = 0U; index < 16U; ++index) destination[index] = 2U;
-    CHECK(av1_predict_cfl(destination, 4U, luma, 4U, 4U, 4U,
+    CHECK(av1_predict_cfl(destination, 4U, luma, 4U, 4U, 4U, 0U, 0U, 4U, 4U,
               0U, 0U, 16, 8U) == AVIFDEC_OK);
     CHECK(destination[0] == 0U && destination[15] == 17U);
-    CHECK(av1_predict_cfl(destination, 4U, luma, 3U, 4U, 4U,
+    CHECK(av1_predict_cfl(destination, 4U, luma, 3U, 4U, 4U, 0U, 0U, 4U, 4U,
               0U, 0U, 1, 8U) == AVIFDEC_INVALID_ARGUMENT);
+    for (index = 0U; index < 16U; ++index) destination[index] = 100U;
+    CHECK(av1_predict_cfl(destination, 4U, luma, 8U, 6U, 8U, 4U, 0U, 4U, 4U,
+              1U, 1U, 8, 8U) == AVIFDEC_OK);
+    avifdec_memory_copy(edge_prediction, destination, sizeof(destination));
+    for (index = 0U; index < 8U; ++index) {
+        luma[index * 8U + 6U] = 255U;
+        luma[index * 8U + 7U] = 255U;
+    }
+    for (index = 0U; index < 16U; ++index) destination[index] = 100U;
+    CHECK(av1_predict_cfl(destination, 4U, luma, 8U, 6U, 8U, 4U, 0U, 4U, 4U,
+              1U, 1U, 8, 8U) == AVIFDEC_OK);
+    CHECK(avifdec_memory_compare(
+        destination, edge_prediction, sizeof(destination)) == 0);
     return 0;
 }
 
@@ -524,7 +538,7 @@ static int test_av1_cfl_predictor(void) {
         uint8_t mode;
 
         for (index = 0U; index < 16U * 16U; ++index) plane[index] = (uint16_t)index;
-        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U,
+        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U, 16U, 16U,
             0U, 0U, 4U, 4U, 8U, 0U, 0U, 0U, 0U,
             &prepared) == AVIFDEC_OK);
         CHECK(prepared.references.top_left == 128U &&
@@ -532,7 +546,7 @@ static int test_av1_cfl_predictor(void) {
             prepared.references.above[7] == 127U &&
             prepared.references.left[0] == 129U &&
             prepared.references.left[7] == 129U);
-        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U,
+        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U, 16U, 16U,
             4U, 4U, 4U, 4U, 8U, 1U, 1U, 0U, 0U,
             &prepared) == AVIFDEC_OK);
         CHECK(prepared.references.top_left == 51U &&
@@ -542,7 +556,18 @@ static int test_av1_cfl_predictor(void) {
             prepared.references.left[0] == 67U &&
             prepared.references.left[3] == 115U &&
             prepared.references.left[7] == 115U);
-        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U,
+        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U, 8U, 8U,
+            4U, 4U, 4U, 4U, 8U, 1U, 1U, 1U, 1U,
+            &prepared) == AVIFDEC_OK);
+        CHECK(prepared.references.above[0] == 52U &&
+            prepared.references.above[3] == 55U &&
+            prepared.references.above[4] == 55U &&
+            prepared.references.above[7] == 55U &&
+            prepared.references.left[0] == 67U &&
+            prepared.references.left[3] == 115U &&
+            prepared.references.left[4] == 115U &&
+            prepared.references.left[7] == 115U);
+        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U, 16U, 16U,
             0U, 0U, 4U, 4U, 8U, 1U, 0U, 0U, 0U,
             &prepared) == AVIFDEC_INVALID_ARGUMENT);
         CHECK(av1_predict_edge_filter_strength(16U, 8U, 0U, 8) == 1U &&
@@ -554,7 +579,7 @@ static int test_av1_cfl_predictor(void) {
             av1_predict_edge_upsample_selected(4U, 4U, 0U, 40) == 0);
 
         for (index = 0U; index < 16U * 16U; ++index) plane[index] = 512U;
-        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U,
+        CHECK(av1_predict_prepare_references(plane, 16U, 16U, 16U, 16U, 16U,
             4U, 4U, 4U, 4U, 10U, 1U, 1U, 1U, 1U,
             &prepared) == AVIFDEC_OK);
         CHECK(av1_predict_directional_edges(destination, 8U, 4U, 4U, 10U,
@@ -702,8 +727,9 @@ static int test_av1_predictor_matrix(void) {
                         destination[(size_t)row * 8U + column] = constant;
                     }
                 }
-                CHECK(av1_predict_cfl(destination, 8U, plane, 128U,
-                      8U, 8U, subsampling_x, subsampling_y, 16,
+                    CHECK(av1_predict_cfl(destination, 8U, plane, 128U,
+                        128U, 128U, 0U, 0U, 8U, 8U,
+                        subsampling_x, subsampling_y, 16,
                       bit_depth) == AVIFDEC_OK);
                 CHECK(destination[0] == constant && destination[63] == constant);
             }

@@ -232,6 +232,8 @@ typedef struct {
     size_t frame_plane_samples[3];
     size_t restoration_unit_capacity;
     AvifdecImage *image;
+    uint32_t output_width;
+    uint32_t output_height;
     uint8_t output_spatial_layer;
     uint8_t output_spatial_layer_set;
     uint8_t output_frame_seen;
@@ -708,12 +710,16 @@ static AvifdecStatus av1_copy_image(
     AvifdecImage *image,
     const Av1FramePlanes *source,
     const Av1Sequence *sequence,
-    uint32_t width,
-    uint32_t height) {
+    uint32_t source_width,
+    uint32_t source_height,
+    uint32_t output_width,
+    uint32_t output_height) {
     unsigned int plane_count = sequence->monochrome ? 1U : 3U;
     unsigned int plane;
 
-    if (image == 0 || source == 0 || sequence == 0) {
+    if (image == 0 || source == 0 || sequence == 0 ||
+        output_width == 0U || output_height == 0U ||
+        output_width > source_width || output_height > source_height) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
     image->bit_depth = sequence->bit_depth;
@@ -723,27 +729,100 @@ static AvifdecStatus av1_copy_image(
     for (plane = 0U; plane < plane_count; ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
         unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
-        uint32_t plane_width =
-            (width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-        uint32_t plane_height =
-            (height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+        uint32_t source_plane_width =
+            (source_width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+        uint32_t source_plane_height =
+            (source_height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+        uint32_t output_plane_width =
+            (output_width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+        uint32_t output_plane_height =
+            (output_height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
         uint32_t row;
 
         if (image->planes[plane] == 0 ||
-            image->strides[plane] < plane_width ||
+            image->strides[plane] < output_plane_width ||
             source->data[plane] == 0 ||
-            source->stride[plane] < plane_width ||
-            source->height[plane] < plane_height) {
+            source->stride[plane] < source_plane_width ||
+            source->height[plane] < source_plane_height) {
             return AVIFDEC_INVALID_ARGUMENT;
         }
-        image->widths[plane] = plane_width;
-        image->heights[plane] = plane_height;
-        for (row = 0U; row < plane_height; ++row) {
-            avifdec_memory_copy(
-                image->planes[plane] +
-                    (size_t)row * image->strides[plane],
-                source->data[plane] + (size_t)row * source->stride[plane],
-                plane_width * sizeof(uint16_t));
+        image->widths[plane] = output_plane_width;
+        image->heights[plane] = output_plane_height;
+        if (source_plane_width == output_plane_width &&
+            source_plane_height == output_plane_height) {
+            for (row = 0U; row < output_plane_height; ++row) {
+                avifdec_memory_copy(
+                    image->planes[plane] +
+                        (size_t)row * image->strides[plane],
+                    source->data[plane] +
+                        (size_t)row * source->stride[plane],
+                    output_plane_width * sizeof(uint16_t));
+            }
+        } else {
+            uint64_t divisor =
+                (uint64_t)source_plane_width * source_plane_height;
+
+            for (row = 0U; row < output_plane_height; ++row) {
+                uint64_t output_y0 = (uint64_t)row * source_plane_height;
+                uint64_t output_y1 =
+                    (uint64_t)(row + 1U) * source_plane_height;
+                uint32_t source_y0 =
+                    (uint32_t)(output_y0 / output_plane_height);
+                uint32_t source_y1 =
+                    (uint32_t)((output_y1 + output_plane_height - 1U) /
+                               output_plane_height);
+                uint32_t column;
+
+                for (column = 0U; column < output_plane_width; ++column) {
+                    uint64_t output_x0 =
+                        (uint64_t)column * source_plane_width;
+                    uint64_t output_x1 =
+                        (uint64_t)(column + 1U) * source_plane_width;
+                    uint32_t source_x0 =
+                        (uint32_t)(output_x0 / output_plane_width);
+                    uint32_t source_x1 =
+                        (uint32_t)((output_x1 + output_plane_width - 1U) /
+                                   output_plane_width);
+                    uint64_t sum = 0U;
+                    uint32_t source_y;
+
+                    for (source_y = source_y0;
+                         source_y < source_y1;
+                         ++source_y) {
+                        uint64_t source_cell_y0 =
+                            (uint64_t)source_y * output_plane_height;
+                        uint64_t source_cell_y1 =
+                            source_cell_y0 + output_plane_height;
+                        uint64_t overlap_y0 = output_y0 > source_cell_y0
+                            ? output_y0 : source_cell_y0;
+                        uint64_t overlap_y1 = output_y1 < source_cell_y1
+                            ? output_y1 : source_cell_y1;
+                        uint64_t weight_y = overlap_y1 - overlap_y0;
+                        uint32_t source_x;
+
+                        for (source_x = source_x0;
+                             source_x < source_x1;
+                             ++source_x) {
+                            uint64_t source_cell_x0 =
+                                (uint64_t)source_x * output_plane_width;
+                            uint64_t source_cell_x1 =
+                                source_cell_x0 + output_plane_width;
+                            uint64_t overlap_x0 = output_x0 > source_cell_x0
+                                ? output_x0 : source_cell_x0;
+                            uint64_t overlap_x1 = output_x1 < source_cell_x1
+                                ? output_x1 : source_cell_x1;
+                            uint64_t weight_x = overlap_x1 - overlap_x0;
+
+                            sum += source->data[plane][
+                                (size_t)source_y * source->stride[plane] +
+                                source_x] * weight_x * weight_y;
+                        }
+                    }
+                    image->planes[plane][
+                        (size_t)row * image->strides[plane] + column] =
+                        (uint16_t)((sum + divisor / 2U) / divisor);
+                }
+            }
         }
     }
     return AVIFDEC_OK;
@@ -1668,7 +1747,8 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     }
     status = av1_copy_image(
         state->image, &state->restored_planes, sequence,
-        frame->upscaled_width, frame->frame_height);
+        frame->upscaled_width, frame->frame_height,
+        state->output_width, state->output_height);
     if (status != AVIFDEC_OK) return status;
     state->output_frame_seen = 1U;
     if (frame->show_frame && frame->film_grain.apply_grain) {
@@ -3231,7 +3311,8 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                             &trace_state->reference_planes[
                                 frame.frame_to_show_map_idx],
                             &sequence, frame.upscaled_width,
-                            frame.frame_height);
+                            frame.frame_height, trace_state->output_width,
+                            trace_state->output_height);
                         if (status != AVIFDEC_OK) {
                             return av1_fail(
                                 error, status, av1_bits_offset(&bits),
@@ -3424,8 +3505,12 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                     sequence.selected_operating_point] == 0U &&
                 (sequence.max_width != info->width ||
                  sequence.max_height != info->height)) ||
-               frame.upscaled_width != info->width ||
-               frame.frame_height != info->height) {
+               (select_spatial_layer
+                    ? frame.upscaled_width < info->width
+                    : frame.upscaled_width != info->width) ||
+               (select_spatial_layer
+                    ? frame.frame_height < info->height
+                    : frame.frame_height != info->height)) {
         return av1_fail(
             error, AVIFDEC_INVALID_DATA,
             av1_stream_file_offset(&stream, 0U),
@@ -3623,6 +3708,8 @@ AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
     state.trace = trace;
     state.trace_enabled = trace_enabled;
     state.image = image;
+    state.output_width = info->width;
+    state.output_height = info->height;
     state.output_spatial_layer =
         limits == 0 ? 0U : limits->spatial_layer;
     state.output_spatial_layer_set =
