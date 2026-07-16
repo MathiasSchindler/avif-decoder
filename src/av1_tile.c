@@ -148,8 +148,8 @@ AvifdecStatus av1_tile_read_segment_id(Av1SymbolDecoder *decoder,
     else if (prev_upper_left == prev_upper || prev_upper_left == prev_left ||
              prev_upper == prev_left) context = 1U;
     else context = 0U;
-    difference = (uint8_t)av1_symbol_read(decoder, cdfs->segment_id[context],
-                                          (size_t)last_active_segment + 1U);
+    difference = (uint8_t)av1_symbol_read(
+        decoder, cdfs->segment_id[context], 8U);
     if (decoder->status != AVIFDEC_OK) return decoder->status;
     *segment_id = av1_neg_deinterleave(difference, prediction,
                                        (uint8_t)(last_active_segment + 1U));
@@ -534,13 +534,21 @@ static AvifdecStatus av1_tile_read_tx_size(Av1SymbolDecoder *decoder,
             const Av1BlockCell *above = av1_block_cell(
                 config->block_state, fields->row - 1U, fields->column);
             if (above == 0 || above->tx_size >= 19U) return AVIFDEC_INVALID_DATA;
-            if (av1_tx_width[above->tx_size] >= av1_tx_width[tx_size]) ++context;
+            if ((above->is_inter ? (uint32_t)above->width * 4U
+                                 : av1_tx_width[above->tx_size]) >=
+                av1_tx_width[tx_size]) {
+                ++context;
+            }
         }
         if (availability->left) {
             const Av1BlockCell *left = av1_block_cell(
                 config->block_state, fields->row, fields->column - 1U);
             if (left == 0 || left->tx_size >= 19U) return AVIFDEC_INVALID_DATA;
-            if (av1_tx_height[left->tx_size] >= av1_tx_height[tx_size]) ++context;
+            if ((left->is_inter ? (uint32_t)left->height * 4U
+                                : av1_tx_height[left->tx_size]) >=
+                av1_tx_height[tx_size]) {
+                ++context;
+            }
         }
         unsigned int maximum_tx_log2 =
             av1_tx_size_info[tx_size].width_log2 >

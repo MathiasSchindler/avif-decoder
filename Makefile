@@ -23,6 +23,11 @@ WARP_TABLES_CHECK := build/generated-check/av1_warp_tables.inc
 FILM_GRAIN_TABLE := src/av1_film_grain_gaussian.inc
 FILM_GRAIN_TABLE_CHECK := build/generated-check/av1_film_grain_gaussian.inc
 GENERATED_CHECK := build/generated-check/.verified
+AV1_SPEC := docs/av1.html
+TEST_GENERATED_CHECK :=
+ifneq ($(wildcard $(AV1_SPEC)),)
+TEST_GENERATED_CHECK := $(GENERATED_CHECK)
+endif
 
 ifeq ($(OS),Linux)
 ifeq ($(ARCH),x86_64)
@@ -140,24 +145,27 @@ $(GENERATED_CHECK): tools/generate-av1-coeff-tables.pl \
 		tools/generate-av1-palette-tables.pl \
 		tools/generate-av1-quant-tables.pl \
 		tools/generate-av1-warp-tables.pl \
-		tools/generate-av1-film-grain-table.pl docs/av1.html \
+		tools/generate-av1-film-grain-table.pl $(AV1_SPEC) \
 		$(COEFF_TABLES) $(PALETTE_TABLES) $(QUANT_TABLES) $(WARP_TABLES) \
 		$(FILM_GRAIN_TABLE)
 	@mkdir -p build/generated-check
-	perl tools/generate-av1-coeff-tables.pl docs/av1.html $(COEFF_TABLES_CHECK)
+	perl tools/generate-av1-coeff-tables.pl $(AV1_SPEC) $(COEFF_TABLES_CHECK)
 	cmp $(COEFF_TABLES) $(COEFF_TABLES_CHECK)
-	perl tools/generate-av1-palette-tables.pl docs/av1.html $(PALETTE_TABLES_CHECK)
+	perl tools/generate-av1-palette-tables.pl $(AV1_SPEC) $(PALETTE_TABLES_CHECK)
 	cmp $(PALETTE_TABLES) $(PALETTE_TABLES_CHECK)
-	perl tools/generate-av1-quant-tables.pl docs/av1.html $(QUANT_TABLES_CHECK)
+	perl tools/generate-av1-quant-tables.pl $(AV1_SPEC) $(QUANT_TABLES_CHECK)
 	cmp $(QUANT_TABLES) $(QUANT_TABLES_CHECK)
-	perl tools/generate-av1-warp-tables.pl docs/av1.html $(WARP_TABLES_CHECK)
+	perl tools/generate-av1-warp-tables.pl $(AV1_SPEC) $(WARP_TABLES_CHECK)
 	cmp $(WARP_TABLES) $(WARP_TABLES_CHECK)
-	perl tools/generate-av1-film-grain-table.pl docs/av1.html \
+	perl tools/generate-av1-film-grain-table.pl $(AV1_SPEC) \
 		$(FILM_GRAIN_TABLE_CHECK)
 	cmp $(FILM_GRAIN_TABLE) $(FILM_GRAIN_TABLE_CHECK)
 	@touch $@
 
-test: $(GENERATED_CHECK) $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE)
+test: $(TEST_GENERATED_CHECK) $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE)
+	@if test -z "$(TEST_GENERATED_CHECK)"; then \
+		printf '%s\n' 'Skipping generated-table reproduction checks: docs/av1.html is unavailable.'; \
+	fi
 	$(STRICT_UNIT)
 	$(HOST_UNIT)
 	sh tests/smoke.sh $(TARGET)

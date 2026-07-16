@@ -36,6 +36,10 @@ Run the complete test suite with:
 make test
 ```
 
+The generated-table reproduction checks run when the ignored
+`docs/av1.html` specification file is available. Without that maintainer
+input, `make test` reports the skipped check and runs the rest of the suite.
+
 `make`, `make test`, and `make clean` are the complete public Makefile
 interface.
 
@@ -272,7 +276,7 @@ presentation, RGB, film-grain, and sequence surfaces.
 - checked arithmetic, readers, arena alignment, PNG, transforms, prediction,
   filters, film grain, and malformed-input vectors;
 - recursive BMFF and 34-file AVIF corpus tests;
-- generated-table reproduction checks;
+- generated-table reproduction checks when `docs/av1.html` is available;
 - byte-exact native YUV comparisons against libaom/libavif;
 - block-level syntax, predictor, coefficient, motion-vector, reference-state,
   and filter-stage comparisons against instrumented libaom;

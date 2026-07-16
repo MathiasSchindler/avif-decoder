@@ -2376,8 +2376,9 @@ static int test_av1_coeff_cdfs(void) {
         CHECK(av1_coeff_parse_block(&decoder, &cdfs, &contexts, 0U,
                           AV1_TX_8X8, AV1_TX_DCT_DCT, 8U, 8U,
                           2U, 0U, &result) == AVIFDEC_OK);
-        CHECK(result.eob == 1U && above_level[2] == 1U &&
-            above_dc[2] == 1U && above_level[3] == 0U && above_dc[3] == 0U);
+        CHECK(result.eob == 1U && result.dc_category == 2U &&
+            above_level[2] == 1U && above_dc[2] == 2U &&
+            above_level[3] == 0U && above_dc[3] == 0U);
         planes[0].width4 = 4U;
 
         CHECK(av1_coeff_context_init(&contexts, planes) == AVIFDEC_OK);
@@ -3093,6 +3094,9 @@ static int test_av1_loop_restoration(void) {
             CHECK(av1_tile_read_segment_id(&decoder, &cdfs, &state, &availability,
                                  2U, 2U, 0U, 0, &value) == AVIFDEC_OK && value == 0U);
             CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 0) == AVIFDEC_OK);
+            CHECK(av1_tile_read_segment_id(&decoder, &cdfs, &state, &availability,
+                                 2U, 2U, 2U, 0, &value) == AVIFDEC_OK && value <= 2U);
+            CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 0) == AVIFDEC_OK);
             CHECK(av1_tile_read_delta(&decoder, cdfs.delta_q, &delta) == AVIFDEC_OK && delta == 0);
             CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 0) == AVIFDEC_OK);
             CHECK(av1_tile_read_y_mode(&decoder, &cdfs, 2U, 2U, &value) == AVIFDEC_OK &&
@@ -3310,7 +3314,7 @@ static int test_av1_loop_restoration(void) {
             av1_block_trace_init(&block_trace);
             av1_tile_cdfs_init(&frame_cdfs);
             avifdec_memory_fill(&boundary, 0U, sizeof(boundary));
-            force_cdf_symbol(frame_cdfs.segment_id[0], 2U, 1U);
+            force_cdf_symbol(frame_cdfs.segment_id[0], 8U, 1U);
             mode_config.seg_id_pre_skip = 1U;
             mode_config.last_active_segment = 1U;
             feature_enabled[1][6] = 1U;
