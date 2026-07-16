@@ -1,6 +1,13 @@
 #include "av1_filter.h"
 #include "base.h"
 
+static const uint8_t av1_cdef_uv_direction[2][2][8] = {
+    { { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U },
+      { 1U, 2U, 2U, 2U, 3U, 4U, 6U, 0U } },
+    { { 7U, 0U, 2U, 4U, 5U, 6U, 6U, 6U },
+      { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U } }
+};
+
 static int av1_cdef_abs(int value) {
     return value < 0 ? -value : value;
 }
@@ -272,20 +279,20 @@ static int av1_cdef_block_skipped(const Av1BlockState *blocks,
     return 1;
 }
 
-AvifdecStatus av1_cdef_frame(Av1FramePlanes *output,
-                             const Av1FramePlanes *input,
-                             const Av1BlockState *blocks,
-                             const Av1CdefParams *params) {
-    static const uint8_t uv_direction[2][2][8] = {
-        { { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U },
-          { 1U, 2U, 2U, 2U, 3U, 4U, 6U, 0U } },
-        { { 7U, 0U, 2U, 4U, 5U, 6U, 6U, 6U },
-          { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U } }
-    };
+typedef struct {
+    Av1FramePlanes *output;
+    const Av1FramePlanes *input;
+    const Av1BlockState *blocks;
+    const Av1CdefParams *params;
+} Av1CdefParallelContext;
+
+static AvifdecStatus av1_cdef_validate_and_copy(
+    Av1FramePlanes *output,
+    const Av1FramePlanes *input,
+    const Av1BlockState *blocks,
+    const Av1CdefParams *params) {
     unsigned int plane_count;
     unsigned int plane;
-    uint32_t row;
-    uint32_t column;
 
     if (output == 0 || input == 0 || blocks == 0 || params == 0 ||
         params->indices == 0 || params->y_pri_strength == 0 ||
@@ -304,23 +311,86 @@ AvifdecStatus av1_cdef_frame(Av1FramePlanes *output,
     }
     for (plane = 0U; plane < plane_count; ++plane) {
         uint32_t copy_row;
+
         if (input->data[plane] == 0 || output->data[plane] == 0 ||
             input->width[plane] != output->width[plane] ||
-            input->height[plane] != output->height[plane]) {
+            input->height[plane] != output->height[plane] ||
+            input->stride[plane] < input->width[plane] ||
+            output->stride[plane] < output->width[plane]) {
             return AVIFDEC_INVALID_ARGUMENT;
         }
-        for (copy_row = 0U; copy_row < input->height[plane]; ++copy_row) {
+        for (copy_row = 0U;
+             copy_row < input->height[plane];
+             ++copy_row) {
             avifdec_memory_copy(
-                output->data[plane] + (size_t)copy_row * output->stride[plane],
-                input->data[plane] + (size_t)copy_row * input->stride[plane],
+                output->data[plane] +
+                    (size_t)copy_row * output->stride[plane],
+                input->data[plane] +
+                    (size_t)copy_row * input->stride[plane],
                 input->width[plane] * sizeof(uint16_t));
         }
     }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus av1_cdef_validate_units(
+    const Av1BlockState *blocks,
+    const Av1CdefParams *params) {
+    uint32_t row;
+    uint32_t column;
+
     for (row = 0U; row < params->mi_rows; row += 2U) {
         for (column = 0U; column < params->mi_columns; column += 2U) {
             size_t index = (size_t)(row & ~15U) * params->mi_columns +
                            (column & ~15U);
             uint8_t strength_index;
+
+            if (index >= params->index_capacity) return AVIFDEC_LIMIT_EXCEEDED;
+            strength_index = params->indices[index];
+            if (strength_index == 0xffU || av1_cdef_block_skipped(
+                    blocks, row, column)) {
+                continue;
+            }
+            if (strength_index >= (1U << params->bits)) {
+                return AVIFDEC_INVALID_DATA;
+            }
+        }
+    }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus av1_cdef_filter_ranges(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    Av1CdefParallelContext *parallel =
+        (Av1CdefParallelContext *)arg;
+    Av1FramePlanes *output;
+    const Av1FramePlanes *input;
+    const Av1BlockState *blocks;
+    const Av1CdefParams *params;
+    size_t row_unit;
+
+    (void)worker_index;
+    if (parallel == 0 || begin > end) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    output = parallel->output;
+    input = parallel->input;
+    blocks = parallel->blocks;
+    params = parallel->params;
+    if (end > ((size_t)params->mi_rows + 1U) / 2U) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    for (row_unit = begin; row_unit < end; ++row_unit) {
+        uint32_t row = (uint32_t)(row_unit * 2U);
+        uint32_t column;
+
+        for (column = 0U; column < params->mi_columns; column += 2U) {
+            size_t index = (size_t)(row & ~15U) * params->mi_columns +
+                           (column & ~15U);
+            uint8_t strength_index = params->indices[index];
             uint8_t direction;
             uint32_t variance;
             unsigned int coeff_shift = params->bit_depth - 8U;
@@ -330,12 +400,9 @@ AvifdecStatus av1_cdef_frame(Av1FramePlanes *output,
             unsigned int variance_strength;
             AvifdecStatus status;
 
-            if (index >= params->index_capacity) return AVIFDEC_LIMIT_EXCEEDED;
-            strength_index = params->indices[index];
-                if (strength_index == 0xffU || av1_cdef_block_skipped(
-                    blocks, row, column)) continue;
-            if (strength_index >= (1U << params->bits)) {
-                return AVIFDEC_INVALID_DATA;
+            if (strength_index == 0xffU || av1_cdef_block_skipped(
+                    blocks, row, column)) {
+                continue;
             }
             status = av1_cdef_find_direction(
                 input->data[0] + (size_t)(row * 4U) * input->stride[0] +
@@ -366,16 +433,64 @@ AvifdecStatus av1_cdef_frame(Av1FramePlanes *output,
             secondary = (unsigned int)params->uv_sec_strength[strength_index] <<
                         coeff_shift;
             direction = primary == 0U ? 0U :
-                uv_direction[params->subsampling_x][params->subsampling_y]
-                            [direction];
-            for (plane = 1U; plane < 3U; ++plane) {
-                status = av1_cdef_filter_block(
-                    output, input, params, plane, row, column,
-                    primary, secondary,
-                    params->damping + coeff_shift - 1U, direction);
-                if (status != AVIFDEC_OK) return status;
+                av1_cdef_uv_direction[
+                    params->subsampling_x][params->subsampling_y][direction];
+            {
+                unsigned int plane;
+
+                for (plane = 1U; plane < 3U; ++plane) {
+                    status = av1_cdef_filter_block(
+                        output, input, params, plane, row, column,
+                        primary, secondary,
+                        params->damping + coeff_shift - 1U, direction);
+                    if (status != AVIFDEC_OK) return status;
+                }
             }
         }
     }
     return AVIFDEC_OK;
+}
+
+AvifdecStatus av1_cdef_frame_ex(
+    Av1FramePlanes *output,
+    const Av1FramePlanes *input,
+    const Av1BlockState *blocks,
+    const Av1CdefParams *params,
+    const AvifdecExecutor *executor) {
+    Av1CdefParallelContext parallel;
+    size_t row_units;
+    AvifdecStatus status;
+
+    if (executor != 0 &&
+        (executor->worker_count == 0U ||
+         executor->worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS ||
+         executor->parallel_for == 0)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    status = av1_cdef_validate_and_copy(
+        output, input, blocks, params);
+    if (status != AVIFDEC_OK) return status;
+    status = av1_cdef_validate_units(blocks, params);
+    if (status != AVIFDEC_OK) return status;
+    parallel.output = output;
+    parallel.input = input;
+    parallel.blocks = blocks;
+    parallel.params = params;
+    row_units = ((size_t)params->mi_rows + 1U) / 2U;
+    if (executor != 0 && executor->worker_count > 1U &&
+        row_units > 1U) {
+        return executor->parallel_for(
+            executor->user_data, row_units, 1U,
+            av1_cdef_filter_ranges, &parallel);
+    }
+    return av1_cdef_filter_ranges(
+        0U, row_units, 0U, &parallel);
+}
+
+AvifdecStatus av1_cdef_frame(Av1FramePlanes *output,
+                             const Av1FramePlanes *input,
+                             const Av1BlockState *blocks,
+                             const Av1CdefParams *params) {
+    return av1_cdef_frame_ex(
+        output, input, blocks, params, 0);
 }

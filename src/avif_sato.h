@@ -39,4 +39,16 @@ AvifdecStatus avif_sato_evaluate(const AvifSatoProgram *program,
                                  int64_t output_maximum,
                                  int64_t *result);
 
+AvifdecStatus avif_sato_apply_rows(
+    const AvifSatoProgram *program,
+    const AvifdecImage *inputs,
+    size_t input_count,
+    unsigned int plane,
+    uint32_t width,
+    uint32_t row_begin,
+    uint32_t row_end,
+    int64_t output_minimum,
+    int64_t output_maximum,
+    AvifdecImage *output);
+
 #endif

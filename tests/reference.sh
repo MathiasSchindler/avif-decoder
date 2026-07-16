@@ -57,6 +57,31 @@ check_case() {
         echo "$name: final planar YUV differs from libaom" >&2
         exit 1
     }
+    if [ "$mode" = filtered ]; then
+        threaded_raw="$work/$name-threaded.yuv"
+        threaded_output=$(
+            "$decoder" --workers 4 --raw "$encoded" "$threaded_raw"
+        )
+        threaded=$(printf '%s\n' "$threaded_output" |
+            sed -n "s/^${checkpoint}_checksum=//p")
+        [ "$threaded" = "$actual" ] || {
+            echo "$name: threaded checksum differs" >&2
+            exit 1
+        }
+        cmp "$actual_raw" "$threaded_raw" || {
+            echo "$name: threaded planar YUV differs" >&2
+            exit 1
+        }
+        if [ "$(uname -s)" = Linux ] &&
+            [ "$(uname -m)" = x86_64 ]; then
+            workers=$(printf '%s\n' "$threaded_output" |
+                sed -n 's/^decode_workers=//p')
+            [ "$workers" = 4 ] || {
+                echo "$name: expected 4 decode workers, got $workers" >&2
+                exit 1
+            }
+        fi
+    fi
     echo "$name: $actual"
 }
 

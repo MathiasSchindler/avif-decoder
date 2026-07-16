@@ -152,6 +152,91 @@ substantial, CLI threading remains explicit rather than automatic.
 The resulting static PIE is 459,552 bytes on the measurement build, 9,440
 bytes (2.1%) above the previously recorded 450,112-byte optimized binary.
 
+## Sample-transform row threading
+
+Sample-transform input items are still decoded serially. After all input
+planes are immutable, output evaluation is dispatched as one flattened set of
+plane rows. Each callback reads the parsed expression and input planes and
+writes complete, disjoint output rows. This adds no decoder workspace; the
+only additional memory is the caller task pool's worker stacks.
+
+The integration test constructs a two-input sample-transform item and runs the
+same decode through the serial API and an executor that deliberately evaluates
+row ranges out of order. All output planes are exact matches.
+
+## CDEF and restoration row-unit profile
+
+The normal large workload does not exercise CDEF and selects no restoration
+filter, so it is not representative for deciding whether to thread these
+stages. A 4096x4096 benchmark with both stages active was generated from the
+center of `images/tribu-large.jpg`:
+
+```sh
+magick images/tribu-large.jpg -gravity center -crop 4096x4096+0+0 \
+    +repage -quality 92 build/filter-active.jpg
+avifenc --codec aom --jobs 1 --speed 4 --qcolor 35 \
+    --advanced enable-cdef=1 --advanced enable-restoration=1 \
+    build/filter-active.jpg build/filter-active-restoration.avif
+```
+
+The deblocked, CDEF, and restoration checksums are all distinct, confirming
+that both filters change samples. System hardware sampling was unavailable
+because `perf_event_paranoid` was 4, so a temporary hosted `-O2 -pg` harness
+decoded the image three times with a null trace. The run took 19.38 seconds
+elapsed, 18.89 seconds user time, and 1,688,808 KiB maximum RSS. `gprof`
+attributed 13.59 sampled seconds:
+
+| Stage | Inclusive sampled time | Share |
+| --- | ---: | ---: |
+| CDEF frame | 6.07 s | 44.7% |
+| restoration frame | 2.13 s | 15.7% |
+| loop filter frame | 0.54 s | 4.0% |
+
+CDEF's total consists of 5.94 seconds in block filtering, 0.11 seconds in
+direction search, and negligible plane-copy overhead. Restoration spent 1.05
+seconds in filtering/control and 1.08 seconds copying unchanged 4x4 blocks.
+The combined 60.4% share makes these stages materially more valuable than AV1
+tile refactoring on this filter-heavy workload.
+
+The dependency audit found these safe future execution boundaries:
+
+- CDEF must first copy all visible input planes to output. Its remaining work
+  can be divided on two-mi-row boundaries. Each unit reads only the immutable
+  deblocked planes, block cells, strength indices, and CDEF parameters, then
+  writes a distinct 8-luma-row region and its corresponding chroma rows.
+- Restoration can be divided by plane and by luma-row bands aligned to four
+  rows. Wiener and self-guided restoration scratch is stack-local. Every unit
+  reads only immutable upscaled CDEF/deblocked planes and restoration-unit
+  metadata, while writing distinct `4 >> subsampling_y` output rows. Stripe
+  selection depends only on the aligned luma-row coordinate.
+
+The CDEF implementation now performs the plane copy and an ordered validation
+pass before dispatching two-mi-row units. This keeps invalid strength/index
+errors deterministic and adds no decoder workspace. The executor is passed
+only into a direct primary AV1 item; grid children, sample-transform inputs,
+auxiliary alpha, and sequences remain serial to avoid nested dispatch.
+
+Three warm runs of the same 4096x4096 filter-active image used:
+
+```sh
+/usr/bin/time -f 'elapsed=%e user=%U sys=%S maxrss_kb=%M' \
+    build/x86_64/avifdec --workers WIDTH --raw \
+    build/filter-active-restoration.avif /dev/null
+```
+
+| Workers | Median elapsed | User time | Maximum RSS | Decoder workspace |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 5.90 s | 5.43 s | 1,647 MiB | 1,732,566,678 bytes |
+| 2 | 5.01 s | 5.49 s | 1,647 MiB | 1,732,566,678 bytes |
+| 4 | 4.53 s | 5.58 s | 1,647 MiB | 1,732,566,678 bytes |
+
+Four workers reduce wall time by about 23% (1.30x) without changing decoder
+workspace or peak RSS. Widths 1 and 4 produced byte-identical planar output,
+the same CDEF checksum `0x26fd6feea1d4f415`, and the same restoration checksum
+`0x6d8bb6a201107db9`. The smaller speedup than CDEF's instrumented profile
+share indicates bandwidth pressure and the remaining serial decode/filter
+stages. Restoration remains the next safe four-luma-row candidate.
+
 ## Validation
 
 Run the complete suite without overriding `CFLAGS` on the `make test` command line:

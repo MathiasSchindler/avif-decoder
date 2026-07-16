@@ -52,15 +52,16 @@ input, `make test` reports the skipped check and runs the rest of the suite.
 Makefile interface.
 
 The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
-tiles through the imported newos clone/futex task-pool substrate:
+tiles, sample-transform output rows, and AV1 CDEF row units through the
+imported newos clone/futex task-pool substrate:
 
 ```sh
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
 ```
 
 The default is one worker. `--workers 0` selects the available CPU count,
-capped by the grid tile count and 32 workers. macOS and non-grid inputs
-currently use the serial path.
+capped by the available tile, plane-row, or CDEF-row work and 32 workers.
+macOS currently uses the serial task-pool backend.
 
 ### Browser experiment
 
@@ -260,13 +261,17 @@ returns deterministic syntax and reconstruction checksums.
 `avifdec_query_ex()` and `avifdec_decode_ex()` accept an optional
 `AvifdecExecutor`. The executor is a structured `parallel_for` callback owned
 by the caller; the decoder still performs no allocation and retains no thread
-state. The current parallel region covers independent tiles of a top-level
-primary grid. Nested derived images, auxiliary alpha, sequences, RGB
-conversion, filters, and AV1 bitstream tiles remain serial.
+state. The current parallel regions cover independent tiles of a top-level
+primary grid, independent output rows of a primary sample transform, and
+two-mi-row CDEF units in a direct primary AV1 item. Sample-transform input
+images remain serial. Nested derived images, auxiliary alpha, sequences, RGB
+conversion, the other AV1 filters, and AV1 bitstream tiles remain serial.
 
-Parallel query results include one copied parser context, tile buffer, and
-child decoder workspace per executor worker. Callers must use the workspace
-requirement returned for the same executor width used during decoding.
+Parallel grid query results include one copied parser context, tile buffer,
+and child decoder workspace per executor worker. Sample-transform row
+parallelism and CDEF row parallelism add no decoder workspace. Callers must use
+the workspace requirement returned for the same executor width used during
+decoding.
 
 ### Image sequences
 
@@ -352,7 +357,8 @@ A hosted coverage-guided harness is available at
 - Sequence edit lists are restricted to the normal single-entry form.
 - Sequence track matrices must be identity.
 - PNG encoding is intentionally uncompressed beyond stored DEFLATE framing.
-- Internal parallel decoding is currently limited to top-level AVIF grids.
+- Internal parallel decoding is currently limited to top-level AVIF grids,
+  primary sample-transform output rows, and direct-primary AV1 CDEF rows.
 
 ## License and authorship
 

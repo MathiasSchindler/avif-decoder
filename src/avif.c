@@ -2422,6 +2422,65 @@ static void avif_grid_trace_add(
         tile->restoration_checksum;
 }
 
+typedef struct {
+    const AvifSatoProgram *program;
+    const AvifdecImage *inputs;
+    size_t input_count;
+    AvifdecImage *output;
+    size_t plane_offsets[4];
+    uint32_t plane_widths[3];
+    int64_t output_minimums[3];
+    int64_t output_maximums[3];
+    unsigned int plane_count;
+} AvifSatoParallelContext;
+
+static AvifdecStatus avif_sato_apply_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    AvifSatoParallelContext *parallel =
+        (AvifSatoParallelContext *)arg;
+
+    (void)worker_index;
+    if (parallel == 0 || begin > end ||
+        end > parallel->plane_offsets[
+            parallel->plane_count]) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    while (begin < end) {
+        unsigned int plane = 0U;
+        size_t segment_end;
+        AvifdecStatus status;
+
+        while (plane + 1U < parallel->plane_count &&
+               begin >= parallel->plane_offsets[plane + 1U]) {
+            ++plane;
+        }
+        segment_end = end;
+        if (segment_end >
+            parallel->plane_offsets[plane + 1U]) {
+            segment_end =
+                parallel->plane_offsets[plane + 1U];
+        }
+        status = avif_sato_apply_rows(
+            parallel->program, parallel->inputs,
+            parallel->input_count, plane,
+            parallel->plane_widths[plane],
+            (uint32_t)(
+                begin - parallel->plane_offsets[plane]),
+            (uint32_t)(
+                segment_end -
+                parallel->plane_offsets[plane]),
+            parallel->output_minimums[plane],
+            parallel->output_maximums[plane],
+            parallel->output);
+        if (status != AVIFDEC_OK) return status;
+        begin = segment_end;
+    }
+    return AVIFDEC_OK;
+}
+
 static AvifdecStatus avif_decode_grid_parallel(
     AvifContext *context,
     uint32_t item_id,
@@ -2630,9 +2689,9 @@ static AvifdecStatus avif_decode_item(
             item_limits.spatial_layer = info.selected_layer;
             item_limits.spatial_layer_set = 1U;
         }
-        return avifdec_av1_decode(
+        return avifdec_av1_decode_ex(
             context->query_spans, info.extent_count,
-            &item_limits, &info, workspace, workspace_size,
+            &item_limits, executor, &info, workspace, workspace_size,
             image, trace, context->error);
     }
     if (item_type == AVIFDEC_FOURCC('g', 'r', 'i', 'd')) {
@@ -2850,11 +2909,21 @@ static AvifdecStatus avif_decode_item(
             }
         }
         {
-            unsigned int plane_count =
-                sato_info.monochrome ? 1U : 3U;
+            AvifSatoParallelContext parallel;
+            size_t total_rows;
             unsigned int plane;
 
-            for (plane = 0U; plane < plane_count; ++plane) {
+            avifdec_memory_fill(
+                &parallel, 0U, sizeof(parallel));
+            parallel.program = &program;
+            parallel.inputs = input_images;
+            parallel.input_count = input_count;
+            parallel.output = image;
+            parallel.plane_count =
+                sato_info.monochrome ? 1U : 3U;
+            for (plane = 0U;
+                 plane < parallel.plane_count;
+                 ++plane) {
                 uint32_t plane_width = plane == 0U
                     ? sato_info.width
                     : (sato_info.width +
@@ -2870,7 +2939,6 @@ static AvifdecStatus avif_decode_item(
                 int64_t output_minimum = 0;
                 int64_t output_maximum =
                     ((int64_t)1 << sato_info.bit_depth) - 1;
-                uint32_t y;
 
                 if (!sato_info.color_range) {
                     unsigned int shift =
@@ -2881,37 +2949,36 @@ static AvifdecStatus avif_decode_item(
                         (int64_t)(plane == 0U ? 235U : 240U)
                         << shift;
                 }
-                for (y = 0U; y < plane_height; ++y) {
-                    uint32_t x;
-
-                    for (x = 0U; x < plane_width; ++x) {
-                        int64_t samples[AVIF_SATO_MAX_INPUTS];
-                        int64_t result;
-
-                        for (input_index = 0U;
-                             input_index < input_count;
-                             ++input_index) {
-                            samples[input_index] =
-                                input_images[input_index]
-                                    .planes[plane][
-                                        (size_t)y *
-                                        input_images[input_index]
-                                            .strides[plane] +
-                                        x];
-                        }
-                        status = avif_sato_evaluate(
-                            &program, samples, input_count,
-                            output_minimum, output_maximum,
-                            &result);
-                        if (status != AVIFDEC_OK) return status;
-                        image->planes[plane][
-                            (size_t)y * image->strides[plane] + x] =
-                            (uint16_t)result;
-                    }
+                parallel.plane_widths[plane] = plane_width;
+                parallel.output_minimums[plane] =
+                    output_minimum;
+                parallel.output_maximums[plane] =
+                    output_maximum;
+                if (!avifdec_size_add(
+                        parallel.plane_offsets[plane],
+                        plane_height,
+                        &parallel.plane_offsets[plane + 1U])) {
+                    return avif_fail(
+                        context, AVIFDEC_OVERFLOW,
+                        location.base_offset,
+                        AVIFDEC_FOURCC('s', 'a', 't', 'o'));
                 }
                 image->widths[plane] = plane_width;
                 image->heights[plane] = plane_height;
             }
+            total_rows =
+                parallel.plane_offsets[parallel.plane_count];
+            if (executor != 0 &&
+                executor->worker_count > 1U &&
+                total_rows > 1U) {
+                status = executor->parallel_for(
+                    executor->user_data, total_rows, 1U,
+                    avif_sato_apply_range, &parallel);
+            } else {
+                status = avif_sato_apply_range(
+                    0U, total_rows, 0U, &parallel);
+            }
+            if (status != AVIFDEC_OK) return status;
         }
         image->bit_depth = sato_info.bit_depth;
         image->monochrome = sato_info.monochrome;

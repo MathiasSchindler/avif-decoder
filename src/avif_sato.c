@@ -533,3 +533,67 @@ AvifdecStatus avif_sato_evaluate(const AvifSatoProgram *program,
         stack[0], output_minimum, output_maximum);
     return AVIFDEC_OK;
 }
+
+AvifdecStatus avif_sato_apply_rows(
+    const AvifSatoProgram *program,
+    const AvifdecImage *inputs,
+    size_t input_count,
+    unsigned int plane,
+    uint32_t width,
+    uint32_t row_begin,
+    uint32_t row_end,
+    int64_t output_minimum,
+    int64_t output_maximum,
+    AvifdecImage *output) {
+    uint32_t row;
+    size_t input_index;
+
+    if (program == 0 || inputs == 0 || output == 0 ||
+        input_count == 0U ||
+        input_count > AVIF_SATO_MAX_INPUTS ||
+        plane >= 3U || width == 0U ||
+        row_begin > row_end ||
+        output_minimum > output_maximum ||
+        output->planes[plane] == 0 ||
+        output->strides[plane] < width) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    for (input_index = 0U;
+         input_index < input_count;
+         ++input_index) {
+        if (inputs[input_index].planes[plane] == 0 ||
+            inputs[input_index].strides[plane] < width ||
+            inputs[input_index].widths[plane] < width ||
+            inputs[input_index].heights[plane] < row_end) {
+            return AVIFDEC_INVALID_ARGUMENT;
+        }
+    }
+    for (row = row_begin; row < row_end; ++row) {
+        uint32_t column;
+
+        for (column = 0U; column < width; ++column) {
+            int64_t samples[AVIF_SATO_MAX_INPUTS];
+            int64_t result;
+            AvifdecStatus status;
+
+            for (input_index = 0U;
+                 input_index < input_count;
+                 ++input_index) {
+                samples[input_index] =
+                    inputs[input_index].planes[plane][
+                        (size_t)row *
+                        inputs[input_index].strides[plane] +
+                        column];
+            }
+            status = avif_sato_evaluate(
+                program, samples, input_count,
+                output_minimum, output_maximum,
+                &result);
+            if (status != AVIFDEC_OK) return status;
+            output->planes[plane][
+                (size_t)row * output->strides[plane] +
+                column] = (uint16_t)result;
+        }
+    }
+    return AVIFDEC_OK;
+}

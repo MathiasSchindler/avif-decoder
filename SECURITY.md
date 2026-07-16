@@ -21,10 +21,11 @@ Malformed AVIF, ISOBMFF, AV1, metadata, or image data may expose parser errors,
 resource-exhaustion issues, memory-safety bugs, incorrect validation, or other
 unexpected behavior. The project has not received a production security audit.
 
-Optional grid threading multiplies decoder workspace and worker-stack
-requirements by the selected width. Applications should cap executor width,
-enforce their own memory budgets, and retain a width-1 fallback for untrusted
-or unusually large inputs.
+Optional threading adds worker-stack requirements. Grid threading also
+multiplies decoder workspace by the selected width; sample-transform and CDEF
+row threading do not. Applications should cap executor width, enforce their
+own memory budgets, and retain a width-1 fallback for untrusted or unusually
+large inputs.
 
 ## Reporting Security Issues
 

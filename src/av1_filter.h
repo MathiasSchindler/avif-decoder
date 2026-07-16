@@ -65,6 +65,12 @@ AvifdecStatus av1_cdef_frame(Av1FramePlanes *output,
                              const Av1FramePlanes *input,
                              const Av1BlockState *blocks,
                              const Av1CdefParams *params);
+AvifdecStatus av1_cdef_frame_ex(
+    Av1FramePlanes *output,
+    const Av1FramePlanes *input,
+    const Av1BlockState *blocks,
+    const Av1CdefParams *params,
+    const AvifdecExecutor *executor);
 
 AvifdecStatus av1_superres_upscale_plane(uint16_t *output,
                                          size_t output_stride,

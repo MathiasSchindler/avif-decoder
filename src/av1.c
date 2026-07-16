@@ -231,6 +231,7 @@ typedef struct {
     size_t cell_count;
     size_t frame_plane_samples[3];
     size_t restoration_unit_capacity;
+    const AvifdecExecutor *executor;
     AvifdecImage *image;
     uint32_t output_width;
     uint32_t output_height;
@@ -1675,8 +1676,9 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     cdef.uv_sec_strength = frame->cdef_uv_sec_strength;
     cdef.indices = state->cdef_indices;
     cdef.index_capacity = state->cell_count;
-    status = av1_cdef_frame(&state->cdef_planes, &state->deblocked_planes,
-                            &state->block_state, &cdef);
+    status = av1_cdef_frame_ex(
+        &state->cdef_planes, &state->deblocked_planes,
+        &state->block_state, &cdef, state->executor);
     if (status != AVIFDEC_OK) return status;
     if (state->trace_enabled) {
         status = av1_trace_stage_checksum(
@@ -3669,20 +3671,26 @@ AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
     return av1_parse_stream(spans, span_count, limits, info, error, &state);
 }
 
-AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
-                                 size_t span_count,
-                                 const AvifdecLimits *limits,
-                                 AvifdecImageInfo *info,
-                                 void *workspace,
-                                 size_t workspace_size,
-                                 AvifdecImage *image,
-                                 AvifdecEntropyTrace *trace,
-                                 AvifdecError *error) {
+AvifdecStatus avifdec_av1_decode_ex(
+    const AvifdecSpan *spans,
+    size_t span_count,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifdecImageInfo *info,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecError *error) {
     Av1TraceState state;
     AvifdecEntropyTrace local_trace;
     uint8_t trace_enabled = trace != 0;
 
     if (spans == 0 || span_count == 0U || info == 0 || image == 0 ||
+        (executor != 0 &&
+         (executor->worker_count == 0U ||
+          executor->worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS ||
+          executor->parallel_for == 0)) ||
         (workspace == 0 && workspace_size != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
@@ -3707,6 +3715,7 @@ AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
     avifdec_arena_init(&state.arena, workspace, workspace_size);
     state.trace = trace;
     state.trace_enabled = trace_enabled;
+    state.executor = executor;
     state.image = image;
     state.output_width = info->width;
     state.output_height = info->height;
@@ -3715,4 +3724,18 @@ AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
     state.output_spatial_layer_set =
         limits == 0 ? 0U : limits->spatial_layer_set;
     return av1_parse_stream(spans, span_count, limits, info, error, &state);
+}
+
+AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
+                                 size_t span_count,
+                                 const AvifdecLimits *limits,
+                                 AvifdecImageInfo *info,
+                                 void *workspace,
+                                 size_t workspace_size,
+                                 AvifdecImage *image,
+                                 AvifdecEntropyTrace *trace,
+                                 AvifdecError *error) {
+    return avifdec_av1_decode_ex(
+        spans, span_count, limits, 0, info,
+        workspace, workspace_size, image, trace, error);
 }

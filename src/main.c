@@ -729,26 +729,53 @@ int main(int argc, char **argv) {
             return 1;
         }
         if ((raw_output || png_output || packed_format >= 0) &&
-            image_info.is_grid &&
-            (image_info.grid_rows > 1U ||
-             image_info.grid_columns > 1U) &&
-            requested_workers != 1U) {
-            size_t tile_count;
+            requested_workers != 1U &&
+            image_info.tone_map_base_item_id == 0U &&
+            (!image_info.is_grid ||
+             image_info.grid_rows > 1U ||
+             image_info.grid_columns > 1U)) {
+            size_t work_count;
             size_t worker_count = requested_workers;
 
-            if (!avifdec_size_multiply(
-                    image_info.grid_rows,
-                    image_info.grid_columns,
-                    &tile_count)) {
-                (void)platform_free_pages(data, size);
-                return 1;
+            if (image_info.is_grid &&
+                (image_info.grid_rows > 1U ||
+                 image_info.grid_columns > 1U)) {
+                if (!avifdec_size_multiply(
+                        image_info.grid_rows,
+                        image_info.grid_columns,
+                        &work_count)) {
+                    (void)platform_free_pages(data, size);
+                    return 1;
+                }
+            } else if (image_info.sample_transform_present) {
+                work_count = image_info.height;
+                if (!image_info.monochrome) {
+                    size_t chroma_rows =
+                        (image_info.height +
+                         ((size_t)1U <<
+                          image_info.subsampling_y) - 1U) >>
+                            image_info.subsampling_y;
+
+                    if (!avifdec_size_multiply(
+                            chroma_rows, 2U,
+                            &chroma_rows) ||
+                        !avifdec_size_add(
+                            work_count, chroma_rows,
+                            &work_count)) {
+                        (void)platform_free_pages(data, size);
+                        return 1;
+                    }
+                }
+            } else {
+                work_count =
+                    ((size_t)image_info.height + 7U) / 8U;
             }
             if (worker_count == 0U) {
                 worker_count =
                     rt_task_pool_available_width();
             }
-            if (worker_count > tile_count) {
-                worker_count = tile_count;
+            if (worker_count > work_count) {
+                worker_count = work_count;
             }
             if (worker_count > 1U &&
                 rt_task_pool_init(

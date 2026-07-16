@@ -1256,6 +1256,12 @@ static int test_avif_sample_transform(void) {
     AvifSatoProgram program;
     AvifdecError error;
     int64_t samples[2] = { 12, 34 };
+    uint16_t first[12];
+    uint16_t second[12];
+    uint16_t output[12];
+    AvifdecImage inputs[2];
+    AvifdecImage output_image;
+    size_t pixel;
     int64_t result;
 
     spans[0].data = expression;
@@ -1272,6 +1278,42 @@ static int test_avif_sample_transform(void) {
         &program, samples, 2U, 0, 65535, &result) ==
         AVIFDEC_OK);
     CHECK(result == 3106);
+    avifdec_memory_fill(inputs, 0U, sizeof(inputs));
+    avifdec_memory_fill(
+        &output_image, 0U, sizeof(output_image));
+    for (pixel = 0U; pixel < 12U; ++pixel) {
+        first[pixel] = (uint16_t)(pixel + 1U);
+        second[pixel] = (uint16_t)(20U + pixel);
+        output[pixel] = 0xffffU;
+    }
+    inputs[0].planes[0] = first;
+    inputs[0].strides[0] = 4U;
+    inputs[0].widths[0] = 4U;
+    inputs[0].heights[0] = 3U;
+    inputs[1].planes[0] = second;
+    inputs[1].strides[0] = 4U;
+    inputs[1].widths[0] = 4U;
+    inputs[1].heights[0] = 3U;
+    output_image.planes[0] = output;
+    output_image.strides[0] = 4U;
+    CHECK(avif_sato_apply_rows(
+        &program, inputs, 2U, 0U, 4U, 2U, 3U,
+        0, 65535, &output_image) == AVIFDEC_OK);
+    CHECK(avif_sato_apply_rows(
+        &program, inputs, 2U, 0U, 4U, 0U, 2U,
+        0, 65535, &output_image) == AVIFDEC_OK);
+    for (pixel = 0U; pixel < 12U; ++pixel) {
+        samples[0] = first[pixel];
+        samples[1] = second[pixel];
+        CHECK(avif_sato_evaluate(
+            &program, samples, 2U, 0, 65535,
+            &result) == AVIFDEC_OK);
+        CHECK(output[pixel] == (uint16_t)result);
+    }
+    CHECK(avif_sato_apply_rows(
+        &program, inputs, 2U, 0U, 4U, 3U, 2U,
+        0, 65535, &output_image) ==
+        AVIFDEC_INVALID_ARGUMENT);
 
     spans[0].data = underflow;
     spans[0].size = sizeof(underflow);
@@ -1581,7 +1623,7 @@ static int test_bmff_mutation_sweep(void) {
 }
 
 typedef struct {
-    unsigned char data[512];
+    unsigned char data[1024];
     size_t size;
     size_t iloc_extent_offset;
     size_t iloc_extent_length;
@@ -1686,6 +1728,7 @@ static void make_query_fixture(QueryFixture *fixture, int use_idat, int multiple
         fixture_u32(fixture, use_idat ? 10U : 0U);
         fixture_u32(fixture, sizeof(av1_payload) - 10U);
     }
+
     fixture_box_end(fixture, box);
     iinf = fixture_box_begin(fixture, AVIFDEC_FOURCC('i', 'i', 'n', 'f'));
     fixture_full_box(fixture, 0U, 0U);
@@ -1763,6 +1806,169 @@ static void make_query_fixture(QueryFixture *fixture, int use_idat, int multiple
             fixture->data[fixture->iloc_extent_offset2 + 3U] = (unsigned char)second_offset;
         }
     }
+}
+
+static void make_sato_fixture(QueryFixture *fixture) {
+    static const unsigned char expression[] = {
+        0x02U, 0x05U,
+        0x00U, 0x00U, 0x00U, 0x01U, 0x00U,
+        0x01U, 0x82U, 0x02U, 0x80U
+    };
+    static const unsigned char av1_payload[] = {
+        0x12U, 0x00U, 0x0aU, 0x04U, 0x38U, 0x00U, 0x06U, 0x09U,
+        0x32U, 0x0eU, 0x1eU, 0x40U, 0x3fU, 0xffU, 0xffU, 0xc4U,
+        0x00U, 0x00U, 0xafU, 0x28U, 0xc4U, 0x04U, 0x06U, 0x40U
+    };
+    size_t box;
+    size_t meta;
+    size_t iinf;
+    size_t iref;
+    size_t iprp;
+    size_t ipco;
+    uint16_t item_id;
+
+    avifdec_memory_fill(fixture, 0U, sizeof(*fixture));
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('f', 't', 'y', 'p'));
+    fixture_fourcc(
+        fixture, AVIFDEC_FOURCC('a', 'v', 'i', 'f'));
+    fixture_u32(fixture, 0U);
+    fixture_fourcc(
+        fixture, AVIFDEC_FOURCC('a', 'v', 'i', 'f'));
+    fixture_box_end(fixture, box);
+    meta = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('m', 'e', 't', 'a'));
+    fixture_full_box(fixture, 0U, 0U);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('h', 'd', 'l', 'r'));
+    fixture_full_box(fixture, 0U, 0U);
+    fixture_u32(fixture, 0U);
+    fixture_fourcc(
+        fixture, AVIFDEC_FOURCC('p', 'i', 'c', 't'));
+    fixture_u32(fixture, 0U);
+    fixture_u32(fixture, 0U);
+    fixture_u32(fixture, 0U);
+    fixture->data[fixture->size++] = 0U;
+    fixture_box_end(fixture, box);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('p', 'i', 't', 'm'));
+    fixture_full_box(fixture, 0U, 0U);
+    fixture_u16(fixture, 1U);
+    fixture_box_end(fixture, box);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'l', 'o', 'c'));
+    fixture_full_box(fixture, 1U, 0U);
+    fixture->data[fixture->size++] = 0x44U;
+    fixture->data[fixture->size++] = 0x00U;
+    fixture_u16(fixture, 3U);
+    for (item_id = 1U; item_id <= 3U; ++item_id) {
+        fixture_u16(fixture, item_id);
+        fixture_u16(fixture, 1U);
+        fixture_u16(fixture, 0U);
+        fixture_u16(fixture, 1U);
+        if (item_id == 1U) {
+            fixture_u32(fixture, 0U);
+            fixture_u32(
+                fixture, (uint32_t)sizeof(expression));
+        } else {
+            fixture_u32(
+                fixture,
+                (uint32_t)(
+                    sizeof(expression) +
+                    (item_id - 2U) *
+                        sizeof(av1_payload)));
+            fixture_u32(
+                fixture, (uint32_t)sizeof(av1_payload));
+        }
+    }
+    fixture_box_end(fixture, box);
+    iinf = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'i', 'n', 'f'));
+    fixture_full_box(fixture, 0U, 0U);
+    fixture_u16(fixture, 3U);
+    for (item_id = 1U; item_id <= 3U; ++item_id) {
+        box = fixture_box_begin(
+            fixture, AVIFDEC_FOURCC('i', 'n', 'f', 'e'));
+        fixture_full_box(fixture, 2U, 0U);
+        fixture_u16(fixture, item_id);
+        fixture_u16(fixture, 0U);
+        fixture_fourcc(
+            fixture, item_id == 1U
+                ? AVIFDEC_FOURCC('s', 'a', 't', 'o')
+                : AVIFDEC_FOURCC('a', 'v', '0', '1'));
+        fixture->data[fixture->size++] = 0U;
+        fixture_box_end(fixture, box);
+    }
+    fixture_box_end(fixture, iinf);
+    iref = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'r', 'e', 'f'));
+    fixture_full_box(fixture, 0U, 0U);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('d', 'i', 'm', 'g'));
+    fixture_u16(fixture, 1U);
+    fixture_u16(fixture, 2U);
+    fixture_u16(fixture, 2U);
+    fixture_u16(fixture, 3U);
+    fixture_box_end(fixture, box);
+    fixture_box_end(fixture, iref);
+    iprp = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'p', 'r', 'p'));
+    ipco = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'p', 'c', 'o'));
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 's', 'p', 'e'));
+    fixture_full_box(fixture, 0U, 0U);
+    fixture_u32(fixture, 1U);
+    fixture_u32(fixture, 1U);
+    fixture_box_end(fixture, box);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('p', 'i', 'x', 'i'));
+    fixture_full_box(fixture, 0U, 0U);
+    fixture->data[fixture->size++] = 3U;
+    fixture->data[fixture->size++] = 8U;
+    fixture->data[fixture->size++] = 8U;
+    fixture->data[fixture->size++] = 8U;
+    fixture_box_end(fixture, box);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('a', 'v', '1', 'C'));
+    fixture->data[fixture->size++] = 0x81U;
+    fixture->data[fixture->size++] = 0x20U;
+    fixture->data[fixture->size++] = 0x00U;
+    fixture->data[fixture->size++] = 0x00U;
+    fixture_box_end(fixture, box);
+    fixture_box_end(fixture, ipco);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'p', 'm', 'a'));
+    fixture_full_box(fixture, 0U, 0U);
+    fixture_u32(fixture, 3U);
+    for (item_id = 1U; item_id <= 3U; ++item_id) {
+        fixture_u16(fixture, item_id);
+        fixture->data[fixture->size++] =
+            item_id == 1U ? 2U : 3U;
+        fixture->data[fixture->size++] = 1U;
+        fixture->data[fixture->size++] = 2U;
+        if (item_id != 1U) {
+            fixture->data[fixture->size++] = 0x83U;
+        }
+    }
+    fixture_box_end(fixture, box);
+    fixture_box_end(fixture, iprp);
+    box = fixture_box_begin(
+        fixture, AVIFDEC_FOURCC('i', 'd', 'a', 't'));
+    avifdec_memory_copy(
+        fixture->data + fixture->size,
+        expression, sizeof(expression));
+    fixture->size += sizeof(expression);
+    avifdec_memory_copy(
+        fixture->data + fixture->size,
+        av1_payload, sizeof(av1_payload));
+    fixture->size += sizeof(av1_payload);
+    avifdec_memory_copy(
+        fixture->data + fixture->size,
+        av1_payload, sizeof(av1_payload));
+    fixture->size += sizeof(av1_payload);
+    fixture_box_end(fixture, box);
+    fixture_box_end(fixture, meta);
 }
 
 static void make_cycle_fixture(QueryFixture *fixture) {
@@ -1845,6 +2051,92 @@ static int test_avif_item_graph(void) {
         fixture.data, fixture.size, 0, 0, 0U,
         &info, &error) == AVIFDEC_INVALID_DATA);
     CHECK(error.context == AVIFDEC_FOURCC('d', 'i', 'm', 'g'));
+    return 0;
+}
+
+typedef struct {
+    size_t calls;
+    size_t count;
+    size_t min_chunk;
+} OutOfOrderExecutorState;
+
+static AvifdecStatus out_of_order_parallel_for(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifdecParallelBody body,
+    void *arg) {
+    OutOfOrderExecutorState *state =
+        (OutOfOrderExecutorState *)user_data;
+    AvifdecStatus tail_status;
+    AvifdecStatus head_status;
+
+    state->count = count;
+    state->min_chunk = min_chunk;
+    ++state->calls;
+    if (count <= 1U) return body(0U, count, 0U, arg);
+    tail_status = body(count - 1U, count, 1U, arg);
+    head_status = body(0U, count - 1U, 0U, arg);
+    return tail_status != AVIFDEC_OK
+        ? tail_status : head_status;
+}
+
+static int test_avif_sample_transform_executor(void) {
+    QueryFixture fixture;
+    static unsigned char workspace[700000U];
+    AvifdecImageInfo info;
+    AvifdecImageInfo parallel_info;
+    AvifdecImage serial_image;
+    AvifdecImage parallel_image;
+    uint16_t serial_pixels[3];
+    uint16_t parallel_pixels[3];
+    OutOfOrderExecutorState executor_state = { 0U, 0U, 0U };
+    AvifdecExecutor executor = {
+        &executor_state, 4U, out_of_order_parallel_for
+    };
+    AvifdecError error;
+    unsigned int plane;
+
+    make_sato_fixture(&fixture);
+    CHECK(avifdec_query(
+        fixture.data, fixture.size, 0, 0, 0U,
+        &info, &error) == AVIFDEC_OK);
+    CHECK(info.sample_transform_present &&
+          info.sample_transform_input_count == 2U &&
+          info.width == 1U && info.height == 1U &&
+          info.workspace_required <= sizeof(workspace));
+    CHECK(avifdec_query_ex(
+        fixture.data, fixture.size, 0, &executor,
+        0, 0U, &parallel_info, &error) == AVIFDEC_OK);
+    CHECK(parallel_info.workspace_required ==
+          info.workspace_required);
+    avifdec_memory_fill(
+        &serial_image, 0U, sizeof(serial_image));
+    avifdec_memory_fill(
+        &parallel_image, 0U, sizeof(parallel_image));
+    for (plane = 0U; plane < 3U; ++plane) {
+        serial_image.planes[plane] =
+            &serial_pixels[plane];
+        serial_image.strides[plane] = 1U;
+        parallel_image.planes[plane] =
+            &parallel_pixels[plane];
+        parallel_image.strides[plane] = 1U;
+    }
+    CHECK(avifdec_decode(
+        fixture.data, fixture.size, 0,
+        workspace, sizeof(workspace),
+        &serial_image, 0, &error) == AVIFDEC_OK);
+    CHECK(avifdec_decode_ex(
+        fixture.data, fixture.size, 0, &executor,
+        workspace, sizeof(workspace),
+        &parallel_image, 0, &error) == AVIFDEC_OK);
+    CHECK(executor_state.calls == 1U &&
+          executor_state.count == 3U &&
+          executor_state.min_chunk == 1U);
+    for (plane = 0U; plane < 3U; ++plane) {
+        CHECK(serial_pixels[plane] ==
+              parallel_pixels[plane]);
+    }
     return 0;
 }
 
@@ -2890,11 +3182,17 @@ static int test_av1_partition_engine(void) {
 static int test_av1_cdef(void) {
     uint16_t source[16U * 16U];
     uint16_t destination[16U * 16U];
+    uint16_t parallel_destination[16U * 16U];
     Av1BlockCell cells[16];
     Av1BlockState blocks;
     Av1FramePlanes input;
     Av1FramePlanes output;
+    Av1FramePlanes parallel_output;
     Av1CdefParams params;
+    OutOfOrderExecutorState executor_state = { 0U, 0U, 0U };
+    AvifdecExecutor executor = {
+        &executor_state, 4U, out_of_order_parallel_for
+    };
     uint8_t indices[16];
     uint8_t primary[8] = { 8U, 0U, 0U, 0U, 0U, 0U, 0U, 0U };
     uint8_t secondary[8] = { 4U, 0U, 0U, 0U, 0U, 0U, 0U, 0U };
@@ -2940,6 +3238,8 @@ static int test_av1_cdef(void) {
     avifdec_memory_fill(&blocks, 0U, sizeof(blocks));
     avifdec_memory_fill(&input, 0U, sizeof(input));
     avifdec_memory_fill(&output, 0U, sizeof(output));
+    avifdec_memory_fill(
+        &parallel_output, 0U, sizeof(parallel_output));
     avifdec_memory_fill(&params, 0U, sizeof(params));
     avifdec_memory_fill(indices, 0U, sizeof(indices));
     for (row = 0U; row < 16U; ++row) {
@@ -2961,6 +3261,10 @@ static int test_av1_cdef(void) {
     output.stride[0] = 16U;
     output.width[0] = 16U;
     output.height[0] = 16U;
+    parallel_output.data[0] = parallel_destination;
+    parallel_output.stride[0] = 16U;
+    parallel_output.width[0] = 16U;
+    parallel_output.height[0] = 16U;
     params.frame_width = 16U;
     params.frame_height = 16U;
     params.mi_rows = 4U;
@@ -2976,6 +3280,33 @@ static int test_av1_cdef(void) {
     for (row = 0U; row < 16U * 16U; ++row) {
         CHECK(destination[row] == 173U);
     }
+    for (row = 0U; row < 16U; ++row) {
+        for (column = 0U; column < 16U; ++column) {
+            source[row * 16U + column] =
+                (uint16_t)((row * 29U + column * 17U +
+                            ((row ^ column) * 11U)) & 255U);
+            destination[row * 16U + column] = 0U;
+            parallel_destination[row * 16U + column] = 0U;
+        }
+    }
+    CHECK(av1_cdef_frame(
+        &output, &input, &blocks, &params) == AVIFDEC_OK);
+    CHECK(av1_cdef_frame_ex(
+        &parallel_output, &input, &blocks, &params,
+        &executor) == AVIFDEC_OK);
+    CHECK(executor_state.calls == 1U &&
+          executor_state.count == 2U &&
+          executor_state.min_chunk == 1U);
+    for (row = 0U; row < 16U * 16U; ++row) {
+        CHECK(destination[row] ==
+              parallel_destination[row]);
+    }
+    executor_state.calls = 0U;
+    indices[0] = 1U;
+    CHECK(av1_cdef_frame_ex(
+        &parallel_output, &input, &blocks, &params,
+        &executor) == AVIFDEC_INVALID_DATA);
+    CHECK(executor_state.calls == 0U);
     return 0;
 }
 
@@ -3734,6 +4065,8 @@ int main(int argc, char **argv) {
     result = test_avif_query_extents();
     if (result != 0) return result;
     result = test_avif_item_graph();
+    if (result != 0) return result;
+    result = test_avif_sample_transform_executor();
     if (result != 0) return result;
     result = test_av1_obu_errors();
     if (result != 0) return result;
