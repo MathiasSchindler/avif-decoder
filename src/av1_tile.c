@@ -2620,7 +2620,7 @@ static AvifdecStatus av1_tile_decode_mode_block(
             if (delta != 0) {
                 context->current_q_index = av1_tile_clip_int32(
                     1, 255, context->current_q_index +
-                    (delta << config->delta_q_res));
+                    delta * ((int32_t)1 << config->delta_q_res));
             }
             fields.q_index = (uint8_t)context->current_q_index;
         }
@@ -2637,7 +2637,7 @@ static AvifdecStatus av1_tile_decode_mode_block(
                 if (delta != 0) {
                     context->delta_lf[index] = av1_tile_clip_int32(
                         -63, 63, context->delta_lf[index] +
-                        (delta << config->delta_lf_res));
+                        delta * ((int32_t)1 << config->delta_lf_res));
                 }
             }
         }

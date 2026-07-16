@@ -60,7 +60,7 @@ typedef unsigned int wint_t;
 #undef __need_wint_t
 #endif
 
-#define offsetof(type, member) ((size_t)&(((type *)0)->member))
+#define offsetof(type, member) __builtin_offsetof(type, member)
 
 #undef NEWOS_STDDEF_FULL
 

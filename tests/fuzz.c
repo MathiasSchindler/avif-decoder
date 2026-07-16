@@ -12,6 +12,25 @@ static uint16_t fuzz_u[FUZZ_MAX_PIXELS];
 static uint16_t fuzz_v[FUZZ_MAX_PIXELS];
 static uint16_t fuzz_alpha[FUZZ_MAX_PIXELS];
 
+static AvifdecStatus fuzz_parallel_for(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifdecParallelBody body,
+    void *arg) {
+    size_t split;
+    AvifdecStatus tail_status;
+    AvifdecStatus head_status;
+
+    (void)user_data;
+    (void)min_chunk;
+    if (count <= 1U) return body(0U, count, 0U, arg);
+    split = count / 2U;
+    tail_status = body(split, count, 3U, arg);
+    head_status = body(0U, split, 0U, arg);
+    return tail_status != AVIFDEC_OK ? tail_status : head_status;
+}
+
 static void fuzz_prepare_image(
     const AvifdecImageInfo *info, AvifdecImage *image) {
     avifdec_memory_fill(image, 0U, sizeof(*image));
@@ -40,6 +59,9 @@ int LLVMFuzzerTestOneInput(
     AvifdecEntropyTrace trace;
     AvifdecImage image;
     AvifdecError error;
+    const AvifdecExecutor executor = {
+        0, 4U, fuzz_parallel_for
+    };
 
     avifdec_memory_fill(&limits, 0U, sizeof(limits));
     limits.max_width = FUZZ_MAX_DIMENSION;
@@ -53,15 +75,16 @@ int LLVMFuzzerTestOneInput(
 
     (void)avifdec_bmff_inspect(
         data, size, &bmff_limits, 0, 0, &bmff_info, &error);
-    if (avifdec_query(
-            data, size, &limits, 0, 0U, &info, &error) ==
+    if (avifdec_query_ex(
+            data, size, &limits, &executor, 0, 0U,
+            &info, &error) ==
             AVIFDEC_OK &&
         info.width <= FUZZ_MAX_DIMENSION &&
         info.height <= FUZZ_MAX_DIMENSION &&
         info.workspace_required <= FUZZ_WORKSPACE_SIZE) {
         fuzz_prepare_image(&info, &image);
-        (void)avifdec_decode(
-            data, size, &limits, fuzz_workspace,
+        (void)avifdec_decode_ex(
+            data, size, &limits, &executor, fuzz_workspace,
             info.workspace_required, &image, &trace, &error);
     }
     if (avifdec_sequence_query(

@@ -371,7 +371,9 @@ are never linked into `avifdec`.
 
 A hosted coverage-guided harness is available at
 [`tests/fuzz.c`](tests/fuzz.c) for Clang
-`-fsanitize=fuzzer,address,undefined` campaigns.
+`-fsanitize=fuzzer,address,undefined` campaigns. The harness uses a
+deterministic out-of-order four-worker executor so valid multi-tile inputs also
+exercise executor workspace planning and ordered parallel commits.
 
 ## Known limitations
 

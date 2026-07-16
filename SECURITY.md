@@ -20,6 +20,9 @@ freestanding operation do not imply security or correctness.
 Malformed AVIF, ISOBMFF, AV1, metadata, or image data may expose parser errors,
 resource-exhaustion issues, memory-safety bugs, incorrect validation, or other
 unexpected behavior. The project has not received a production security audit.
+Count-bearing container loops are bounded by configured limits or by the
+minimum bytes remaining for each entry. Reader failure terminates the active
+loop immediately rather than continuing with zero-valued reads.
 
 Optional threading adds worker-stack requirements. Grid threading also
 multiplies decoder workspace by the selected width; sample-transform and CDEF

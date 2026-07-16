@@ -1678,6 +1678,7 @@ typedef struct {
     size_t iloc_extent_offset2;
     size_t ispe_width;
     size_t av1c_profile_level;
+    size_t ipma_entry_count;
     size_t ipma_property;
     size_t pixi_depth;
     size_t mdat_payload;
@@ -1818,6 +1819,7 @@ static void make_query_fixture(QueryFixture *fixture, int use_idat, int multiple
     fixture_box_end(fixture, ipco);
     box = fixture_box_begin(fixture, AVIFDEC_FOURCC('i', 'p', 'm', 'a'));
     fixture_full_box(fixture, 0U, 0U);
+    fixture->ipma_entry_count = fixture->size;
     fixture_u32(fixture, 1U);
     fixture_u16(fixture, 1U);
     fixture->data[fixture->size++] = 3U;
@@ -2227,6 +2229,15 @@ static int test_avif_query_extents(void) {
     fixture.data[fixture.ispe_width + 3U] = 2U;
     CHECK(avifdec_query(fixture.data, fixture.size, 0, spans, 2U, &info, &error) == AVIFDEC_INVALID_DATA);
     fixture.data[fixture.ispe_width + 3U] = 1U;
+    fixture.data[fixture.ipma_entry_count] = 0xf7U;
+    fixture.data[fixture.ipma_entry_count + 1U] = 0U;
+    fixture.data[fixture.ipma_entry_count + 2U] = 0U;
+    fixture.data[fixture.ipma_entry_count + 3U] = 1U;
+    CHECK(avifdec_query(
+              fixture.data, fixture.size, 0, spans, 2U,
+              &info, &error) == AVIFDEC_TRUNCATED);
+    fixture.data[fixture.ipma_entry_count] = 0U;
+    fixture.data[fixture.ipma_entry_count + 3U] = 1U;
     fixture.data[fixture.ipma_property] = 0x84U;
     CHECK(avifdec_query(fixture.data, fixture.size, 0, spans, 2U, &info, &error) == AVIFDEC_UNSUPPORTED);
     return 0;

@@ -492,6 +492,7 @@ static AvifdecStatus avif_parse_associations(AvifContext *context) {
         uint32_t flags;
         uint32_t entry_count;
         uint32_t entry_index;
+        size_t minimum_entry_size;
         int valid;
 
         version = avif_full_box_version(context->data, box, &valid);
@@ -507,18 +508,34 @@ static AvifdecStatus avif_parse_associations(AvifContext *context) {
                                  box->payload_size - 4U,
                                  box->payload_offset + 4U);
         entry_count = avifdec_byte_reader_u32be(&reader);
-        for (entry_index = 0U; entry_index < entry_count; ++entry_index) {
+        minimum_entry_size = version == 0U ? 3U : 5U;
+        if (reader.status != AVIFDEC_OK ||
+            entry_count >
+                avifdec_byte_reader_remaining(&reader) /
+                    minimum_entry_size) {
+            return avif_fail(
+                context, AVIFDEC_TRUNCATED,
+                avifdec_byte_reader_offset(&reader), box->type);
+        }
+        for (entry_index = 0U;
+             entry_index < entry_count && reader.status == AVIFDEC_OK;
+             ++entry_index) {
             uint32_t item_id = version == 0U ? (uint32_t)avifdec_byte_reader_u16be(&reader)
                                              : avifdec_byte_reader_u32be(&reader);
             uint8_t association_count = avifdec_byte_reader_u8(&reader);
             uint8_t association_index;
 
-            for (association_index = 0U; association_index < association_count; ++association_index) {
+            if (reader.status != AVIFDEC_OK) break;
+            for (association_index = 0U;
+                 association_index < association_count &&
+                     reader.status == AVIFDEC_OK;
+                 ++association_index) {
                 uint16_t value = (flags & 1U) != 0U ? avifdec_byte_reader_u16be(&reader)
                                                     : (uint16_t)avifdec_byte_reader_u8(&reader);
                 unsigned int essential_bit = (flags & 1U) != 0U ? 15U : 7U;
                 uint16_t property_index = (uint16_t)(value & ((1U << essential_bit) - 1U));
 
+                if (reader.status != AVIFDEC_OK) break;
                 if (property_index == 0U) continue;
                 if (property_index > context->property_count) {
                     return avif_fail(context, AVIFDEC_INVALID_DATA,
