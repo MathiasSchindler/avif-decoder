@@ -136,9 +136,11 @@ perl -e '
     my $ipco = index($data, "ipco") - 4;
     my $ipma = index($data, "ipma") - 4;
     my $iloc = index($data, "iloc") - 4;
+    my $ispe = index($data, "ispe") - 4;
     die "unexpected progressive layout\n"
         if $meta < 0 || $iprp < 0 || $ipco < 0 ||
-           $ipma < 0 || $iloc < 0;
+           $ipma < 0 || $iloc < 0 || $ispe < 0 ||
+           read32($ispe + 12) != 128 || read32($ispe + 16) != 128;
     write32($meta, read32($meta) + 11);
     write32($iprp, read32($iprp) + 11);
     write32($ipco, read32($ipco) + 10);
@@ -162,6 +164,8 @@ perl -e '
     substr($data, $ipma + $old_ipma_size, 0) = chr(0x80 | 6);
     write32($ipma, $old_ipma_size + 1);
     substr($data, $ipma, 0) = $lsel;
+    write32($ispe + 12, 64);
+    write32($ispe + 16, 64);
     print $data;
 ' "$work/progressive.avif" > "$work/progressive-layer0.avif"
 "$decoder" --raw "$work/progressive-layer0.avif" \
@@ -175,6 +179,10 @@ ffmpeg -hide_banner -loglevel error \
 cmp "$work/progressive-layer0-reference.yuv" \
     "$work/progressive-layer0-ours.yuv"
 output=$("$decoder" "$work/progressive-layer0.avif")
+printf '%s\n' "$output" | grep -q '^width=64$'
+printf '%s\n' "$output" | grep -q '^height=64$'
+printf '%s\n' "$output" | grep -q '^render_width=128$'
+printf '%s\n' "$output" | grep -q '^render_height=128$'
 printf '%s\n' "$output" | grep -q '^layer_count=2$'
 printf '%s\n' "$output" | grep -q '^selected_layer=0$'
 

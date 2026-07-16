@@ -36,6 +36,14 @@ Run the complete test suite with:
 make test
 ```
 
+The decoder has no runtime dependencies. The integration tests additionally
+expect `ffmpeg`, `ffprobe`, `avifenc`, `avifdec`, `aomenc`, `magick`, and
+`perl` on `PATH`. On macOS, install the non-system test tools with:
+
+```sh
+brew install ffmpeg libavif aom imagemagick
+```
+
 The generated-table reproduction checks run when the ignored
 `docs/av1.html` specification file is available. Without that maintainer
 input, `make test` reports the skipped check and runs the rest of the suite.
