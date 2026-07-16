@@ -595,7 +595,7 @@ AvifdecStatus av1_mv_stack_add(Av1MvStack *stack,
         }
     }
     if (stack->count == AV1_MAX_MV_STACK_SIZE) {
-        return AVIFDEC_LIMIT_EXCEEDED;
+        return AVIFDEC_OK;
     }
     stack->candidates[stack->count].mv[0] = first;
     stack->candidates[stack->count].mv[1] = second;

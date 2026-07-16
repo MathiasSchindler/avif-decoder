@@ -7,7 +7,7 @@
 
 AvifdecStatus av1_tile_read_skip(Av1SymbolDecoder *decoder,
                                  Av1TileCdfs *cdfs,
-                                 const Av1BlockState *state,
+                       const Av1BlockState *state,
                                  const Av1BlockAvailability *availability,
                                  uint32_t row,
                                  uint32_t column,
@@ -937,6 +937,8 @@ static AvifdecStatus av1_tile_global_mv(
 }
 
 static AvifdecStatus av1_tile_add_neighbor_mv(
+    const Av1TileModeConfig *config,
+    const Av1MotionVector global[2],
     Av1MvStack *stack,
     const Av1BlockCell *neighbor,
     const Av1BlockTraceFields *fields,
@@ -944,20 +946,31 @@ static AvifdecStatus av1_tile_add_neighbor_mv(
     uint16_t weight) {
     Av1MotionVector first;
     Av1MotionVector second;
+    int global_neighbor;
     unsigned int list;
 
-    if (neighbor == 0 || !neighbor->is_inter) return AVIFDEC_OK;
+    if (config == 0 || global == 0 || neighbor == 0 || !neighbor->is_inter) {
+        return AVIFDEC_OK;
+    }
+    global_neighbor =
+        (neighbor->y_mode == 15U || neighbor->y_mode == 23U) &&
+        neighbor->width >= 2U && neighbor->height >= 2U;
     if (compound) {
         if (neighbor->ref_frame[0] != fields->ref_frame[0] ||
             neighbor->ref_frame[1] != fields->ref_frame[1]) {
             return AVIFDEC_OK;
         }
-        return av1_mv_stack_add(stack, neighbor->mv[0], neighbor->mv[1],
-                    1, weight);
+        first = global_neighbor && config->gm_type[fields->ref_frame[0] - 1U] > 1U
+                ? global[0] : neighbor->mv[0];
+        second = global_neighbor && config->gm_type[fields->ref_frame[1] - 1U] > 1U
+                 ? global[1] : neighbor->mv[1];
+        return av1_mv_stack_add(stack, first, second, 1, weight);
     }
     for (list = 0U; list < 2U; ++list) {
         if (neighbor->ref_frame[list] == fields->ref_frame[0]) {
-            first = neighbor->mv[list];
+            first = global_neighbor &&
+                    config->gm_type[fields->ref_frame[0] - 1U] > 1U
+                    ? global[0] : neighbor->mv[list];
             second.row = 0;
             second.column = 0;
             return av1_mv_stack_add(stack, first, second, 0, weight);
@@ -1290,6 +1303,10 @@ static AvifdecStatus av1_tile_find_mv_stack(
     int compound = fields->ref_frame[1] > 0U;
     uint8_t nearest_count;
     uint8_t found_count;
+    uint32_t row_adjust;
+    uint32_t column_adjust;
+    uint32_t max_row_distance;
+    uint32_t max_column_distance;
     uint32_t offset;
     AvifdecStatus status;
 
@@ -1315,7 +1332,7 @@ static AvifdecStatus av1_tile_find_mv_stack(
                 overlap = fields->width - offset;
             }
             status = av1_tile_add_neighbor_mv(
-                stack, neighbor, fields, compound,
+                config, global, stack, neighbor, fields, compound,
                 (uint16_t)(2U * overlap));
             if (status != AVIFDEC_OK) return status;
             offset += overlap;
@@ -1333,7 +1350,7 @@ static AvifdecStatus av1_tile_find_mv_stack(
                 overlap = fields->height - offset;
             }
             status = av1_tile_add_neighbor_mv(
-                stack, neighbor, fields, compound,
+                config, global, stack, neighbor, fields, compound,
                 (uint16_t)(2U * overlap));
             if (status != AVIFDEC_OK) return status;
             offset += overlap;
@@ -1343,8 +1360,9 @@ static AvifdecStatus av1_tile_find_mv_stack(
         fields->column + fields->width <
             config->block_state->tile_column_end) {
         status = av1_tile_add_neighbor_mv(
-            stack, av1_block_cell(config->block_state, fields->row - 1U,
-                                  fields->column + fields->width),
+            config, global, stack,
+            av1_block_cell(config->block_state, fields->row - 1U,
+                           fields->column + fields->width),
             fields, compound, 4U);
         if (status != AVIFDEC_OK) return status;
     }
@@ -1352,7 +1370,6 @@ static AvifdecStatus av1_tile_find_mv_stack(
         stack->candidates[offset].weight = (uint16_t)
             (stack->candidates[offset].weight + 640U);
     }
-    av1_mv_stack_sort(stack, 0U);
     nearest_count = stack->count;
     if (config->use_ref_frame_mvs) {
         uint32_t row_step = fields->height >= 16U ? 4U : 2U;
@@ -1376,22 +1393,31 @@ static AvifdecStatus av1_tile_find_mv_stack(
     if (fields->row > config->block_state->tile_row_start &&
         fields->column > config->block_state->tile_column_start) {
         status = av1_tile_add_neighbor_mv(
-            stack, av1_block_cell(config->block_state, fields->row - 1U,
-                                  fields->column - 1U),
+            config, global, stack,
+            av1_block_cell(config->block_state, fields->row - 1U,
+                           fields->column - 1U),
             fields, compound, 4U);
         if (status != AVIFDEC_OK) return status;
     }
-    for (offset = 3U; offset <= 5U; offset += 2U) {
+    row_adjust = fields->height < 2U && (fields->row & 1U) != 0U;
+    column_adjust = fields->width < 2U && (fields->column & 1U) != 0U;
+    max_row_distance = (fields->height < 2U ? 4U : 6U) - row_adjust;
+    max_column_distance =
+        (fields->width < 2U ? 4U : 6U) - column_adjust;
+    for (offset = 2U; offset <= 3U; ++offset) {
+        uint32_t row_distance = 2U * offset - 1U - row_adjust;
+        uint32_t column_distance = 2U * offset - 1U - column_adjust;
         uint32_t scan;
         uint32_t start;
 
-        if ((offset != 5U || fields->height > 1U) &&
-            fields->row >= config->block_state->tile_row_start + offset) {
+        if (row_distance <= max_row_distance &&
+            fields->row >=
+                config->block_state->tile_row_start + row_distance) {
             start = fields->width < 2U && (fields->column & 1U) != 0U
                     ? 0U : 1U;
             for (scan = 0U; scan < fields->width;) {
                 const Av1BlockCell *neighbor = av1_block_cell(
-                    config->block_state, fields->row - offset,
+                    config->block_state, fields->row - row_distance,
                     fields->column + start + scan);
                 uint32_t step = neighbor != 0 && neighbor->width != 0U
                                 ? neighbor->width : 1U;
@@ -1399,28 +1425,28 @@ static AvifdecStatus av1_tile_find_mv_stack(
                 if (step > fields->width) step = fields->width;
                 if (step < 2U) step = 2U;
                 status = av1_tile_add_neighbor_mv(
-                    stack, neighbor, fields, compound,
+                    config, global, stack, neighbor, fields, compound,
                     (uint16_t)(2U * step));
                 if (status != AVIFDEC_OK) return status;
                 scan += step;
             }
         }
-        if ((offset != 5U || fields->width > 1U) &&
+        if (column_distance <= max_column_distance &&
             fields->column >=
-                config->block_state->tile_column_start + offset) {
+                config->block_state->tile_column_start + column_distance) {
             start = fields->height < 2U && (fields->row & 1U) != 0U
                     ? 0U : 1U;
             for (scan = 0U; scan < fields->height;) {
                 const Av1BlockCell *neighbor = av1_block_cell(
                     config->block_state, fields->row + start + scan,
-                    fields->column - offset);
+                    fields->column - column_distance);
                 uint32_t step = neighbor != 0 && neighbor->height != 0U
                                 ? neighbor->height : 1U;
 
                 if (step > fields->height) step = fields->height;
                 if (step < 2U) step = 2U;
                 status = av1_tile_add_neighbor_mv(
-                    stack, neighbor, fields, compound,
+                    config, global, stack, neighbor, fields, compound,
                     (uint16_t)(2U * step));
                 if (status != AVIFDEC_OK) return status;
                 scan += step;
@@ -1540,6 +1566,10 @@ static void av1_tile_mode_contexts(
     unsigned int new_count = 0U;
     unsigned int nearest_matches;
     unsigned int total_matches;
+    uint32_t row_adjust;
+    uint32_t column_adjust;
+    uint32_t max_row_distance;
+    uint32_t max_column_distance;
     uint32_t offset;
 
     if (availability->above) {
@@ -1596,17 +1626,25 @@ static void av1_tile_mode_contexts(
             fields, 1,
             &row_match, &column_match, 0);
     }
-    for (offset = 3U; offset <= 5U; offset += 2U) {
+    row_adjust = fields->height < 2U && (fields->row & 1U) != 0U;
+    column_adjust = fields->width < 2U && (fields->column & 1U) != 0U;
+    max_row_distance = (fields->height < 2U ? 4U : 6U) - row_adjust;
+    max_column_distance =
+        (fields->width < 2U ? 4U : 6U) - column_adjust;
+    for (offset = 2U; offset <= 3U; ++offset) {
+        uint32_t row_distance = 2U * offset - 1U - row_adjust;
+        uint32_t column_distance = 2U * offset - 1U - column_adjust;
         uint32_t scan;
         uint32_t start;
 
-        if ((offset != 5U || fields->height > 1U) &&
-            fields->row >= config->block_state->tile_row_start + offset) {
+        if (row_distance <= max_row_distance &&
+            fields->row >=
+                config->block_state->tile_row_start + row_distance) {
             start = fields->width < 2U && (fields->column & 1U) != 0U
                     ? 0U : 1U;
             for (scan = 0U; scan < fields->width;) {
                 const Av1BlockCell *neighbor = av1_block_cell(
-                    config->block_state, fields->row - offset,
+                    config->block_state, fields->row - row_distance,
                     fields->column + start + scan);
                 uint32_t step = neighbor != 0 && neighbor->width != 0U
                                 ? neighbor->width : 1U;
@@ -1619,15 +1657,15 @@ static void av1_tile_mode_contexts(
                 scan += step;
             }
         }
-        if ((offset != 5U || fields->width > 1U) &&
+        if (column_distance <= max_column_distance &&
             fields->column >=
-                config->block_state->tile_column_start + offset) {
+                config->block_state->tile_column_start + column_distance) {
             start = fields->height < 2U && (fields->row & 1U) != 0U
                     ? 0U : 1U;
             for (scan = 0U; scan < fields->height;) {
                 const Av1BlockCell *neighbor = av1_block_cell(
                     config->block_state, fields->row + start + scan,
-                    fields->column - offset);
+                    fields->column - column_distance);
                 uint32_t step = neighbor != 0 && neighbor->height != 0U
                                 ? neighbor->height : 1U;
 
@@ -2656,7 +2694,10 @@ static AvifdecStatus av1_tile_decode_mode_block(
         }
         if (availability.has_chroma) {
             cfl_allowed = fields.lossless
-                          ? width == 1U && height == 1U
+                  ? width <= ((uint32_t)1U <<
+                          config->block_state->subsampling_x) &&
+                    height <= ((uint32_t)1U <<
+                           config->block_state->subsampling_y)
                           : width <= 8U && height <= 8U;
             fields.uv_mode = (uint8_t)av1_symbol_read(
                 decoder,

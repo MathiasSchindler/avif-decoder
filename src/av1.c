@@ -2859,8 +2859,10 @@ static AvifdecStatus av1_parse_frame_header(Av1Bits *bits,
     return bits->status;
 }
 
-AvifdecStatus avifdec_av1_workspace_requirement(
+static AvifdecStatus av1_workspace_requirement(
     const AvifdecImageInfo *info,
+    uint32_t width,
+    uint32_t height,
     size_t *required) {
     size_t pixels;
     size_t tile_workspace;
@@ -2871,17 +2873,16 @@ AvifdecStatus avifdec_av1_workspace_requirement(
     size_t plane_workspace;
     size_t result;
 
-    if (info == 0 || required == 0 || info->width == 0U ||
-        info->height == 0U ||
+    if (info == 0 || required == 0 || width == 0U || height == 0U ||
         (info->superblock_size != 64U &&
          info->superblock_size != 128U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
-    if (!avifdec_size_multiply(info->width, info->height, &pixels) ||
+    if (!avifdec_size_multiply(width, height, &pixels) ||
         !avifdec_size_align(
-            info->width, info->superblock_size, &padded_width) ||
+            width, info->superblock_size, &padded_width) ||
         !avifdec_size_align(
-            info->height, info->superblock_size, &padded_height) ||
+            height, info->superblock_size, &padded_height) ||
         !avifdec_size_multiply(
             padded_width, padded_height, &plane_samples)) {
         return AVIFDEC_OVERFLOW;
@@ -2907,7 +2908,7 @@ AvifdecStatus avifdec_av1_workspace_requirement(
         !avifdec_size_multiply(
             result, info->monochrome ? 2U : 6U, &result) ||
         av1_tile_workspace_requirement(
-            info->width, info->height, &tile_workspace) != AVIFDEC_OK ||
+            width, height, &tile_workspace) != AVIFDEC_OK ||
         !avifdec_size_add(result, tile_workspace, &result) ||
         !avifdec_size_add(
             result, 6144U * sizeof(int32_t) + _Alignof(int32_t) - 1U,
@@ -2925,7 +2926,7 @@ AvifdecStatus avifdec_av1_workspace_requirement(
     if (info->film_grain_params_present) {
         size_t film_grain_scratch = 0U;
 
-        if (av1_film_grain_scratch_size(info->width, &film_grain_scratch) !=
+        if (av1_film_grain_scratch_size(width, &film_grain_scratch) !=
                 AVIFDEC_OK ||
             !avifdec_size_add(
                 result, film_grain_scratch + _Alignof(int16_t) - 1U,
@@ -2935,6 +2936,14 @@ AvifdecStatus avifdec_av1_workspace_requirement(
     }
     *required = result;
     return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_av1_workspace_requirement(
+    const AvifdecImageInfo *info,
+    size_t *required) {
+    if (info == 0) return AVIFDEC_INVALID_ARGUMENT;
+    return av1_workspace_requirement(
+        info, info->width, info->height, required);
 }
 
 static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
@@ -3411,6 +3420,8 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                sequence.chroma_sample_position !=
                    info->chroma_sample_position ||
                (!select_spatial_layer &&
+                sequence.operating_point_idc[
+                    sequence.selected_operating_point] == 0U &&
                 (sequence.max_width != info->width ||
                  sequence.max_height != info->height)) ||
                frame.upscaled_width != info->width ||
@@ -3492,8 +3503,9 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     info->tile_rows = frame.tile_rows;
     if (info->workspace_required == 0U) {
         AvifdecStatus requirement_status =
-            avifdec_av1_workspace_requirement(
-            info, &info->workspace_required);
+            av1_workspace_requirement(
+                info, sequence.max_width, sequence.max_height,
+                &info->workspace_required);
         if (requirement_status != AVIFDEC_OK) {
             return av1_fail(
                 error, requirement_status,

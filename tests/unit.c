@@ -119,6 +119,7 @@ static int test_av1_motion_vectors(void) {
     Av1MotionVector projected;
     Av1MvStack stack;
     int32_t global_params[6] = { 65536, -131072, 65536, 0, 0, 65536 };
+    unsigned int index;
 
     mv.row = 96;
     mv.column = -64;
@@ -158,6 +159,15 @@ static int test_av1_motion_vectors(void) {
     av1_mv_stack_sort(&stack, 0U);
     CHECK(stack.candidates[0].weight == 11U &&
           stack.candidates[0].mv[0].row == 8);
+    avifdec_memory_fill(&stack, 0U, sizeof(stack));
+    for (index = 0U; index < AV1_MAX_MV_STACK_SIZE; ++index) {
+        mv.row = (int32_t)index;
+        mv.column = 0;
+        CHECK(av1_mv_stack_add(&stack, mv, projected, 0, 1U) == AVIFDEC_OK);
+    }
+    mv.row = (int32_t)AV1_MAX_MV_STACK_SIZE;
+    CHECK(av1_mv_stack_add(&stack, mv, projected, 0, 1U) == AVIFDEC_OK);
+    CHECK(stack.count == AV1_MAX_MV_STACK_SIZE);
     return 0;
 }
 
@@ -3376,6 +3386,44 @@ static int test_av1_loop_restoration(void) {
             force_partition_symbol(frame_cdfs.partition.width32, 10U,
                              AV1_PARTITION_SPLIT);
             force_partition_symbol(frame_cdfs.partition.width16, 10U,
+                             AV1_PARTITION_SPLIT);
+            force_cdf_symbol(frame_cdfs.partition.width8[0], 4U,
+                             AV1_PARTITION_NONE);
+            force_cdf_symbol(frame_cdfs.partition.width8[1], 4U,
+                             AV1_PARTITION_NONE);
+            force_cdf_symbol(frame_cdfs.partition.width8[2], 4U,
+                             AV1_PARTITION_NONE);
+            force_cdf_symbol(frame_cdfs.partition.width8[3], 4U,
+                             AV1_PARTITION_NONE);
+            force_key_y_mode(&frame_cdfs, 0U);
+            force_cdf_symbol(frame_cdfs.intra.uv_mode_cfl_allowed[0],
+                         AV1_UV_INTRA_MODES_CFL_ALLOWED, 13U);
+            force_cdf_symbol(frame_cdfs.intra.cfl_sign,
+                         AV1_CFL_JOINT_SIGNS, 7U);
+            force_cdf_symbol(frame_cdfs.intra.cfl_alpha[5],
+                         AV1_CFL_ALPHABET_SIZE, 0U);
+            mode_config.lossless = 1U;
+            mode_config.tx_mode = 0U;
+            CHECK(av1_tile_decode_modes(
+                    &partition_config, &mode_config, &frame_cdfs, &tile_cdfs,
+                    &partition_trace) == AVIFDEC_IO_ERROR);
+            CHECK(boundary.calls == 1U && boundary.block.width == 2U &&
+                boundary.block.height == 2U && boundary.block.lossless == 1U &&
+                boundary.block.uv_mode == 13U &&
+                boundary.block.cfl_alpha_u == 1 && boundary.block.cfl_alpha_v == 1);
+
+            av1_block_state_init(&block_state, 16U, 16U, cells,
+                           16U * 16U, 0, 1, 1);
+            av1_block_trace_init(&block_trace);
+            av1_tile_cdfs_init(&frame_cdfs);
+            avifdec_memory_fill(widths, 0U, sizeof(widths));
+            avifdec_memory_fill(heights, 0U, sizeof(heights));
+            avifdec_memory_fill(&boundary, 0U, sizeof(boundary));
+            force_partition_symbol(frame_cdfs.partition.width64, 10U,
+                             AV1_PARTITION_SPLIT);
+            force_partition_symbol(frame_cdfs.partition.width32, 10U,
+                             AV1_PARTITION_SPLIT);
+            force_partition_symbol(frame_cdfs.partition.width16, 10U,
                              AV1_PARTITION_NONE);
             force_key_y_mode(&frame_cdfs, 0U);
             force_cdf_symbol(frame_cdfs.intra.uv_mode_cfl_allowed[0],
@@ -3386,6 +3434,7 @@ static int test_av1_loop_restoration(void) {
                          AV1_CFL_ALPHABET_SIZE, 0U);
             force_cdf_symbol(frame_cdfs.intra.filter_intra[6], 2U, 1U);
             force_cdf_symbol(frame_cdfs.intra.filter_intra_mode, 5U, 4U);
+            mode_config.lossless = 0U;
             mode_config.tx_mode = 1U;
             mode_config.enable_filter_intra = 1U;
             CHECK(av1_tile_decode_modes(

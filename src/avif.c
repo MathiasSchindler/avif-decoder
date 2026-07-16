@@ -1288,8 +1288,12 @@ static AvifdecStatus avif_add_direct_workspace(
     AvifContext *context,
     AvifdecImageInfo *info) {
     size_t span_workspace;
-    AvifdecStatus status = avifdec_av1_workspace_requirement(
-        info, &info->workspace_required);
+    AvifdecStatus status = AVIFDEC_OK;
+
+    if (info->workspace_required == 0U) {
+        status = avifdec_av1_workspace_requirement(
+            info, &info->workspace_required);
+    }
 
     if (status != AVIFDEC_OK ||
         !avifdec_size_multiply(
