@@ -36,6 +36,11 @@ AvifdecStatus av1_loop_filter_sample(uint16_t *q0,
 AvifdecStatus av1_loop_filter_frame(Av1FramePlanes *planes,
                                     const Av1BlockState *blocks,
                                     const Av1LoopFilterParams *params);
+AvifdecStatus av1_loop_filter_frame_ex(
+    Av1FramePlanes *planes,
+    const Av1BlockState *blocks,
+    const Av1LoopFilterParams *params,
+    const AvifdecExecutor *executor);
 
 typedef struct {
     uint32_t frame_width;
@@ -81,6 +86,17 @@ AvifdecStatus av1_superres_upscale_plane(uint16_t *output,
                                          uint32_t padded_input_width,
                                          uint32_t height,
                                          uint8_t bit_depth);
+AvifdecStatus av1_superres_upscale_plane_ex(
+    uint16_t *output,
+    size_t output_stride,
+    uint32_t output_width,
+    const uint16_t *input,
+    size_t input_stride,
+    uint32_t input_width,
+    uint32_t padded_input_width,
+    uint32_t height,
+    uint8_t bit_depth,
+    const AvifdecExecutor *executor);
 
 AvifdecStatus av1_loop_restoration_frame(
     Av1FramePlanes *output,

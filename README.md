@@ -56,9 +56,11 @@ input, `make test` reports the skipped check and runs the rest of the suite.
 Makefile interface.
 
 The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
-tiles, AV1 bitstream tiles, sample-transform output rows, and AV1 CDEF row
-units through the imported newos clone/futex task-pool substrate. AV1
-restoration copying and filtering use the same row-unit executor:
+tiles, AV1 bitstream tiles, sample-transform output rows, loop-filter
+row/column units, CDEF/restoration row units, super-resolution rows,
+film-grain stripes, frame copies, and diagnostic plane checksums through the
+imported newos clone/futex task-pool substrate. Indexed sequence frames use
+the same executor while retaining ordered inter-frame reconstruction:
 
 ```sh
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
@@ -66,7 +68,7 @@ build/x86_64/avifdec --png grid.avif grid.png --workers 4
 ```
 
 The default is one worker. `--workers 0` selects the available CPU count,
-capped by the available tile, plane-row, or CDEF-row work and 32 workers.
+capped by the available work and 32 workers.
 One `--workers N` pair may appear anywhere in the command line. For packed
 RGB/RGBA output, the CLI also reuses the pool to convert presentation rows.
 Streaming PNG converts bounded batches of up to 64 rows in parallel before
@@ -280,25 +282,31 @@ fixed-Huffman filter-0 stream from an existing packed image.
 `avifdec_trace()` performs full decoding without caller output planes and
 returns deterministic syntax and reconstruction checksums.
 
-`avifdec_query_ex()` and `avifdec_decode_ex()` accept an optional
-`AvifdecExecutor`. The executor is a structured `parallel_for` callback owned
-by the caller; the decoder still performs no allocation and retains no thread
-state. The current parallel regions cover independent tiles of a top-level
-primary grid, independent AV1 bitstream tiles, independent output rows of a
-primary sample transform, and two-mi-row CDEF units plus four-luma-row
-restoration units in a direct primary AV1 item. Sample-transform input images
-remain serial. Nested derived images, auxiliary alpha, sequences, loop
-filtering, and super-resolution remain serial. The core RGB conversion API is
-row-addressable but does not own an executor; the CLI parallelizes those rows
-after decode.
+`avifdec_query_ex()`, `avifdec_trace_ex()`, and `avifdec_decode_ex()` accept
+an optional `AvifdecExecutor`. The executor is a structured `parallel_for`
+callback owned by the caller; the decoder still performs no allocation and
+retains no thread state. The current parallel regions cover independent tiles
+of a top-level primary grid, independent AV1 bitstream tiles, independent
+output rows of a primary sample transform, vertical loop-filter mi rows,
+horizontal loop-filter mi columns, two-mi-row CDEF units, super-resolution
+rows, four-luma-row
+restoration units, frame-plane copies, per-plane trace checksums, and
+film-grain stripes. Sequence frames remain ordered, but each replayed frame
+can use these AV1 regions through the sequence `_ex` APIs. Sample-transform
+input images, nested derived images, and auxiliary alpha remain serial. The
+core RGB conversion API is row-addressable but does not own an executor; the
+CLI parallelizes those rows after decode.
 
 Parallel grid query results include one copied parser context, tile buffer,
-and child decoder workspace per executor worker. Sample-transform row
-parallelism, CDEF row parallelism, and restoration row parallelism add no
-decoder workspace. Direct AV1 tile threading adds bounded entropy,
-coefficient-context, prediction, and transform scratch per additional active
-worker, but shares frame planes and block grids. Callers must use the workspace
-requirement returned for the same executor width used during decoding.
+and child decoder workspace per executor worker. Sample-transform, loop-
+filter, CDEF, super-resolution, restoration, copy, and checksum parallelism
+add no decoder workspace. Direct AV1 tile threading adds bounded entropy,
+coefficient-context, prediction, and transform scratch per advertised worker,
+but shares frame planes and block grids. Film grain adds one private
+current/previous stripe pair per additional worker:
+`2 * 34 * (width + 64) * sizeof(int16_t)` bytes. Callers must use the
+workspace requirement returned for the same executor width used during
+decoding.
 
 ### Image sequences
 
@@ -308,6 +316,10 @@ Use:
 - `avifdec_sequence_frame_query()` for one frame's format, timing, sync point,
   and workspace requirement;
 - `avifdec_sequence_decode_frame()` for indexed decoding.
+
+The corresponding `_ex` functions accept an `AvifdecExecutor`.
+`avifdec_sequence_query_ex()` sizes one allocation across every sync group, so
+it remains valid for any frame decoded with the same executor width.
 
 Decoding frame *N* starts from its nearest preceding sync sample and processes
 all required samples through *N*. This reconstructs reference-dependent frames
@@ -395,9 +407,9 @@ exercise executor workspace planning and ordered parallel commits.
 - ICC color transforms and transfer-function conversion are not applied.
 - Sequence edit lists are restricted to the normal single-entry form.
 - Sequence track matrices must be identity.
-- Internal parallel decoding is currently limited to top-level AVIF grids,
-  primary sample-transform output rows, and direct-primary AV1 CDEF and
-  restoration rows.
+- Sample-transform input images, nested derived images, and auxiliary alpha
+  decoding remain serial. Sequence frames are replayed in decode order even
+  though each frame's independent AV1 regions can run in parallel.
 
 ## License and authorship
 

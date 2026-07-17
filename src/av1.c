@@ -732,18 +732,138 @@ static void av1_store_current_motion(
     }
 }
 
+/*
+ * Shared executor-aware helpers for row/plane-independent copy work.
+ *
+ * Each helper packages a small, stack-resident description of disjoint
+ * per-plane (or flat-array) copy ranges and dispatches it across
+ * state->executor when profitable, falling back to an equivalent serial
+ * copy otherwise. Callers validate shapes before building a plan; the
+ * dispatched range functions only validate the parallel range itself,
+ * matching the defensive checks used by the other executor-aware stages
+ * in this file (see av1_cdef_filter_ranges / av1_restoration_filter_ranges
+ * in av1_cdef.c / av1_restoration_filter.c). None of these helpers retain
+ * the executor or allocate decoder workspace; the plan structures are
+ * fixed-size (bounded by the 3 planes a frame can have) and live on the
+ * caller's stack for the duration of a single synchronous dispatch.
+ */
+typedef struct {
+    uint16_t *dst_data[3];
+    size_t dst_stride[3];
+    const uint16_t *src_data[3];
+    size_t src_stride[3];
+    uint32_t width[3];
+    size_t row_offset[4];
+    unsigned int plane_count;
+} Av1PlaneCopyPlan;
+
+static AvifdecStatus av1_plane_copy_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    const Av1PlaneCopyPlan *plan = (const Av1PlaneCopyPlan *)arg;
+    unsigned int plane;
+
+    (void)worker_index;
+    if (plan == 0 || begin > end ||
+        end > plan->row_offset[plan->plane_count]) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    for (plane = 0U; plane < plan->plane_count; ++plane) {
+        size_t plane_begin = plan->row_offset[plane];
+        size_t plane_end = plan->row_offset[plane + 1U];
+        size_t range_begin = begin > plane_begin ? begin : plane_begin;
+        size_t range_end = end < plane_end ? end : plane_end;
+        size_t row;
+
+        for (row = range_begin; row < range_end; ++row) {
+            size_t plane_row = row - plane_begin;
+
+            avifdec_memory_copy(
+                plan->dst_data[plane] +
+                    plane_row * plan->dst_stride[plane],
+                plan->src_data[plane] +
+                    plane_row * plan->src_stride[plane],
+                (size_t)plan->width[plane] * sizeof(uint16_t));
+        }
+    }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus av1_plane_copy_dispatch(
+    const AvifdecExecutor *executor,
+    Av1PlaneCopyPlan *plan) {
+    size_t total_rows = plan->row_offset[plan->plane_count];
+
+    if (total_rows == 0U) return AVIFDEC_OK;
+    if (executor != 0 && executor->worker_count > 1U && total_rows > 1U) {
+        return executor->parallel_for(
+            executor->user_data, total_rows, 1U,
+            av1_plane_copy_range, plan);
+    }
+    return av1_plane_copy_range(0U, total_rows, 0U, plan);
+}
+
+typedef struct {
+    void *dst;
+    const void *src;
+    size_t element_size;
+} Av1FlatCopyPlan;
+
+static AvifdecStatus av1_flat_copy_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    const Av1FlatCopyPlan *plan = (const Av1FlatCopyPlan *)arg;
+
+    (void)worker_index;
+    if (plan == 0 || begin > end) return AVIFDEC_INVALID_ARGUMENT;
+    avifdec_memory_copy(
+        (unsigned char *)plan->dst + begin * plan->element_size,
+        (const unsigned char *)plan->src + begin * plan->element_size,
+        (end - begin) * plan->element_size);
+    return AVIFDEC_OK;
+}
+
+/* Splits one large flat-array memcpy (e.g. a saved motion field) into
+ * disjoint element ranges across state->executor. */
+static AvifdecStatus av1_flat_copy_dispatch(
+    const AvifdecExecutor *executor,
+    void *destination,
+    const void *source,
+    size_t count,
+    size_t element_size) {
+    Av1FlatCopyPlan plan;
+
+    if (count == 0U) return AVIFDEC_OK;
+    plan.dst = destination;
+    plan.src = source;
+    plan.element_size = element_size;
+    if (executor != 0 && executor->worker_count > 1U && count > 1U) {
+        return executor->parallel_for(
+            executor->user_data, count, 1U, av1_flat_copy_range, &plan);
+    }
+    return av1_flat_copy_range(0U, count, 0U, &plan);
+}
+
 static AvifdecStatus av1_copy_planes(
     Av1FramePlanes *destination,
     const Av1FramePlanes *source,
     const Av1Sequence *sequence,
     uint32_t width,
-    uint32_t height) {
+    uint32_t height,
+    const AvifdecExecutor *executor) {
     unsigned int plane_count = sequence->monochrome ? 1U : 3U;
     unsigned int plane;
+    Av1PlaneCopyPlan plan;
 
     if (destination == 0 || source == 0 || sequence == 0) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
+    avifdec_memory_fill(&plan, 0U, sizeof(plan));
+    plan.plane_count = plane_count;
     for (plane = 0U; plane < plane_count; ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
         unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
@@ -751,7 +871,6 @@ static AvifdecStatus av1_copy_planes(
             (width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
         uint32_t plane_height =
             (height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-        uint32_t row;
 
         if (destination->data[plane] == 0 || source->data[plane] == 0 ||
             destination->stride[plane] < plane_width ||
@@ -760,15 +879,128 @@ static AvifdecStatus av1_copy_planes(
             source->height[plane] < plane_height) {
             return AVIFDEC_INVALID_DATA;
         }
-        for (row = 0U; row < plane_height; ++row) {
-            avifdec_memory_copy(
-                destination->data[plane] +
-                    (size_t)row * destination->stride[plane],
-                source->data[plane] + (size_t)row * source->stride[plane],
-                plane_width * sizeof(uint16_t));
+        plan.dst_data[plane] = destination->data[plane];
+        plan.dst_stride[plane] = destination->stride[plane];
+        plan.src_data[plane] = source->data[plane];
+        plan.src_stride[plane] = source->stride[plane];
+        plan.width[plane] = plane_width;
+        plan.row_offset[plane + 1U] = plan.row_offset[plane] + plane_height;
+    }
+    return av1_plane_copy_dispatch(executor, &plan);
+}
+
+typedef struct {
+    AvifdecImage *image;
+    const Av1FramePlanes *source;
+    unsigned int plane;
+    uint32_t output_plane_width;
+    uint32_t output_plane_height;
+    uint32_t source_plane_width;
+    uint32_t source_plane_height;
+    uint64_t divisor;
+} Av1ImageScaleContext;
+
+typedef struct {
+    Av1ImageScaleContext planes[3];
+    size_t row_offset[4];
+    unsigned int plane_count;
+} Av1ImageScalePlan;
+
+static void av1_copy_image_scale_row(
+    const Av1ImageScaleContext *ctx,
+    uint32_t row) {
+    uint64_t output_y0 = (uint64_t)row * ctx->source_plane_height;
+    uint64_t output_y1 = (uint64_t)(row + 1U) * ctx->source_plane_height;
+    uint32_t source_y0 = (uint32_t)(output_y0 / ctx->output_plane_height);
+    uint32_t source_y1 =
+        (uint32_t)((output_y1 + ctx->output_plane_height - 1U) /
+                   ctx->output_plane_height);
+    uint32_t column;
+
+    for (column = 0U; column < ctx->output_plane_width; ++column) {
+        uint64_t output_x0 = (uint64_t)column * ctx->source_plane_width;
+        uint64_t output_x1 = (uint64_t)(column + 1U) * ctx->source_plane_width;
+        uint32_t source_x0 =
+            (uint32_t)(output_x0 / ctx->output_plane_width);
+        uint32_t source_x1 =
+            (uint32_t)((output_x1 + ctx->output_plane_width - 1U) /
+                       ctx->output_plane_width);
+        uint64_t sum = 0U;
+        uint32_t source_y;
+
+        for (source_y = source_y0; source_y < source_y1; ++source_y) {
+            uint64_t source_cell_y0 =
+                (uint64_t)source_y * ctx->output_plane_height;
+            uint64_t source_cell_y1 = source_cell_y0 + ctx->output_plane_height;
+            uint64_t overlap_y0 =
+                output_y0 > source_cell_y0 ? output_y0 : source_cell_y0;
+            uint64_t overlap_y1 =
+                output_y1 < source_cell_y1 ? output_y1 : source_cell_y1;
+            uint64_t weight_y = overlap_y1 - overlap_y0;
+            uint32_t source_x;
+
+            for (source_x = source_x0; source_x < source_x1; ++source_x) {
+                uint64_t source_cell_x0 =
+                    (uint64_t)source_x * ctx->output_plane_width;
+                uint64_t source_cell_x1 =
+                    source_cell_x0 + ctx->output_plane_width;
+                uint64_t overlap_x0 =
+                    output_x0 > source_cell_x0 ? output_x0 : source_cell_x0;
+                uint64_t overlap_x1 =
+                    output_x1 < source_cell_x1 ? output_x1 : source_cell_x1;
+                uint64_t weight_x = overlap_x1 - overlap_x0;
+
+                sum += ctx->source->data[ctx->plane][
+                    (size_t)source_y * ctx->source->stride[ctx->plane] +
+                    source_x] * weight_x * weight_y;
+            }
+        }
+        ctx->image->planes[ctx->plane][
+            (size_t)row * ctx->image->strides[ctx->plane] + column] =
+            (uint16_t)((sum + ctx->divisor / 2U) / ctx->divisor);
+    }
+}
+
+static AvifdecStatus av1_copy_image_scale_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    Av1ImageScalePlan *plan = (Av1ImageScalePlan *)arg;
+    unsigned int plane;
+
+    (void)worker_index;
+    if (plan == 0 || begin > end ||
+        end > plan->row_offset[plan->plane_count]) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    for (plane = 0U; plane < plan->plane_count; ++plane) {
+        size_t plane_begin = plan->row_offset[plane];
+        size_t plane_end = plan->row_offset[plane + 1U];
+        size_t range_begin = begin > plane_begin ? begin : plane_begin;
+        size_t range_end = end < plane_end ? end : plane_end;
+        size_t row;
+
+        for (row = range_begin; row < range_end; ++row) {
+            av1_copy_image_scale_row(
+                &plan->planes[plane], (uint32_t)(row - plane_begin));
         }
     }
     return AVIFDEC_OK;
+}
+
+static AvifdecStatus av1_copy_image_scale_dispatch(
+    const AvifdecExecutor *executor,
+    Av1ImageScalePlan *plan) {
+    size_t total_rows = plan->row_offset[plan->plane_count];
+
+    if (total_rows == 0U) return AVIFDEC_OK;
+    if (executor != 0 && executor->worker_count > 1U && total_rows > 1U) {
+        return executor->parallel_for(
+            executor->user_data, total_rows, 1U,
+            av1_copy_image_scale_range, plan);
+    }
+    return av1_copy_image_scale_range(0U, total_rows, 0U, plan);
 }
 
 static AvifdecStatus av1_copy_image(
@@ -778,9 +1010,13 @@ static AvifdecStatus av1_copy_image(
     uint32_t source_width,
     uint32_t source_height,
     uint32_t output_width,
-    uint32_t output_height) {
+    uint32_t output_height,
+    const AvifdecExecutor *executor) {
     unsigned int plane_count = sequence->monochrome ? 1U : 3U;
     unsigned int plane;
+    Av1PlaneCopyPlan copy_plan;
+    Av1ImageScalePlan scale_plan;
+    AvifdecStatus status;
 
     if (image == 0 || source == 0 || sequence == 0 ||
         output_width == 0U || output_height == 0U ||
@@ -791,6 +1027,8 @@ static AvifdecStatus av1_copy_image(
     image->monochrome = sequence->monochrome;
     image->subsampling_x = sequence->subsampling_x;
     image->subsampling_y = sequence->subsampling_y;
+    avifdec_memory_fill(&copy_plan, 0U, sizeof(copy_plan));
+    avifdec_memory_fill(&scale_plan, 0U, sizeof(scale_plan));
     for (plane = 0U; plane < plane_count; ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
         unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
@@ -802,7 +1040,6 @@ static AvifdecStatus av1_copy_image(
             (output_width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
         uint32_t output_plane_height =
             (output_height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-        uint32_t row;
 
         if (image->planes[plane] == 0 ||
             image->strides[plane] < output_plane_width ||
@@ -815,82 +1052,35 @@ static AvifdecStatus av1_copy_image(
         image->heights[plane] = output_plane_height;
         if (source_plane_width == output_plane_width &&
             source_plane_height == output_plane_height) {
-            for (row = 0U; row < output_plane_height; ++row) {
-                avifdec_memory_copy(
-                    image->planes[plane] +
-                        (size_t)row * image->strides[plane],
-                    source->data[plane] +
-                        (size_t)row * source->stride[plane],
-                    output_plane_width * sizeof(uint16_t));
-            }
+            unsigned int copy_index = copy_plan.plane_count++;
+
+            copy_plan.dst_data[copy_index] = image->planes[plane];
+            copy_plan.dst_stride[copy_index] = image->strides[plane];
+            copy_plan.src_data[copy_index] = source->data[plane];
+            copy_plan.src_stride[copy_index] = source->stride[plane];
+            copy_plan.width[copy_index] = output_plane_width;
+            copy_plan.row_offset[copy_index + 1U] =
+                copy_plan.row_offset[copy_index] + output_plane_height;
         } else {
-            uint64_t divisor =
+            unsigned int scale_index = scale_plan.plane_count++;
+            Av1ImageScaleContext *ctx = &scale_plan.planes[scale_index];
+
+            ctx->image = image;
+            ctx->source = source;
+            ctx->plane = plane;
+            ctx->output_plane_width = output_plane_width;
+            ctx->output_plane_height = output_plane_height;
+            ctx->source_plane_width = source_plane_width;
+            ctx->source_plane_height = source_plane_height;
+            ctx->divisor =
                 (uint64_t)source_plane_width * source_plane_height;
-
-            for (row = 0U; row < output_plane_height; ++row) {
-                uint64_t output_y0 = (uint64_t)row * source_plane_height;
-                uint64_t output_y1 =
-                    (uint64_t)(row + 1U) * source_plane_height;
-                uint32_t source_y0 =
-                    (uint32_t)(output_y0 / output_plane_height);
-                uint32_t source_y1 =
-                    (uint32_t)((output_y1 + output_plane_height - 1U) /
-                               output_plane_height);
-                uint32_t column;
-
-                for (column = 0U; column < output_plane_width; ++column) {
-                    uint64_t output_x0 =
-                        (uint64_t)column * source_plane_width;
-                    uint64_t output_x1 =
-                        (uint64_t)(column + 1U) * source_plane_width;
-                    uint32_t source_x0 =
-                        (uint32_t)(output_x0 / output_plane_width);
-                    uint32_t source_x1 =
-                        (uint32_t)((output_x1 + output_plane_width - 1U) /
-                                   output_plane_width);
-                    uint64_t sum = 0U;
-                    uint32_t source_y;
-
-                    for (source_y = source_y0;
-                         source_y < source_y1;
-                         ++source_y) {
-                        uint64_t source_cell_y0 =
-                            (uint64_t)source_y * output_plane_height;
-                        uint64_t source_cell_y1 =
-                            source_cell_y0 + output_plane_height;
-                        uint64_t overlap_y0 = output_y0 > source_cell_y0
-                            ? output_y0 : source_cell_y0;
-                        uint64_t overlap_y1 = output_y1 < source_cell_y1
-                            ? output_y1 : source_cell_y1;
-                        uint64_t weight_y = overlap_y1 - overlap_y0;
-                        uint32_t source_x;
-
-                        for (source_x = source_x0;
-                             source_x < source_x1;
-                             ++source_x) {
-                            uint64_t source_cell_x0 =
-                                (uint64_t)source_x * output_plane_width;
-                            uint64_t source_cell_x1 =
-                                source_cell_x0 + output_plane_width;
-                            uint64_t overlap_x0 = output_x0 > source_cell_x0
-                                ? output_x0 : source_cell_x0;
-                            uint64_t overlap_x1 = output_x1 < source_cell_x1
-                                ? output_x1 : source_cell_x1;
-                            uint64_t weight_x = overlap_x1 - overlap_x0;
-
-                            sum += source->data[plane][
-                                (size_t)source_y * source->stride[plane] +
-                                source_x] * weight_x * weight_y;
-                        }
-                    }
-                    image->planes[plane][
-                        (size_t)row * image->strides[plane] + column] =
-                        (uint16_t)((sum + divisor / 2U) / divisor);
-                }
-            }
+            scale_plan.row_offset[scale_index + 1U] =
+                scale_plan.row_offset[scale_index] + output_plane_height;
         }
     }
-    return AVIFDEC_OK;
+    status = av1_plane_copy_dispatch(executor, &copy_plan);
+    if (status != AVIFDEC_OK) return status;
+    return av1_copy_image_scale_dispatch(executor, &scale_plan);
 }
 
 static AvifdecStatus av1_apply_film_grain_output(
@@ -914,9 +1104,9 @@ static AvifdecStatus av1_apply_film_grain_output(
     grain_image.subsampling_x = sequence->subsampling_x;
     grain_image.subsampling_y = sequence->subsampling_y;
     grain_image.matrix_is_identity = sequence->matrix_coefficients == 0U;
-    return av1_film_grain_apply(params, &grain_image,
-                                state->film_grain_scratch,
-                                state->film_grain_scratch_size);
+    return av1_film_grain_apply_ex(
+        params, &grain_image, state->film_grain_scratch,
+        state->film_grain_scratch_size, state->executor);
 }
 
 static AvifdecStatus av1_reference_commit(
@@ -982,11 +1172,21 @@ static AvifdecStatus av1_reference_commit(
     for (slot_index = 0U; slot_index < AV1_NUM_REF_FRAMES; ++slot_index) {
         if ((frame->refresh_frame_flags & (1U << slot_index)) != 0U) {
             AvifdecStatus status;
+            const AvifdecExecutor *executor =
+                state != 0 ? state->executor : 0;
 
+            /*
+             * Slots are committed strictly in ascending order below (the
+             * reference commit order the caller relies on); only the
+             * per-slot plane/motion copy work itself is parallelized
+             * internally, via the executor, across that slot's own
+             * disjoint rows.
+             */
             if (saved_planes != 0) {
                 status = av1_copy_planes(
                     &state->reference_planes[slot_index], saved_planes,
-                    sequence, frame->upscaled_width, frame->frame_height);
+                    sequence, frame->upscaled_width, frame->frame_height,
+                    executor);
                 if (status != AVIFDEC_OK) return status;
             }
             references->slots[slot_index] = saved;
@@ -994,12 +1194,14 @@ static AvifdecStatus av1_reference_commit(
                 state->reference_motion != 0 &&
                 state->current_motion != 0 &&
                 !frame->show_existing_frame) {
-                avifdec_memory_copy(
+                status = av1_flat_copy_dispatch(
+                    executor,
                     &state->reference_motion[
                         (size_t)slot_index * state->motion_field_capacity],
                     state->current_motion,
-                    state->motion_field_capacity *
+                    state->motion_field_capacity,
                     sizeof(*state->current_motion));
+                if (status != AVIFDEC_OK) return status;
             }
         }
     }
@@ -1615,8 +1817,12 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     if (sequence->film_grain_params_present) {
         size_t film_grain_scratch_bytes = 0U;
 
-        if (av1_film_grain_scratch_size(
-                sequence->max_width, &film_grain_scratch_bytes) !=
+        size_t worker_count =
+            state->executor == 0 ? 1U : state->executor->worker_count;
+
+        if (av1_film_grain_scratch_size_ex(
+                sequence->max_width, worker_count,
+                &film_grain_scratch_bytes) !=
             AVIFDEC_OK) {
             return AVIFDEC_OVERFLOW;
         }
@@ -1816,26 +2022,77 @@ static AvifdecStatus av1_trace_finish_cdfs(Av1TraceState *state,
     return AVIFDEC_OK;
 }
 
+typedef struct {
+    const Av1FramePlanes *planes;
+    uint32_t plane_width[3];
+    uint32_t plane_height[3];
+    uint64_t plane_checksum[3];
+    AvifdecStatus plane_status[3];
+} Av1StageChecksumPlan;
+
+static AvifdecStatus av1_trace_stage_checksum_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    Av1StageChecksumPlan *plan = (Av1StageChecksumPlan *)arg;
+    size_t plane;
+
+    (void)worker_index;
+    if (plan == 0 || begin > end || end > 3U) return AVIFDEC_INVALID_ARGUMENT;
+    for (plane = begin; plane < end; ++plane) {
+        plan->plane_status[plane] = av1_predict_checksum(
+            plan->planes->data[plane], plan->planes->stride[plane],
+            plan->plane_width[plane], plan->plane_height[plane],
+            (uint8_t)plane, &plan->plane_checksum[plane]);
+    }
+    return AVIFDEC_OK;
+}
+
+/*
+ * Computes one diagnostic stage checksum. Each plane's independent
+ * av1_predict_checksum scan (the expensive per-pixel work) may run in
+ * parallel across state->executor; the resulting per-plane checksums are
+ * always folded into *checksum serially in plane order (0, 1, 2), stopping
+ * at the first failing plane exactly as the previous serial loop did, so
+ * both the final checksum value and its ordered combination are unchanged.
+ */
 static AvifdecStatus av1_trace_stage_checksum(
     uint64_t *checksum,
     const Av1FramePlanes *planes,
     const Av1Sequence *sequence,
     uint32_t width,
-    uint32_t height) {
+    uint32_t height,
+    const AvifdecExecutor *executor) {
     unsigned int plane_count = sequence->monochrome ? 1U : 3U;
     unsigned int plane;
+    Av1StageChecksumPlan plan;
+    AvifdecStatus status;
 
+    avifdec_memory_fill(&plan, 0U, sizeof(plan));
+    plan.planes = planes;
     for (plane = 0U; plane < plane_count; ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
         unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
-        uint32_t plane_width = (width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-        uint32_t plane_height = (height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-        uint64_t plane_checksum;
-        AvifdecStatus status = av1_predict_checksum(
-            planes->data[plane], planes->stride[plane], plane_width,
-            plane_height, (uint8_t)plane, &plane_checksum);
-        if (status != AVIFDEC_OK) return status;
-        av1_trace_hash_value(checksum, plane_checksum);
+
+        plan.plane_width[plane] =
+            (width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
+        plan.plane_height[plane] =
+            (height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
+    }
+    if (executor != 0 && executor->worker_count > 1U && plane_count > 1U) {
+        status = executor->parallel_for(
+            executor->user_data, plane_count, 1U,
+            av1_trace_stage_checksum_range, &plan);
+    } else {
+        status = av1_trace_stage_checksum_range(0U, plane_count, 0U, &plan);
+    }
+    if (status != AVIFDEC_OK) return status;
+    for (plane = 0U; plane < plane_count; ++plane) {
+        if (plan.plane_status[plane] != AVIFDEC_OK) {
+            return plan.plane_status[plane];
+        }
+        av1_trace_hash_value(checksum, plan.plane_checksum[plane]);
     }
     return AVIFDEC_OK;
 }
@@ -1845,29 +2102,33 @@ static AvifdecStatus av1_trace_copy_visible_planes(
     const Av1FramePlanes *input,
     const Av1Sequence *sequence,
     uint32_t width,
-    uint32_t height) {
+    uint32_t height,
+    const AvifdecExecutor *executor) {
     unsigned int plane_count = sequence->monochrome ? 1U : 3U;
     unsigned int plane;
+    Av1PlaneCopyPlan plan;
 
+    avifdec_memory_fill(&plan, 0U, sizeof(plan));
+    plan.plane_count = plane_count;
     for (plane = 0U; plane < plane_count; ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
         unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
         uint32_t plane_width = (width + ((uint32_t)1U << sub_x) - 1U) >> sub_x;
         uint32_t plane_height = (height + ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-        uint32_t row;
+
         if (output->data[plane] == 0 || input->data[plane] == 0 ||
             output->stride[plane] < plane_width ||
             input->stride[plane] < plane_width) {
             return AVIFDEC_INVALID_ARGUMENT;
         }
-        for (row = 0U; row < plane_height; ++row) {
-            avifdec_memory_copy(
-                output->data[plane] + (size_t)row * output->stride[plane],
-                input->data[plane] + (size_t)row * input->stride[plane],
-                plane_width * sizeof(uint16_t));
-        }
+        plan.dst_data[plane] = output->data[plane];
+        plan.dst_stride[plane] = output->stride[plane];
+        plan.src_data[plane] = input->data[plane];
+        plan.src_stride[plane] = input->stride[plane];
+        plan.width[plane] = plane_width;
+        plan.row_offset[plane + 1U] = plan.row_offset[plane] + plane_height;
     }
-    return AVIFDEC_OK;
+    return av1_plane_copy_dispatch(executor, &plan);
 }
 
 static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
@@ -1879,16 +2140,23 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     unsigned int plane;
     AvifdecStatus status;
 
-    for (plane = 0U; plane < plane_count; ++plane) {
-        uint32_t row;
-        for (row = 0U; row < state->frame_planes.height[plane]; ++row) {
-            avifdec_memory_copy(
-                state->deblocked_planes.data[plane] +
-                    (size_t)row * state->deblocked_planes.stride[plane],
-                state->frame_planes.data[plane] +
-                    (size_t)row * state->frame_planes.stride[plane],
-                state->frame_planes.width[plane] * sizeof(uint16_t));
+    {
+        Av1PlaneCopyPlan copy_plan;
+
+        avifdec_memory_fill(&copy_plan, 0U, sizeof(copy_plan));
+        copy_plan.plane_count = plane_count;
+        for (plane = 0U; plane < plane_count; ++plane) {
+            copy_plan.dst_data[plane] = state->deblocked_planes.data[plane];
+            copy_plan.dst_stride[plane] =
+                state->deblocked_planes.stride[plane];
+            copy_plan.src_data[plane] = state->frame_planes.data[plane];
+            copy_plan.src_stride[plane] = state->frame_planes.stride[plane];
+            copy_plan.width[plane] = state->frame_planes.width[plane];
+            copy_plan.row_offset[plane + 1U] = copy_plan.row_offset[plane] +
+                state->frame_planes.height[plane];
         }
+        status = av1_plane_copy_dispatch(state->executor, &copy_plan);
+        if (status != AVIFDEC_OK) return status;
     }
     avifdec_memory_fill(&loop_filter, 0U, sizeof(loop_filter));
     loop_filter.frame_width = frame->frame_width;
@@ -1917,13 +2185,15 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     loop_filter.tx_sizes[1] = state->loop_filter_tx_sizes[1];
     loop_filter.tx_sizes[2] = state->loop_filter_tx_sizes[2];
     loop_filter.tx_size_capacity = state->cell_count;
-    status = av1_loop_filter_frame(&state->deblocked_planes,
-                                   &state->block_state, &loop_filter);
+    status = av1_loop_filter_frame_ex(
+        &state->deblocked_planes, &state->block_state, &loop_filter,
+        state->executor);
     if (status != AVIFDEC_OK) return status;
     if (state->trace_enabled) {
         status = av1_trace_stage_checksum(
             &state->trace->deblocked_checksum, &state->deblocked_planes,
-            sequence, frame->frame_width, frame->frame_height);
+            sequence, frame->frame_width, frame->frame_height,
+            state->executor);
         if (status != AVIFDEC_OK) return status;
     }
 
@@ -1952,10 +2222,21 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
         if (status != AVIFDEC_OK) return status;
     }
     if (state->trace_enabled) {
-        status = av1_trace_stage_checksum(
-            &state->trace->cdef_checksum, &state->cdef_planes, sequence,
-            frame->frame_width, frame->frame_height);
-        if (status != AVIFDEC_OK) return status;
+        if (state->cdef_planes.data[0] == state->deblocked_planes.data[0]) {
+            /*
+             * cdef_planes aliases deblocked_planes (identity CDEF for this
+             * stream) and av1_cdef_frame_ex above was skipped, so the
+             * buffer contents and dimensions are byte-for-byte identical
+             * to what deblocked_checksum already scanned: reuse it
+             * instead of rescanning the same pixels.
+             */
+            state->trace->cdef_checksum = state->trace->deblocked_checksum;
+        } else {
+            status = av1_trace_stage_checksum(
+                &state->trace->cdef_checksum, &state->cdef_planes, sequence,
+                frame->frame_width, frame->frame_height, state->executor);
+            if (status != AVIFDEC_OK) return status;
+        }
     }
 
     if (state->upscaled_deblocked_planes.data[0] !=
@@ -1964,12 +2245,14 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
             status = av1_trace_copy_visible_planes(
                 &state->upscaled_deblocked_planes,
                 &state->deblocked_planes, sequence,
-                frame->upscaled_width, frame->frame_height);
+                frame->upscaled_width, frame->frame_height,
+                state->executor);
             if (status == AVIFDEC_OK) {
                 status = av1_trace_copy_visible_planes(
                     &state->upscaled_cdef_planes,
                     &state->cdef_planes, sequence,
-                    frame->upscaled_width, frame->frame_height);
+                    frame->upscaled_width, frame->frame_height,
+                    state->executor);
             }
             if (status != AVIFDEC_OK) return status;
         } else {
@@ -1986,21 +2269,21 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
                     ((uint32_t)1U << sub_x) - 1U) >> sub_x;
                 uint32_t height = (frame->frame_height +
                     ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-                status = av1_superres_upscale_plane(
+                status = av1_superres_upscale_plane_ex(
                     state->upscaled_deblocked_planes.data[plane],
                     output_width, output_width,
                     state->deblocked_planes.data[plane],
                     state->deblocked_planes.stride[plane],
                     input_width, padded_input_width, height,
-                    sequence->bit_depth);
+                    sequence->bit_depth, state->executor);
                 if (status != AVIFDEC_OK) return status;
-                status = av1_superres_upscale_plane(
+                status = av1_superres_upscale_plane_ex(
                     state->upscaled_cdef_planes.data[plane],
                     output_width, output_width,
                     state->cdef_planes.data[plane],
                     state->cdef_planes.stride[plane],
                     input_width, padded_input_width, height,
-                    sequence->bit_depth);
+                    sequence->bit_depth, state->executor);
                 if (status != AVIFDEC_OK) return status;
             }
         }
@@ -2008,7 +2291,8 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     if (state->trace_enabled) {
         status = av1_trace_stage_checksum(
             &state->trace->superres_checksum, &state->upscaled_cdef_planes,
-            sequence, frame->upscaled_width, frame->frame_height);
+            sequence, frame->upscaled_width, frame->frame_height,
+            state->executor);
         if (status != AVIFDEC_OK) return status;
     }
     if (state->restored_planes.data[0] !=
@@ -2020,10 +2304,24 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
         if (status != AVIFDEC_OK) return status;
     }
     if (state->trace_enabled) {
-        status = av1_trace_stage_checksum(
-            &state->trace->restoration_checksum, &state->restored_planes,
-            sequence, frame->upscaled_width, frame->frame_height);
-        if (status != AVIFDEC_OK) return status;
+        if (state->restored_planes.data[0] ==
+            state->upscaled_cdef_planes.data[0]) {
+            /*
+             * restored_planes aliases upscaled_cdef_planes (identity
+             * restoration for this stream) and av1_loop_restoration_frame_ex
+             * above was skipped, so restoration_checksum is guaranteed to
+             * equal the already-computed superres_checksum: reuse it
+             * instead of rescanning the same pixels.
+             */
+            state->trace->restoration_checksum =
+                state->trace->superres_checksum;
+        } else {
+            status = av1_trace_stage_checksum(
+                &state->trace->restoration_checksum, &state->restored_planes,
+                sequence, frame->upscaled_width, frame->frame_height,
+                state->executor);
+            if (status != AVIFDEC_OK) return status;
+        }
     }
     if (state->image == 0) return AVIFDEC_OK;
     if (state->output_spatial_layer_set &&
@@ -2033,7 +2331,7 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     status = av1_copy_image(
         state->image, &state->restored_planes, sequence,
         frame->upscaled_width, frame->frame_height,
-        state->output_width, state->output_height);
+        state->output_width, state->output_height, state->executor);
     if (status != AVIFDEC_OK) return status;
     state->output_frame_seen = 1U;
     if (frame->show_frame && frame->film_grain.apply_grain) {
@@ -2302,33 +2600,12 @@ static AvifdecStatus av1_trace_finish_tiles(
     Av1TraceState *state,
     const Av1Sequence *sequence,
     const Av1Frame *frame) {
-    AvifdecStatus status;
-
     if (state->trace_enabled) {
-        unsigned int checksum_plane;
-        unsigned int plane_count = sequence->monochrome ? 1U : 3U;
-
-        for (checksum_plane = 0U; checksum_plane < plane_count;
-             ++checksum_plane) {
-            unsigned int sub_x = checksum_plane == 0U ? 0U
-                : sequence->subsampling_x;
-            unsigned int sub_y = checksum_plane == 0U ? 0U
-                : sequence->subsampling_y;
-            uint32_t visible_width = (frame->frame_width +
-                ((uint32_t)1U << sub_x) - 1U) >> sub_x;
-            uint32_t visible_height = (frame->frame_height +
-                ((uint32_t)1U << sub_y) - 1U) >> sub_y;
-            uint64_t plane_checksum;
-
-            status = av1_predict_checksum(
-                state->frame_planes.data[checksum_plane],
-                state->frame_planes.stride[checksum_plane],
-                visible_width, visible_height, (uint8_t)checksum_plane,
-                &plane_checksum);
-            if (status != AVIFDEC_OK) return status;
-            av1_trace_hash_value(
-                &state->trace->reconstruction_checksum, plane_checksum);
-        }
+        AvifdecStatus status = av1_trace_stage_checksum(
+            &state->trace->reconstruction_checksum, &state->frame_planes,
+            sequence, frame->frame_width, frame->frame_height,
+            state->executor);
+        if (status != AVIFDEC_OK) return status;
     }
     return av1_trace_finish_frame(state, sequence, frame);
 }
@@ -3488,7 +3765,8 @@ static AvifdecStatus av1_workspace_requirement(
     if (info->film_grain_params_present) {
         size_t film_grain_scratch = 0U;
 
-        if (av1_film_grain_scratch_size(width, &film_grain_scratch) !=
+        if (av1_film_grain_scratch_size_ex(
+                width, worker_count, &film_grain_scratch) !=
                 AVIFDEC_OK ||
             !avifdec_size_add(
                 result, film_grain_scratch + _Alignof(int16_t) - 1U,
@@ -3512,7 +3790,8 @@ static AvifdecStatus av1_workspace_requirement(
             ((max_mi_rows + superblock_mi - 1U) / superblock_mi) *
             superblock_mi;
 
-        tile_count = info->tile_count;
+        tile_count = info->workspace_tile_capacity != 0U
+            ? info->workspace_tile_capacity : info->tile_count;
         active_workers = worker_count;
         if (active_workers > 1U) {
             avifdec_arena_init_sizing(&sizing);
@@ -3618,6 +3897,7 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     size_t frame_unit_frame_headers = 0U;
     int first_obu_in_temporal_unit = 0;
     int selected_frame_found = 0;
+    size_t workspace_tile_capacity = 0U;
     uint8_t selected_spatial_layer =
         limits == 0 ? 0U : limits->spatial_layer;
     int select_spatial_layer =
@@ -3629,6 +3909,7 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     info->obu_count = 0U;
     info->metadata_obu_count = 0U;
     info->tile_count = 0U;
+    info->workspace_tile_capacity = 0U;
     info->tile_data_size = 0U;
     av1_metadata_reset(info);
     avifdec_memory_fill(&stream, 0U, sizeof(stream));
@@ -3832,6 +4113,20 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                 &bits, &sequence, temporal_id, spatial_id, &references,
                 &frame);
             if (status != AVIFDEC_OK) return av1_fail(error, status, av1_bits_offset(&bits), obu_type);
+            if (!frame.show_existing_frame) {
+                size_t frame_tile_count;
+
+                if (!avifdec_size_multiply(
+                        frame.tile_columns, frame.tile_rows,
+                        &frame_tile_count)) {
+                    return av1_fail(
+                        error, AVIFDEC_OVERFLOW,
+                        av1_bits_offset(&bits), obu_type);
+                }
+                if (frame_tile_count > workspace_tile_capacity) {
+                    workspace_tile_capacity = frame_tile_count;
+                }
+            }
             frame.spatial_id = spatial_id;
             if (select_spatial_layer &&
                 spatial_id == selected_spatial_layer) {
@@ -3877,7 +4172,8 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                                 frame.frame_to_show_map_idx],
                             &sequence, frame.upscaled_width,
                             frame.frame_height, trace_state->output_width,
-                            trace_state->output_height);
+                            trace_state->output_height,
+                            trace_state->executor);
                         if (status != AVIFDEC_OK) {
                             return av1_fail(
                                 error, status, av1_bits_offset(&bits),
@@ -4164,6 +4460,7 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     info->superblock_size = sequence.use_128x128_superblock ? 128U : 64U;
     info->tile_columns = frame.tile_columns;
     info->tile_rows = frame.tile_rows;
+    info->workspace_tile_capacity = workspace_tile_capacity;
     if (info->workspace_required == 0U) {
         AvifdecStatus requirement_status =
             av1_workspace_requirement(
@@ -4218,17 +4515,23 @@ AvifdecStatus avifdec_av1_query(const AvifdecSpan *spans,
         spans, span_count, limits, 1U, info, error);
 }
 
-AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
-                                size_t span_count,
-                                const AvifdecLimits *limits,
-                                AvifdecImageInfo *info,
-                                void *workspace,
-                                size_t workspace_size,
-                                AvifdecEntropyTrace *trace,
-                                AvifdecError *error) {
+AvifdecStatus avifdec_av1_trace_ex(
+    const AvifdecSpan *spans,
+    size_t span_count,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifdecImageInfo *info,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecEntropyTrace *trace,
+    AvifdecError *error) {
     Av1TraceState state;
 
     if (spans == 0 || span_count == 0U || info == 0 || trace == 0 ||
+        (executor != 0 &&
+         (executor->parallel_for == 0 ||
+          executor->worker_count == 0U ||
+          executor->worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS)) ||
         (workspace == 0 && workspace_size != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
@@ -4252,12 +4555,30 @@ AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
     avifdec_arena_init(&state.arena, workspace, workspace_size);
     state.trace = trace;
     state.trace_enabled = 1U;
+    state.executor = executor;
+    state.planned_tile_capacity =
+        info->workspace_tile_capacity != 0U
+            ? info->workspace_tile_capacity : info->tile_count;
     state.output_spatial_layer =
         limits == 0 ? 0U : limits->spatial_layer;
     state.output_spatial_layer_set =
         limits == 0 ? 0U : limits->spatial_layer_set;
     return av1_parse_stream(
-        spans, span_count, limits, info, error, 1U, &state);
+        spans, span_count, limits, info, error,
+        executor == 0 ? 1U : executor->worker_count, &state);
+}
+
+AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
+                                size_t span_count,
+                                const AvifdecLimits *limits,
+                                AvifdecImageInfo *info,
+                                void *workspace,
+                                size_t workspace_size,
+                                AvifdecEntropyTrace *trace,
+                                AvifdecError *error) {
+    return avifdec_av1_trace_ex(
+        spans, span_count, limits, 0, info, workspace,
+        workspace_size, trace, error);
 }
 
 AvifdecStatus avifdec_av1_decode_ex(
@@ -4305,7 +4626,8 @@ AvifdecStatus avifdec_av1_decode_ex(
     state.trace = trace;
     state.trace_enabled = trace_enabled;
     state.executor = executor;
-    state.planned_tile_capacity = info->tile_count;
+    state.planned_tile_capacity = info->workspace_tile_capacity != 0U
+        ? info->workspace_tile_capacity : info->tile_count;
     state.image = image;
     state.output_width = info->width;
     state.output_height = info->height;

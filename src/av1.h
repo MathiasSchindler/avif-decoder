@@ -72,6 +72,16 @@ AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
                                 size_t workspace_size,
                                 AvifdecEntropyTrace *trace,
                                 AvifdecError *error);
+AvifdecStatus avifdec_av1_trace_ex(
+    const AvifdecSpan *spans,
+    size_t span_count,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifdecImageInfo *info,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecEntropyTrace *trace,
+    AvifdecError *error);
 AvifdecStatus avifdec_av1_decode(const AvifdecSpan *spans,
                                  size_t span_count,
                                  const AvifdecLimits *limits,

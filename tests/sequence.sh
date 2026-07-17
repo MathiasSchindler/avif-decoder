@@ -39,6 +39,20 @@ for index in 0 1 2; do
     "$decoder" --raw-frame "$index" "$work/sequence.avif" \
         "$work/repeat-$index.yuv" >/dev/null
     cmp "$work/ours-$index.yuv" "$work/repeat-$index.yuv"
+    "$decoder" --workers 0 --raw-frame "$index" \
+        "$work/sequence.avif" "$work/threaded-$index.yuv" \
+        >"$work/threaded-$index.txt"
+    cmp "$work/ours-$index.yuv" "$work/threaded-$index.yuv"
+    sequence_workspace=$(sed -n \
+        's/^sequence_workspace_required=//p' \
+        "$work/threaded-$index.txt")
+    frame_workspace=$(sed -n \
+        's/^frame_workspace_required=//p' \
+        "$work/threaded-$index.txt")
+    test "$sequence_workspace" -ge "$frame_workspace"
+    "$decoder" --raw-frame "$index" "$work/sequence.avif" \
+        "$work/threaded-tail-$index.yuv" --workers 0 >/dev/null
+    cmp "$work/ours-$index.yuv" "$work/threaded-tail-$index.yuv"
     case $index in
         0)
             printf '%s\n' "$output" | grep -q '^frame_sync_index=0$'
@@ -165,4 +179,4 @@ if "$decoder" "$work/compact-invalid.avif" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "AVIF sequence test: timing, sync seek, alpha, compact tables, and exact frames"
+echo "AVIF sequence test: timing, sync seek, alpha, compact tables, and exact threaded frames"

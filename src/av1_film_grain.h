@@ -60,6 +60,18 @@ AvifdecStatus av1_film_grain_parse(Av1Bits *bits,
 
 AvifdecStatus av1_film_grain_scratch_size(uint32_t width, size_t *size);
 
+/*
+ * Exact scratch size required by av1_film_grain_apply_ex() when it is given
+ * an executor advertising worker_count concurrent workers. worker_count must
+ * be in [1, AVIFDEC_EXECUTOR_MAX_WORKERS]. For worker_count == 1 this equals
+ * av1_film_grain_scratch_size(width, size); each additional worker adds one
+ * bounded, independent stripe scratch pair so concurrent stripe tasks never
+ * share mutable scratch.
+ */
+AvifdecStatus av1_film_grain_scratch_size_ex(uint32_t width,
+                                             size_t worker_count,
+                                             size_t *size);
+
 typedef struct {
     uint16_t *plane[3];
     size_t stride[3];
@@ -76,5 +88,26 @@ AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
                                    const Av1FilmGrainImage *image,
                                    void *scratch,
                                    size_t scratch_size);
+
+/*
+ * Executor-aware variant of av1_film_grain_apply(). When executor is 0 or
+ * executor->worker_count <= 1, behavior and scratch requirements are
+ * identical to av1_film_grain_apply() (sized by av1_film_grain_scratch_size).
+ * When executor->worker_count > 1, scratch must instead be sized by
+ * av1_film_grain_scratch_size_ex() with the same worker_count, and output is
+ * produced by distributing disjoint per-plane stripe rows across workers:
+ * chroma (Cb/Cr) stripes first, then a barrier, then luma stripes -- luma
+ * samples are only read by chroma workers before any luma worker writes
+ * them. Every worker_index passed to the executor's parallel_for callback
+ * that satisfies worker_index < executor->worker_count is handled correctly
+ * and only ever touches its own private scratch slice; failures are
+ * reported deterministically via the returned AvifdecStatus regardless of
+ * how work is chunked across workers.
+ */
+AvifdecStatus av1_film_grain_apply_ex(const Av1FilmGrainParams *params,
+                                      const Av1FilmGrainImage *image,
+                                      void *scratch,
+                                      size_t scratch_size,
+                                      const AvifdecExecutor *executor);
 
 #endif

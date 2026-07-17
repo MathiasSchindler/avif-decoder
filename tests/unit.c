@@ -972,6 +972,35 @@ static AvifdecStatus test_parse_film_grain(
     return av1_film_grain_parse(&bits, config, params);
 }
 
+typedef struct {
+    size_t calls;
+    size_t worker_count;
+} TestReverseExecutorState;
+
+static AvifdecStatus test_reverse_parallel_for(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifdecParallelBody body,
+    void *arg) {
+    TestReverseExecutorState *state =
+        (TestReverseExecutorState *)user_data;
+    size_t index = count;
+
+    (void)min_chunk;
+    ++state->calls;
+    while (index != 0U) {
+        AvifdecStatus status;
+
+        --index;
+        status = body(
+            index, index + 1U,
+            index % state->worker_count, arg);
+        if (status != AVIFDEC_OK) return status;
+    }
+    return AVIFDEC_OK;
+}
+
 static int test_av1_film_grain(void) {
     TestBitWriter writer;
     Av1FilmGrainParseConfig config;
@@ -982,12 +1011,21 @@ static int test_av1_film_grain(void) {
     static uint16_t y420[65U * 35U];
     static uint16_t u420[33U * 18U];
     static uint16_t v420[33U * 18U];
+    static uint16_t parallel_y420[65U * 35U];
+    static uint16_t parallel_u420[33U * 18U];
+    static uint16_t parallel_v420[33U * 18U];
     static uint16_t y444[33U * 37U];
     static uint16_t u444[33U * 37U];
     static uint16_t v444[33U * 37U];
-    static int16_t scratch[60000U];
+    static int16_t scratch[300000U];
     Av1FilmGrainImage image;
+    Av1FilmGrainImage parallel_image;
+    TestReverseExecutorState executor_state = { 0U, 4U };
+    AvifdecExecutor executor = {
+        &executor_state, 4U, test_reverse_parallel_for
+    };
     size_t scratch_size;
+    size_t parallel_scratch_size;
     uint64_t checksum_y;
     uint64_t checksum_u;
     uint64_t checksum_v;
@@ -1097,9 +1135,34 @@ static int test_av1_film_grain(void) {
     image.subsampling_y = 1U;
     CHECK(av1_film_grain_scratch_size(
         image.width, &scratch_size) == AVIFDEC_OK);
+    CHECK(av1_film_grain_scratch_size_ex(
+        image.width, executor.worker_count,
+        &parallel_scratch_size) == AVIFDEC_OK);
     CHECK(scratch_size <= sizeof(scratch));
+    CHECK(parallel_scratch_size <= sizeof(scratch));
+    avifdec_memory_copy(parallel_y420, y420, sizeof(y420));
+    avifdec_memory_copy(parallel_u420, u420, sizeof(u420));
+    avifdec_memory_copy(parallel_v420, v420, sizeof(v420));
+    parallel_image = image;
+    parallel_image.plane[0] = parallel_y420;
+    parallel_image.plane[1] = parallel_u420;
+    parallel_image.plane[2] = parallel_v420;
     CHECK(av1_film_grain_apply(
         &params, &image, scratch, sizeof(scratch)) == AVIFDEC_OK);
+    CHECK(av1_film_grain_apply_ex(
+        &params, &parallel_image, scratch,
+        parallel_scratch_size, &executor) == AVIFDEC_OK);
+    CHECK(executor_state.calls != 0U);
+    CHECK(avifdec_memory_compare(
+        y420, parallel_y420, sizeof(y420)) == 0);
+    CHECK(avifdec_memory_compare(
+        u420, parallel_u420, sizeof(u420)) == 0);
+    CHECK(avifdec_memory_compare(
+        v420, parallel_v420, sizeof(v420)) == 0);
+    CHECK(av1_film_grain_apply_ex(
+        &params, &parallel_image, scratch,
+        parallel_scratch_size - 1U, &executor) ==
+        AVIFDEC_INVALID_ARGUMENT);
     CHECK(av1_predict_checksum(
         y420, 65U, 65U, 35U, 0U, &checksum_y) == AVIFDEC_OK);
     CHECK(av1_predict_checksum(
@@ -3118,6 +3181,7 @@ static int test_av1_inverse_transforms(void) {
     static int test_av1_loop_filter(void) {
         uint16_t samples[32];
         uint16_t *edge = samples + 12U;
+        uint16_t boundary_samples[9];
         unsigned int index;
 
         for (index = 0U; index < 12U; ++index) samples[index] = 100U;
@@ -3157,6 +3221,15 @@ static int test_av1_inverse_transforms(void) {
             edge[0] == 1640U && edge[1] == 1652U);
         CHECK(av1_loop_filter_sample(0, 1, 0U, 4U, 8U, 32U, 1U, 8U) ==
             AVIFDEC_INVALID_ARGUMENT);
+        for (index = 0U; index < 2U; ++index) {
+            boundary_samples[index] = 100U;
+        }
+        for (; index < 9U; ++index) {
+            boundary_samples[index] = 104U;
+        }
+        CHECK(av1_loop_filter_sample(
+            boundary_samples + 2U, 1, 0U, 4U,
+            8U, 32U, 1U, 8U) == AVIFDEC_OK);
         return 0;
     }
 
@@ -3458,6 +3531,11 @@ static int test_av1_superres(void) {
     };
     uint16_t input[16];
     uint16_t output[22];
+    uint16_t parallel_output[22];
+    TestReverseExecutorState executor_state = { 0U, 4U };
+    AvifdecExecutor executor = {
+        &executor_state, 4U, test_reverse_parallel_for
+    };
     unsigned int index;
     unsigned int depth_index;
 
@@ -3472,8 +3550,14 @@ static int test_av1_superres(void) {
         for (index = 0U; index < 16U; ++index) input[index] = value;
         CHECK(av1_superres_upscale_plane(output, 11U, 11U, input, 8U,
                                          8U, 8U, 2U, bit_depth) == AVIFDEC_OK);
+        CHECK(av1_superres_upscale_plane_ex(
+            parallel_output, 11U, 11U, input, 8U,
+            8U, 8U, 2U, bit_depth, &executor) == AVIFDEC_OK);
         for (index = 0U; index < 22U; ++index) CHECK(output[index] == value);
+        CHECK(avifdec_memory_compare(
+            output, parallel_output, sizeof(output)) == 0);
     }
+    CHECK(executor_state.calls == 3U);
     CHECK(av1_superres_upscale_plane(output, 8U, 8U, input, 8U,
                                      8U, 8U, 1U, 8U) ==
           AVIFDEC_INVALID_ARGUMENT);
@@ -4268,9 +4352,15 @@ static int test_av1_loop_restoration(void) {
         uint16_t traced_planes[3];
         uint16_t untraced_planes[3];
         AvifdecEntropyTrace trace;
+        AvifdecEntropyTrace parallel_trace;
         AvifdecImageInfo info;
+        AvifdecImageInfo parallel_info;
         AvifdecImage traced_image;
         AvifdecImage untraced_image;
+        TestReverseExecutorState executor_state = { 0U, 4U };
+        AvifdecExecutor executor = {
+            &executor_state, 4U, test_reverse_parallel_for
+        };
         AvifdecError error;
 
         CHECK(avifdec_query(file, sizeof(file), 0, 0, 0U, &info, &error) ==
@@ -4281,6 +4371,18 @@ static int test_av1_loop_restoration(void) {
             info.workspace_required <= sizeof(workspace));
         CHECK(avifdec_trace(file, sizeof(file), 0, workspace, sizeof(workspace),
                     &trace, &error) == AVIFDEC_OK);
+        CHECK(avifdec_query_ex(
+            file, sizeof(file), 0, &executor, 0, 0U,
+            &parallel_info, &error) == AVIFDEC_OK);
+        CHECK(parallel_info.workspace_required <= sizeof(workspace));
+        CHECK(avifdec_trace_ex(
+            file, sizeof(file), 0, &executor, workspace,
+            parallel_info.workspace_required, &parallel_trace,
+            &error) == AVIFDEC_OK);
+        CHECK(executor_state.calls != 0U &&
+              avifdec_memory_compare(
+                  &trace, &parallel_trace,
+                  sizeof(trace)) == 0);
         CHECK(trace.tile_count == 1U && trace.partition_nodes == 4U &&
             trace.block_count == 1U && trace.transform_count == 3U &&
             trace.nonzero_transform_count == 3U &&

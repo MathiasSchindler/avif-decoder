@@ -627,6 +627,7 @@ static AvifdecStatus write_sequence_png(
         size_t size,
         size_t frame_index,
         const char *output_path,
+        const AvifdecExecutor *executor,
         AvifdecSequenceInfo *sequence,
         AvifdecFrameInfo *frame,
         AvifdecError *error) {
@@ -637,11 +638,11 @@ static AvifdecStatus write_sequence_png(
         size_t image_memory_size = 0U;
         AvifdecStatus status;
 
-        status = avifdec_sequence_query(
-            data, size, 0, sequence, error);
+        status = avifdec_sequence_query_ex(
+            data, size, 0, executor, sequence, error);
         if (status != AVIFDEC_OK) return status;
-        status = avifdec_sequence_frame_query(
-            data, size, 0, frame_index, frame, error);
+        status = avifdec_sequence_frame_query_ex(
+            data, size, 0, executor, frame_index, frame, error);
         if (status != AVIFDEC_OK) return status;
         workspace = platform_allocate_pages(
             frame->image.workspace_required);
@@ -649,14 +650,14 @@ static AvifdecStatus write_sequence_png(
         status = allocate_image_planes(
             &frame->image, &image, &image_memory, &image_memory_size);
         if (status != AVIFDEC_OK) goto cleanup;
-        status = avifdec_sequence_decode_frame(
-            data, size, 0, frame_index, workspace,
+        status = avifdec_sequence_decode_frame_ex(
+            data, size, 0, executor, frame_index, workspace,
             frame->image.workspace_required, &image, &trace, frame,
             error);
         if (status != AVIFDEC_OK) goto cleanup;
 
         status = write_png_file(
-            output_path, &image, &frame->image, 0, error);
+            output_path, &image, &frame->image, executor, error);
 
     cleanup:
         if (image_memory != 0) {
@@ -675,6 +676,7 @@ static AvifdecStatus write_sequence_raw(
     size_t size,
     size_t frame_index,
     const char *output_path,
+    const AvifdecExecutor *executor,
     AvifdecSequenceInfo *sequence,
     AvifdecFrameInfo *frame,
     AvifdecError *error) {
@@ -685,11 +687,11 @@ static AvifdecStatus write_sequence_raw(
     size_t image_memory_size = 0U;
     AvifdecStatus status;
 
-    status = avifdec_sequence_query(
-        data, size, 0, sequence, error);
+    status = avifdec_sequence_query_ex(
+        data, size, 0, executor, sequence, error);
     if (status != AVIFDEC_OK) return status;
-    status = avifdec_sequence_frame_query(
-        data, size, 0, frame_index, frame, error);
+    status = avifdec_sequence_frame_query_ex(
+        data, size, 0, executor, frame_index, frame, error);
     if (status != AVIFDEC_OK) return status;
     workspace = platform_allocate_pages(
         frame->image.workspace_required);
@@ -697,8 +699,8 @@ static AvifdecStatus write_sequence_raw(
     status = allocate_image_planes(
         &frame->image, &image, &image_memory, &image_memory_size);
     if (status == AVIFDEC_OK) {
-        status = avifdec_sequence_decode_frame(
-            data, size, 0, frame_index, workspace,
+        status = avifdec_sequence_decode_frame_ex(
+            data, size, 0, executor, frame_index, workspace,
             frame->image.workspace_required, &image, &trace, frame,
             error);
     }
@@ -846,17 +848,58 @@ int main(int argc, char **argv) {
         AvifdecSequenceInfo sequence;
         AvifdecFrameInfo frame;
 
+        if ((sequence_png_output || sequence_raw_output) &&
+            requested_workers != 1U) {
+            AvifdecFrameInfo sizing_frame;
+            size_t work_count;
+            size_t worker_count = requested_workers;
+
+            status = avifdec_sequence_frame_query(
+                data, size, 0, sequence_frame_index,
+                &sizing_frame, &error);
+            if (status != AVIFDEC_OK) {
+                print_error(&error);
+                (void)platform_free_pages(data, size);
+                return 1;
+            }
+            work_count =
+                ((size_t)sizing_frame.image.height + 3U) / 4U;
+            if (!sizing_frame.image.monochrome &&
+                !avifdec_size_multiply(
+                    work_count, 3U, &work_count)) {
+                (void)platform_free_pages(data, size);
+                return 1;
+            }
+            if (sizing_frame.image.workspace_tile_capacity > work_count) {
+                work_count =
+                    sizing_frame.image.workspace_tile_capacity;
+            }
+            if (worker_count == 0U) {
+                worker_count = rt_task_pool_available_width();
+            }
+            if (worker_count > work_count) worker_count = work_count;
+            if (worker_count > 1U &&
+                rt_task_pool_init(
+                    &task_pool, (unsigned int)worker_count) == 0 &&
+                rt_task_pool_width(&task_pool) > 1U) {
+                task_pool_initialized = 1;
+                executor.user_data = &task_pool;
+                executor.worker_count = rt_task_pool_width(&task_pool);
+                executor.parallel_for = cli_parallel_for;
+                decode_executor = &executor;
+            }
+        }
         if (sequence_png_output) {
             status = write_sequence_png(
                 data, size, sequence_frame_index, output_path,
-                &sequence, &frame, &error);
+                decode_executor, &sequence, &frame, &error);
         } else if (sequence_raw_output) {
             status = write_sequence_raw(
                 data, size, sequence_frame_index, output_path,
-                &sequence, &frame, &error);
+                decode_executor, &sequence, &frame, &error);
         } else {
-            status = avifdec_sequence_query(
-                data, size, 0, &sequence, &error);
+            status = avifdec_sequence_query_ex(
+                data, size, 0, decode_executor, &sequence, &error);
             avifdec_memory_fill(&frame, 0U, sizeof(frame));
         }
         if (status != AVIFDEC_OK) {
@@ -866,6 +909,9 @@ int main(int argc, char **argv) {
                 error.context = 0U;
             }
             print_error(&error);
+            if (task_pool_initialized) {
+                rt_task_pool_destroy(&task_pool);
+            }
             (void)platform_free_pages(data, size);
             return 1;
         }
@@ -875,6 +921,8 @@ int main(int argc, char **argv) {
         (void)write_unsigned(1, sequence.timescale);
         (void)write_text(1, "\nsequence_duration=");
         (void)write_unsigned(1, sequence.duration);
+        (void)write_text(1, "\nsequence_workspace_required=");
+        (void)write_unsigned(1, sequence.workspace_required);
         (void)write_text(1, "\nsequence_alpha=");
         (void)write_unsigned(1, sequence.has_alpha);
         (void)write_text(1, "\nsequence_alpha_premultiplied=");
@@ -895,12 +943,18 @@ int main(int argc, char **argv) {
             (void)write_unsigned(1, frame.dts);
             (void)write_text(1, "\nframe_duration=");
             (void)write_unsigned(1, frame.duration);
+            (void)write_text(1, "\nframe_workspace_required=");
+            (void)write_unsigned(
+                1, frame.image.workspace_required);
             (void)write_text(
                 1, sequence_png_output
                     ? "\npacked_format=png"
                     : "\nraw_plane_order=YUV");
         }
         (void)write_text(1, "\n");
+        if (task_pool_initialized) {
+            rt_task_pool_destroy(&task_pool);
+        }
         (void)platform_free_pages(data, size);
         return 0;
     }
@@ -911,12 +965,14 @@ int main(int argc, char **argv) {
             (void)platform_free_pages(data, size);
             return 1;
         }
-        if ((raw_output || png_output || packed_format >= 0) &&
-            requested_workers != 1U &&
+        if (requested_workers != 1U &&
             image_info.tone_map_base_item_id == 0U &&
-            (!image_info.is_grid ||
-             image_info.grid_rows > 1U ||
-             image_info.grid_columns > 1U)) {
+            ((raw_output || png_output || packed_format >= 0)
+                 ? (!image_info.is_grid ||
+                    image_info.grid_rows > 1U ||
+                    image_info.grid_columns > 1U)
+                 : (!image_info.is_grid &&
+                    !image_info.sample_transform_present))) {
             size_t work_count;
             size_t worker_count = requested_workers;
 
@@ -1144,9 +1200,10 @@ int main(int argc, char **argv) {
                 }
             }
         } else {
-            status = avifdec_trace(data, size, 0, workspace,
-                                   image_info.workspace_required, &entropy_trace,
-                                   &error);
+            status = avifdec_trace_ex(
+                data, size, 0, decode_executor, workspace,
+                image_info.workspace_required, &entropy_trace,
+                &error);
         }
         if (status != AVIFDEC_OK) {
             print_error(&error);

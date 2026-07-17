@@ -3023,6 +3023,7 @@ static AvifdecStatus avif_trace_item(
     AvifContext *context,
     uint32_t item_id,
     size_t depth,
+    const AvifdecExecutor *executor,
     void *workspace,
     size_t workspace_size,
     AvifdecEntropyTrace *trace) {
@@ -3045,7 +3046,8 @@ static AvifdecStatus avif_trace_item(
         AvifdecLimits item_limits = context->limits;
         AvifdecStatus status = avif_query_av1_item(
             context, item_id, context->query_spans,
-            AVIF_MAX_RESOLVED_SPANS, 1U, &info);
+            AVIF_MAX_RESOLVED_SPANS,
+            executor == 0 ? 1U : executor->worker_count, &info);
 
         if (status != AVIFDEC_OK) return status;
         if (info.has_a1op) {
@@ -3055,9 +3057,9 @@ static AvifdecStatus avif_trace_item(
             item_limits.spatial_layer = info.selected_layer;
             item_limits.spatial_layer_set = 1U;
         }
-        return avifdec_av1_trace(
+        return avifdec_av1_trace_ex(
             context->query_spans, info.extent_count,
-            &item_limits, &info, workspace, workspace_size,
+            &item_limits, executor, &info, workspace, workspace_size,
             trace, context->error);
     }
     if (item_type == AVIFDEC_FOURCC('g', 'r', 'i', 'd')) {
@@ -3082,7 +3084,7 @@ static AvifdecStatus avif_trace_item(
             }
             status = avif_trace_item(
                 context, reference->to_item_id, depth + 1U,
-                workspace, workspace_size, &child);
+                0, workspace, workspace_size, &child);
             if (status != AVIFDEC_OK) return status;
             trace->frame_count += child.frame_count;
             trace->show_existing_frame_count +=
@@ -3131,7 +3133,7 @@ static AvifdecStatus avif_trace_item(
             }
             status = avif_trace_item(
                 context, reference->to_item_id, depth + 1U,
-                workspace, workspace_size, &child);
+                0, workspace, workspace_size, &child);
             if (status != AVIFDEC_OK) return status;
             trace->frame_count += child.frame_count;
             trace->tile_count += child.tile_count;
@@ -3153,7 +3155,7 @@ static AvifdecStatus avif_trace_item(
         if (status != AVIFDEC_OK) return status;
         return avif_trace_item(
             context, tone_map.tone_map_base_item_id,
-            depth + 1U, workspace, workspace_size, trace);
+            depth + 1U, executor, workspace, workspace_size, trace);
     }
     return avif_fail(context, AVIFDEC_UNSUPPORTED,
                      context->iinf.offset, item_type);
@@ -3253,6 +3255,36 @@ AvifdecStatus avifdec_query(
         span_capacity, info, error);
 }
 
+AvifdecStatus avifdec_trace_ex(const void *data,
+                               size_t size,
+                               const AvifdecLimits *limits,
+                               const AvifdecExecutor *executor,
+                               void *workspace,
+                               size_t workspace_size,
+                               AvifdecEntropyTrace *trace,
+                               AvifdecError *error) {
+    AvifdecImageInfo info;
+    AvifContext context;
+    uint32_t primary_id;
+    AvifdecStatus status;
+
+    if (trace == 0 || !avif_executor_valid(executor) ||
+        (data == 0 && size != 0U) ||
+        (workspace == 0 && workspace_size != 0U)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    status = avifdec_query_ex(
+        data, size, limits, executor, 0, 0U, &info, error);
+    if (status != AVIFDEC_OK) return status;
+    if (workspace_size < info.workspace_required) return AVIFDEC_OUT_OF_MEMORY;
+    status = avif_open_context(
+        &context, data, size, limits, &primary_id, error);
+    if (status != AVIFDEC_OK) return status;
+    return avif_trace_item(
+        &context, primary_id, 0U, executor,
+        workspace, workspace_size, trace);
+}
+
 AvifdecStatus avifdec_trace(const void *data,
                             size_t size,
                             const AvifdecLimits *limits,
@@ -3260,23 +3292,9 @@ AvifdecStatus avifdec_trace(const void *data,
                             size_t workspace_size,
                             AvifdecEntropyTrace *trace,
                             AvifdecError *error) {
-    AvifdecImageInfo info;
-    AvifContext context;
-    uint32_t primary_id;
-    AvifdecStatus status;
-
-    if (trace == 0 || (data == 0 && size != 0U) ||
-        (workspace == 0 && workspace_size != 0U)) {
-        return AVIFDEC_INVALID_ARGUMENT;
-    }
-    status = avifdec_query(data, size, limits, 0, 0U, &info, error);
-    if (status != AVIFDEC_OK) return status;
-    if (workspace_size < info.workspace_required) return AVIFDEC_OUT_OF_MEMORY;
-    status = avif_open_context(
-        &context, data, size, limits, &primary_id, error);
-    if (status != AVIFDEC_OK) return status;
-    return avif_trace_item(
-        &context, primary_id, 0U, workspace, workspace_size, trace);
+    return avifdec_trace_ex(
+        data, size, limits, 0, workspace,
+        workspace_size, trace, error);
 }
 
 AvifdecStatus avifdec_decode_ex(

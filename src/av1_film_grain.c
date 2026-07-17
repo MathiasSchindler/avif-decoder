@@ -215,6 +215,47 @@ AvifdecStatus av1_film_grain_scratch_size(uint32_t width, size_t *size) {
     return AVIFDEC_OK;
 }
 
+AvifdecStatus av1_film_grain_scratch_size_ex(uint32_t width,
+                                             size_t worker_count,
+                                             size_t *size) {
+    size_t base;
+    size_t stripe_stride;
+    size_t per_worker_samples;
+    size_t per_worker_bytes;
+    size_t extra;
+    AvifdecStatus status;
+
+    if (size == 0) return AVIFDEC_INVALID_ARGUMENT;
+    status = av1_film_grain_scratch_size(width, &base);
+    if (status != AVIFDEC_OK) return status;
+    if (worker_count == 0U) return AVIFDEC_INVALID_ARGUMENT;
+    if (worker_count == 1U) {
+        *size = base;
+        return AVIFDEC_OK;
+    }
+    if (worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    /*
+     * Each additional worker beyond the first needs its own current+previous
+     * stripe pair so concurrent stripe tasks never touch shared mutable
+     * scratch; this is the same per-buffer size the serial path already
+     * uses, just replicated once per worker instead of ping-ponged in place.
+     */
+    if (!avifdec_size_add((size_t)width, AV1_FG_STRIPE_EXTRA, &stripe_stride) ||
+        !avifdec_size_multiply(stripe_stride, AV1_FG_STRIPE_HEIGHT,
+                               &per_worker_samples) ||
+        !avifdec_size_multiply(per_worker_samples, 2U, &per_worker_samples) ||
+        !avifdec_size_multiply(per_worker_samples, sizeof(int16_t),
+                               &per_worker_bytes) ||
+        !avifdec_size_multiply(
+            per_worker_bytes, worker_count - 1U, &extra) ||
+        !avifdec_size_add(base, extra, size)) {
+        return AVIFDEC_OVERFLOW;
+    }
+    return AVIFDEC_OK;
+}
+
 typedef struct {
     const Av1FilmGrainParams *params;
     int16_t *luma_grain;
@@ -469,180 +510,270 @@ static int av1_film_grain_scale_lut(const Av1FilmGrainContext *ctx,
                         (int64_t)(lut[x + 1] - lut[x]) * rem, shift);
 }
 
-static void av1_film_grain_add_noise_plane(Av1FilmGrainContext *ctx,
-                                           const Av1FilmGrainImage *image,
-                                           int plane,
-                                           int min_value,
-                                           int max_luma,
-                                           int max_chroma) {
+/*
+ * Per-plane geometry/derived parameters shared by stripe generation and
+ * output writing. Depends only on ctx (read-only) and image (read-only), so
+ * it may be computed redundantly and concurrently by any number of workers.
+ */
+typedef struct {
+    unsigned int sub_x;
+    unsigned int sub_y;
+    int plane_w;
+    int plane_h;
+    int stripe_h;
+    int stripe_rows;
+    int half_w;
+    int scaling_shift;
+    const int16_t *grain;
+    int luma_multiplier;
+    int multiplier;
+    int offset;
+} Av1FilmGrainPlaneSetup;
+
+static void av1_film_grain_plane_setup(const Av1FilmGrainContext *ctx,
+                                       const Av1FilmGrainImage *image,
+                                       int plane,
+                                       Av1FilmGrainPlaneSetup *setup) {
     const Av1FilmGrainParams *params = ctx->params;
-    unsigned int sub_x = plane > 0 ? image->subsampling_x : 0U;
-    unsigned int sub_y = plane > 0 ? image->subsampling_y : 0U;
     int w = (int)image->width;
     int h = (int)image->height;
-    int plane_w = (w + (int)sub_x) >> sub_x;
-    int plane_h = (h + (int)sub_y) >> sub_y;
-    int stripe_h = AV1_FG_STRIPE_HEIGHT >> sub_y;
-    int stripe_rows = 32 >> sub_y;
-    int half_w = (w + 1) / 2;
-    int scaling_shift = (int)params->grain_scaling_minus_8 + 8;
-    const int16_t *grain = plane == 0 ? ctx->luma_grain
-                           : (plane == 1 ? ctx->cb_grain : ctx->cr_grain);
-    int16_t *cur = ctx->stripe_current;
-    int16_t *prev = ctx->stripe_previous;
-    uint16_t *out = image->plane[plane];
-    size_t out_stride = image->stride[plane];
-    const uint16_t *luma_out = image->plane[0];
-    size_t luma_stride = image->stride[0];
-    int luma_multiplier = 0;
-    int multiplier = 0;
-    int offset = 0;
-    int luma_num = 0;
 
+    setup->sub_x = plane > 0 ? image->subsampling_x : 0U;
+    setup->sub_y = plane > 0 ? image->subsampling_y : 0U;
+    setup->plane_w = (w + (int)setup->sub_x) >> setup->sub_x;
+    setup->plane_h = (h + (int)setup->sub_y) >> setup->sub_y;
+    setup->stripe_h = AV1_FG_STRIPE_HEIGHT >> setup->sub_y;
+    setup->stripe_rows = 32 >> setup->sub_y;
+    setup->half_w = (w + 1) / 2;
+    setup->scaling_shift = (int)params->grain_scaling_minus_8 + 8;
+    setup->grain = plane == 0 ? ctx->luma_grain
+                   : (plane == 1 ? ctx->cb_grain : ctx->cr_grain);
+    setup->luma_multiplier = 0;
+    setup->multiplier = 0;
+    setup->offset = 0;
     if (plane == 1) {
-        luma_multiplier = (int)params->cb_luma_mult - 128;
-        multiplier = (int)params->cb_mult - 128;
-        offset = ((int)params->cb_offset - 256) *
-                 (1 << (ctx->bit_depth - 8U));
+        setup->luma_multiplier = (int)params->cb_luma_mult - 128;
+        setup->multiplier = (int)params->cb_mult - 128;
+        setup->offset = ((int)params->cb_offset - 256) *
+                        (1 << (ctx->bit_depth - 8U));
     } else if (plane == 2) {
-        luma_multiplier = (int)params->cr_luma_mult - 128;
-        multiplier = (int)params->cr_mult - 128;
-        offset = ((int)params->cr_offset - 256) *
-                 (1 << (ctx->bit_depth - 8U));
+        setup->luma_multiplier = (int)params->cr_luma_mult - 128;
+        setup->multiplier = (int)params->cr_mult - 128;
+        setup->offset = ((int)params->cr_offset - 256) *
+                        (1 << (ctx->bit_depth - 8U));
     }
-    for (luma_num = 0; luma_num * stripe_rows < plane_h; ++luma_num) {
-        uint16_t reg = params->grain_seed;
-        int block_x;
-        int row;
+}
 
-        reg = (uint16_t)(reg ^ (uint16_t)(((luma_num * 37 + 178) & 255) << 8));
-        reg = (uint16_t)(reg ^ (uint16_t)((luma_num * 173 + 105) & 255));
-        for (block_x = 0; block_x < half_w; block_x += 16) {
-            uint32_t rand = av1_film_grain_random(&reg, 8U);
-            int offset_x = (int)(rand >> 4);
-            int offset_y = (int)(rand & 15U);
-            int plane_offset_x = sub_x ? 6 + offset_x : 9 + offset_x * 2;
-            int plane_offset_y = sub_y ? 6 + offset_y : 9 + offset_y * 2;
-            int i;
+/*
+ * Fills one stripe's raw noise buffer (cur). The result depends only on ctx
+ * (immutable grain templates/params), the requested luma_num and the
+ * plane's own sub_x/sub_y/half_w/stripe_h -- never on any other stripe's
+ * buffer, and never on frame pixel data -- so this may be called
+ * redundantly, out of order, and concurrently from any thread to
+ * reconstruct any stripe, as long as the caller-provided cur buffer is not
+ * shared with another concurrent caller.
+ */
+static void av1_film_grain_fill_stripe(const Av1FilmGrainContext *ctx,
+                                       const int16_t *grain,
+                                       unsigned int sub_x,
+                                       unsigned int sub_y,
+                                       int half_w,
+                                       int stripe_h,
+                                       int luma_num,
+                                       int16_t *cur) {
+    const Av1FilmGrainParams *params = ctx->params;
+    uint16_t reg = params->grain_seed;
+    int block_x;
 
-            for (i = 0; i < stripe_h; ++i) {
-                int j;
+    reg = (uint16_t)(reg ^ (uint16_t)(((luma_num * 37 + 178) & 255) << 8));
+    reg = (uint16_t)(reg ^ (uint16_t)((luma_num * 173 + 105) & 255));
+    for (block_x = 0; block_x < half_w; block_x += 16) {
+        uint32_t rand = av1_film_grain_random(&reg, 8U);
+        int offset_x = (int)(rand >> 4);
+        int offset_y = (int)(rand & 15U);
+        int plane_offset_x = sub_x ? 6 + offset_x : 9 + offset_x * 2;
+        int plane_offset_y = sub_y ? 6 + offset_y : 9 + offset_y * 2;
+        int i;
 
-                for (j = 0; j < (AV1_FG_STRIPE_HEIGHT >> sub_x); ++j) {
-                    int g = grain[(plane_offset_y + i) * AV1_FG_GRAIN_WIDTH +
-                                  (plane_offset_x + j)];
+        for (i = 0; i < stripe_h; ++i) {
+            int j;
 
-                    if (sub_x == 0U) {
-                        int col = block_x * 2 + j;
+            for (j = 0; j < (AV1_FG_STRIPE_HEIGHT >> sub_x); ++j) {
+                int g = grain[(plane_offset_y + i) * AV1_FG_GRAIN_WIDTH +
+                              (plane_offset_x + j)];
 
-                        if (j < 2 && params->overlap_flag && block_x > 0) {
-                            int old =
-                                cur[(size_t)i * ctx->stripe_stride + col];
+                if (sub_x == 0U) {
+                    int col = block_x * 2 + j;
 
-                            g = j == 0 ? old * 27 + g * 17 : old * 17 + g * 27;
-                            g = av1_film_grain_clip3(
-                                ctx->grain_min, ctx->grain_max,
-                                av1_film_grain_round2(g, 5U));
-                        }
-                        cur[(size_t)i * ctx->stripe_stride + col] = (int16_t)g;
-                    } else {
-                        int col = block_x + j;
+                    if (j < 2 && params->overlap_flag && block_x > 0) {
+                        int old = cur[(size_t)i * ctx->stripe_stride + col];
 
-                        if (j == 0 && params->overlap_flag && block_x > 0) {
-                            int old =
-                                cur[(size_t)i * ctx->stripe_stride + col];
-
-                            g = old * 23 + g * 22;
-                            g = av1_film_grain_clip3(
-                                ctx->grain_min, ctx->grain_max,
-                                av1_film_grain_round2(g, 5U));
-                        }
-                        cur[(size_t)i * ctx->stripe_stride + col] = (int16_t)g;
-                    }
-                }
-            }
-        }
-        for (row = 0; row < stripe_rows &&
-                      luma_num * stripe_rows + row < plane_h;
-             ++row) {
-            int out_y = luma_num * stripe_rows + row;
-            int x;
-
-            for (x = 0; x < plane_w; ++x) {
-                int g = cur[(size_t)row * ctx->stripe_stride + x];
-                int noise;
-
-                if (sub_y == 0U) {
-                    if (row < 2 && luma_num > 0 && params->overlap_flag) {
-                        int old = prev[(size_t)(row + 32) *
-                                       ctx->stripe_stride + x];
-
-                        g = row == 0 ? old * 27 + g * 17 : old * 17 + g * 27;
+                        g = j == 0 ? old * 27 + g * 17 : old * 17 + g * 27;
                         g = av1_film_grain_clip3(
                             ctx->grain_min, ctx->grain_max,
                             av1_film_grain_round2(g, 5U));
                     }
+                    cur[(size_t)i * ctx->stripe_stride + col] = (int16_t)g;
                 } else {
-                    if (row < 1 && luma_num > 0 && params->overlap_flag) {
-                        int old = prev[(size_t)(row + 16) *
-                                       ctx->stripe_stride + x];
+                    int col = block_x + j;
+
+                    if (j == 0 && params->overlap_flag && block_x > 0) {
+                        int old = cur[(size_t)i * ctx->stripe_stride + col];
 
                         g = old * 23 + g * 22;
                         g = av1_film_grain_clip3(
                             ctx->grain_min, ctx->grain_max,
                             av1_film_grain_round2(g, 5U));
                     }
-                }
-                if (plane == 0) {
-                    int orig = out[(size_t)out_y * out_stride + x];
-
-                    noise = av1_film_grain_round2(
-                        (int64_t)av1_film_grain_scale_lut(ctx, 0, orig) * g,
-                        (unsigned int)scaling_shift);
-                    if (params->num_y_points > 0U) {
-                        out[(size_t)out_y * out_stride + x] = (uint16_t)
-                            av1_film_grain_clip3(min_value, max_luma,
-                                                 orig + noise);
-                    }
-                } else {
-                    int luma_x = x << sub_x;
-                    int luma_y = out_y << sub_y;
-                    int luma_next_x = luma_x + 1 < w ? luma_x + 1 : w - 1;
-                    int average_luma;
-                    int orig = out[(size_t)out_y * out_stride + x];
-                    int merged;
-
-                    if (sub_x) {
-                        average_luma = av1_film_grain_round2(
-                            (int)luma_out[(size_t)luma_y * luma_stride +
-                                          luma_x] +
-                                (int)luma_out[(size_t)luma_y * luma_stride +
-                                              luma_next_x],
-                            1U);
-                    } else {
-                        average_luma =
-                            luma_out[(size_t)luma_y * luma_stride + luma_x];
-                    }
-                    if (params->chroma_scaling_from_luma) {
-                        merged = average_luma;
-                    } else {
-                        int combined = average_luma * luma_multiplier +
-                                       orig * multiplier;
-                        int clip_max = (1 << ctx->bit_depth) - 1;
-
-                        merged = av1_film_grain_clip3(
-                            0, clip_max, (combined >> 6) + offset);
-                    }
-                    noise = av1_film_grain_round2(
-                        (int64_t)av1_film_grain_scale_lut(ctx, plane, merged) *
-                            g,
-                        (unsigned int)scaling_shift);
-                    out[(size_t)out_y * out_stride + x] = (uint16_t)
-                        av1_film_grain_clip3(min_value, max_chroma,
-                                             orig + noise);
+                    cur[(size_t)i * ctx->stripe_stride + col] = (int16_t)g;
                 }
             }
         }
+    }
+}
+
+/*
+ * Writes final pixel output for one stripe from its raw noise buffer (cur)
+ * and, when needed for the top overlap rows, the preceding stripe's raw
+ * noise buffer (prev). Reads/writes only rows
+ * [luma_num*stripe_rows, luma_num*stripe_rows+stripe_rows) of plane, which
+ * are disjoint across luma_num, and only reads image->plane[0] (never
+ * writes it unless plane == 0), so stripes of the same plane, and Cb/Cr
+ * stripes of different planes, may be written concurrently; concurrent
+ * luma (plane 0) writes must not overlap in time with concurrent chroma
+ * reads of plane 0.
+ */
+static void av1_film_grain_write_stripe(const Av1FilmGrainContext *ctx,
+                                        const Av1FilmGrainImage *image,
+                                        int plane,
+                                        unsigned int sub_x,
+                                        unsigned int sub_y,
+                                        int plane_w,
+                                        int plane_h,
+                                        int stripe_rows,
+                                        int luma_num,
+                                        const int16_t *cur,
+                                        const int16_t *prev,
+                                        int min_value,
+                                        int max_luma,
+                                        int max_chroma,
+                                        int scaling_shift,
+                                        int luma_multiplier,
+                                        int multiplier,
+                                        int offset) {
+    const Av1FilmGrainParams *params = ctx->params;
+    int w = (int)image->width;
+    uint16_t *out = image->plane[plane];
+    size_t out_stride = image->stride[plane];
+    const uint16_t *luma_out = image->plane[0];
+    size_t luma_stride = image->stride[0];
+    int row;
+
+    for (row = 0; row < stripe_rows &&
+                  luma_num * stripe_rows + row < plane_h;
+         ++row) {
+        int out_y = luma_num * stripe_rows + row;
+        int x;
+
+        for (x = 0; x < plane_w; ++x) {
+            int g = cur[(size_t)row * ctx->stripe_stride + x];
+            int noise;
+
+            if (sub_y == 0U) {
+                if (row < 2 && luma_num > 0 && params->overlap_flag) {
+                    int old = prev[(size_t)(row + 32) *
+                                   ctx->stripe_stride + x];
+
+                    g = row == 0 ? old * 27 + g * 17 : old * 17 + g * 27;
+                    g = av1_film_grain_clip3(
+                        ctx->grain_min, ctx->grain_max,
+                        av1_film_grain_round2(g, 5U));
+                }
+            } else {
+                if (row < 1 && luma_num > 0 && params->overlap_flag) {
+                    int old = prev[(size_t)(row + 16) *
+                                   ctx->stripe_stride + x];
+
+                    g = old * 23 + g * 22;
+                    g = av1_film_grain_clip3(
+                        ctx->grain_min, ctx->grain_max,
+                        av1_film_grain_round2(g, 5U));
+                }
+            }
+            if (plane == 0) {
+                int orig = out[(size_t)out_y * out_stride + x];
+
+                noise = av1_film_grain_round2(
+                    (int64_t)av1_film_grain_scale_lut(ctx, 0, orig) * g,
+                    (unsigned int)scaling_shift);
+                if (params->num_y_points > 0U) {
+                    out[(size_t)out_y * out_stride + x] = (uint16_t)
+                        av1_film_grain_clip3(min_value, max_luma,
+                                             orig + noise);
+                }
+            } else {
+                int luma_x = x << sub_x;
+                int luma_y = out_y << sub_y;
+                int luma_next_x = luma_x + 1 < w ? luma_x + 1 : w - 1;
+                int average_luma;
+                int orig = out[(size_t)out_y * out_stride + x];
+                int merged;
+
+                if (sub_x) {
+                    average_luma = av1_film_grain_round2(
+                        (int)luma_out[(size_t)luma_y * luma_stride +
+                                      luma_x] +
+                            (int)luma_out[(size_t)luma_y * luma_stride +
+                                          luma_next_x],
+                        1U);
+                } else {
+                    average_luma =
+                        luma_out[(size_t)luma_y * luma_stride + luma_x];
+                }
+                if (params->chroma_scaling_from_luma) {
+                    merged = average_luma;
+                } else {
+                    int combined = average_luma * luma_multiplier +
+                                   orig * multiplier;
+                    int clip_max = (1 << ctx->bit_depth) - 1;
+
+                    merged = av1_film_grain_clip3(
+                        0, clip_max, (combined >> 6) + offset);
+                }
+                noise = av1_film_grain_round2(
+                    (int64_t)av1_film_grain_scale_lut(ctx, plane, merged) *
+                        g,
+                    (unsigned int)scaling_shift);
+                out[(size_t)out_y * out_stride + x] = (uint16_t)
+                    av1_film_grain_clip3(min_value, max_chroma,
+                                         orig + noise);
+            }
+        }
+    }
+}
+
+static void av1_film_grain_add_noise_plane(Av1FilmGrainContext *ctx,
+                                           const Av1FilmGrainImage *image,
+                                           int plane,
+                                           int min_value,
+                                           int max_luma,
+                                           int max_chroma) {
+    Av1FilmGrainPlaneSetup setup;
+    int16_t *cur = ctx->stripe_current;
+    int16_t *prev = ctx->stripe_previous;
+    int luma_num;
+
+    av1_film_grain_plane_setup(ctx, image, plane, &setup);
+    for (luma_num = 0; luma_num * setup.stripe_rows < setup.plane_h;
+         ++luma_num) {
+        av1_film_grain_fill_stripe(ctx, setup.grain, setup.sub_x, setup.sub_y,
+                                   setup.half_w, setup.stripe_h, luma_num,
+                                   cur);
+        av1_film_grain_write_stripe(
+            ctx, image, plane, setup.sub_x, setup.sub_y, setup.plane_w,
+            setup.plane_h, setup.stripe_rows, luma_num, cur, prev, min_value,
+            max_luma, max_chroma, setup.scaling_shift, setup.luma_multiplier,
+            setup.multiplier, setup.offset);
         {
             int16_t *swap = prev;
 
@@ -652,10 +783,146 @@ static void av1_film_grain_add_noise_plane(Av1FilmGrainContext *ctx,
     }
 }
 
-AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
-                                   const Av1FilmGrainImage *image,
-                                   void *scratch,
-                                   size_t scratch_size) {
+/* Number of AV1_FG_STRIPE_HEIGHT-class stripes needed to cover plane_h. */
+static size_t av1_film_grain_stripe_count(int plane_h, int stripe_rows) {
+    return (size_t)((plane_h + stripe_rows - 1) / stripe_rows);
+}
+
+/*
+ * Per-worker parallel context for the chroma (Cb/Cr) stripe application
+ * phase. worker_scratch holds worker_count independent
+ * (current, previous) stripe buffer pairs; a task only ever touches the
+ * slice at its own worker_index, so distinct workers never share mutable
+ * scratch. Work indices enumerate (plane slot, luma_num) pairs so Cb and Cr
+ * stripes can be load-balanced together across workers.
+ */
+typedef struct {
+    const Av1FilmGrainContext *ctx;
+    const Av1FilmGrainImage *image;
+    int min_value;
+    int max_luma;
+    int max_chroma;
+    int16_t *worker_scratch;
+    size_t per_worker_samples;
+    size_t worker_count;
+    uint8_t planes[2];
+    uint8_t plane_count;
+    size_t stripes_per_plane;
+} Av1FilmGrainChromaParallel;
+
+static AvifdecStatus av1_film_grain_chroma_task(size_t begin,
+                                                size_t end,
+                                                size_t worker_index,
+                                                void *arg) {
+    Av1FilmGrainChromaParallel *parallel = (Av1FilmGrainChromaParallel *)arg;
+    size_t work_count;
+    size_t index;
+    int16_t *cur;
+    int16_t *prev;
+
+    if (parallel == 0 || begin > end ||
+        worker_index >= parallel->worker_count ||
+        parallel->stripes_per_plane == 0U ||
+        !avifdec_size_multiply((size_t)parallel->plane_count,
+                               parallel->stripes_per_plane, &work_count) ||
+        end > work_count) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    cur = parallel->worker_scratch +
+          worker_index * parallel->per_worker_samples;
+    prev = cur + (size_t)AV1_FG_STRIPE_HEIGHT * parallel->ctx->stripe_stride;
+    for (index = begin; index < end; ++index) {
+        unsigned int slot = (unsigned int)(index / parallel->stripes_per_plane);
+        int luma_num = (int)(index % parallel->stripes_per_plane);
+        int plane = parallel->planes[slot];
+        Av1FilmGrainPlaneSetup setup;
+
+        av1_film_grain_plane_setup(parallel->ctx, parallel->image, plane,
+                                   &setup);
+        av1_film_grain_fill_stripe(parallel->ctx, setup.grain, setup.sub_x,
+                                   setup.sub_y, setup.half_w, setup.stripe_h,
+                                   luma_num, cur);
+        if (parallel->ctx->params->overlap_flag && luma_num > 0) {
+            av1_film_grain_fill_stripe(parallel->ctx, setup.grain,
+                                       setup.sub_x, setup.sub_y,
+                                       setup.half_w, setup.stripe_h,
+                                       luma_num - 1, prev);
+        }
+        av1_film_grain_write_stripe(
+            parallel->ctx, parallel->image, plane, setup.sub_x, setup.sub_y,
+            setup.plane_w, setup.plane_h, setup.stripe_rows, luma_num, cur,
+            prev, parallel->min_value, parallel->max_luma,
+            parallel->max_chroma, setup.scaling_shift,
+            setup.luma_multiplier, setup.multiplier, setup.offset);
+    }
+    return AVIFDEC_OK;
+}
+
+/*
+ * Per-worker parallel context for the luma (plane 0) stripe application
+ * phase. Must only be dispatched after every chroma task has completed
+ * (chroma tasks read plane 0 before any luma task may write it).
+ */
+typedef struct {
+    const Av1FilmGrainContext *ctx;
+    const Av1FilmGrainImage *image;
+    int min_value;
+    int max_luma;
+    int max_chroma;
+    int16_t *worker_scratch;
+    size_t per_worker_samples;
+    size_t worker_count;
+} Av1FilmGrainLumaParallel;
+
+static AvifdecStatus av1_film_grain_luma_task(size_t begin,
+                                              size_t end,
+                                              size_t worker_index,
+                                              void *arg) {
+    Av1FilmGrainLumaParallel *parallel = (Av1FilmGrainLumaParallel *)arg;
+    Av1FilmGrainPlaneSetup setup;
+    int16_t *cur;
+    int16_t *prev;
+    size_t stripe_count;
+    size_t index;
+
+    if (parallel == 0 || begin > end ||
+        worker_index >= parallel->worker_count) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    av1_film_grain_plane_setup(parallel->ctx, parallel->image, 0, &setup);
+    stripe_count =
+        av1_film_grain_stripe_count(setup.plane_h, setup.stripe_rows);
+    if (end > stripe_count) return AVIFDEC_INVALID_ARGUMENT;
+    cur = parallel->worker_scratch +
+          worker_index * parallel->per_worker_samples;
+    prev = cur + (size_t)AV1_FG_STRIPE_HEIGHT * parallel->ctx->stripe_stride;
+    for (index = begin; index < end; ++index) {
+        int luma_num = (int)index;
+
+        av1_film_grain_fill_stripe(parallel->ctx, setup.grain, setup.sub_x,
+                                   setup.sub_y, setup.half_w, setup.stripe_h,
+                                   luma_num, cur);
+        if (parallel->ctx->params->overlap_flag && luma_num > 0) {
+            av1_film_grain_fill_stripe(parallel->ctx, setup.grain,
+                                       setup.sub_x, setup.sub_y,
+                                       setup.half_w, setup.stripe_h,
+                                       luma_num - 1, prev);
+        }
+        av1_film_grain_write_stripe(
+            parallel->ctx, parallel->image, 0, setup.sub_x, setup.sub_y,
+            setup.plane_w, setup.plane_h, setup.stripe_rows, luma_num, cur,
+            prev, parallel->min_value, parallel->max_luma,
+            parallel->max_chroma, setup.scaling_shift,
+            setup.luma_multiplier, setup.multiplier, setup.offset);
+    }
+    return AVIFDEC_OK;
+}
+
+AvifdecStatus av1_film_grain_apply_ex(const Av1FilmGrainParams *params,
+                                      const Av1FilmGrainImage *image,
+                                      void *scratch,
+                                      size_t scratch_size,
+                                      const AvifdecExecutor *executor) {
     Av1FilmGrainContext ctx;
     int16_t *base;
     size_t offset = 0;
@@ -666,12 +933,21 @@ AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
     int min_value;
     int max_luma;
     int max_chroma;
+    size_t worker_count;
+    uint8_t chroma_planes[2];
+    unsigned int chroma_plane_count = 0U;
     AvifdecStatus status;
 
     if (params == 0 || image == 0) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
     if (!params->apply_grain) return AVIFDEC_OK;
+    if (executor != 0 &&
+        (executor->worker_count == 0U ||
+         executor->worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS ||
+         executor->parallel_for == 0)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
     if (scratch == 0 ||
         (image->bit_depth != 8U && image->bit_depth != 10U &&
          image->bit_depth != 12U) ||
@@ -692,7 +968,13 @@ AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
             return AVIFDEC_INVALID_ARGUMENT;
         }
     }
-    status = av1_film_grain_scratch_size(image->width, &required);
+    worker_count = executor != 0 ? executor->worker_count : 1U;
+    if (worker_count > 1U) {
+        status = av1_film_grain_scratch_size_ex(
+            image->width, worker_count, &required);
+    } else {
+        status = av1_film_grain_scratch_size(image->width, &required);
+    }
     if (status != AVIFDEC_OK) return status;
     if (scratch_size < required) return AVIFDEC_INVALID_ARGUMENT;
 
@@ -717,11 +999,17 @@ AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
     ctx.stripe_current = base + offset;
     offset += (size_t)AV1_FG_STRIPE_HEIGHT * stripe_stride;
     ctx.stripe_previous = base + offset;
+    offset += (size_t)AV1_FG_STRIPE_HEIGHT * stripe_stride;
 
     grain_center = 128 << (image->bit_depth - 8U);
     ctx.grain_min = -grain_center;
     ctx.grain_max = (256 << (image->bit_depth - 8U)) - 1 - grain_center;
 
+    /*
+     * Grain template/scaling-LUT generation is a short, inherently serial
+     * autoregressive recurrence over a small (82x73) buffer; it is kept
+     * single-threaded and its outputs are read-only for every worker below.
+     */
     av1_film_grain_generate_luma(&ctx);
     if (plane_count > 1U) {
         av1_film_grain_generate_chroma(&ctx, image->subsampling_x,
@@ -740,21 +1028,120 @@ AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
         max_luma = (256 << (image->bit_depth - 8U)) - 1;
         max_chroma = max_luma;
     }
+
+    chroma_planes[0] = 0U;
+    chroma_planes[1] = 0U;
     if (plane_count > 1U) {
         if ((params->num_cb_points > 0U ||
              params->chroma_scaling_from_luma) &&
             image->plane[1] != 0) {
-            av1_film_grain_add_noise_plane(&ctx, image, 1, min_value,
-                                           max_luma, max_chroma);
+            chroma_planes[chroma_plane_count++] = 1U;
         }
         if ((params->num_cr_points > 0U ||
              params->chroma_scaling_from_luma) &&
             image->plane[2] != 0) {
-            av1_film_grain_add_noise_plane(&ctx, image, 2, min_value,
-                                           max_luma, max_chroma);
+            chroma_planes[chroma_plane_count++] = 2U;
         }
     }
-    av1_film_grain_add_noise_plane(&ctx, image, 0, min_value, max_luma,
-                                   max_chroma);
+
+    if (worker_count <= 1U) {
+        unsigned int i;
+
+        for (i = 0U; i < chroma_plane_count; ++i) {
+            av1_film_grain_add_noise_plane(
+                &ctx, image, (int)chroma_planes[i], min_value, max_luma,
+                max_chroma);
+        }
+        av1_film_grain_add_noise_plane(&ctx, image, 0, min_value, max_luma,
+                                       max_chroma);
+        return AVIFDEC_OK;
+    }
+
+    /*
+     * Parallel path: chroma stripes (disjoint Cb/Cr output rows) are
+     * distributed across workers first and fully complete (parallel_for is
+     * synchronous) before luma stripes -- which write plane 0 -- are
+     * dispatched, so no worker ever reads luma samples that a concurrent
+     * worker is writing. Each worker uses only its own scratch slice.
+     */
+    {
+        int16_t *worker_scratch = ctx.stripe_current;
+        size_t per_worker_samples =
+            2U * (size_t)AV1_FG_STRIPE_HEIGHT * stripe_stride;
+        Av1FilmGrainPlaneSetup luma_setup;
+        size_t luma_stripes;
+
+        av1_film_grain_plane_setup(&ctx, image, 0, &luma_setup);
+        luma_stripes = av1_film_grain_stripe_count(
+            luma_setup.plane_h, luma_setup.stripe_rows);
+
+        if (chroma_plane_count > 0U) {
+            Av1FilmGrainChromaParallel chroma_parallel;
+            Av1FilmGrainPlaneSetup chroma_setup;
+            size_t work_count;
+
+            av1_film_grain_plane_setup(&ctx, image, 1, &chroma_setup);
+            chroma_parallel.ctx = &ctx;
+            chroma_parallel.image = image;
+            chroma_parallel.min_value = min_value;
+            chroma_parallel.max_luma = max_luma;
+            chroma_parallel.max_chroma = max_chroma;
+            chroma_parallel.worker_scratch = worker_scratch;
+            chroma_parallel.per_worker_samples = per_worker_samples;
+            chroma_parallel.worker_count = worker_count;
+            chroma_parallel.planes[0] = chroma_planes[0];
+            chroma_parallel.planes[1] = chroma_planes[1];
+            chroma_parallel.plane_count = (uint8_t)chroma_plane_count;
+            chroma_parallel.stripes_per_plane = av1_film_grain_stripe_count(
+                chroma_setup.plane_h, chroma_setup.stripe_rows);
+            if (!avifdec_size_multiply((size_t)chroma_plane_count,
+                                       chroma_parallel.stripes_per_plane,
+                                       &work_count)) {
+                return AVIFDEC_OVERFLOW;
+            }
+            if (work_count > 1U) {
+                status = executor->parallel_for(
+                    executor->user_data, work_count, 1U,
+                    av1_film_grain_chroma_task, &chroma_parallel);
+            } else if (work_count == 1U) {
+                status = av1_film_grain_chroma_task(
+                    0U, 1U, 0U, &chroma_parallel);
+            } else {
+                status = AVIFDEC_OK;
+            }
+            if (status != AVIFDEC_OK) return status;
+        }
+
+        {
+            Av1FilmGrainLumaParallel luma_parallel;
+
+            luma_parallel.ctx = &ctx;
+            luma_parallel.image = image;
+            luma_parallel.min_value = min_value;
+            luma_parallel.max_luma = max_luma;
+            luma_parallel.max_chroma = max_chroma;
+            luma_parallel.worker_scratch = worker_scratch;
+            luma_parallel.per_worker_samples = per_worker_samples;
+            luma_parallel.worker_count = worker_count;
+            if (luma_stripes > 1U) {
+                status = executor->parallel_for(
+                    executor->user_data, luma_stripes, 1U,
+                    av1_film_grain_luma_task, &luma_parallel);
+            } else if (luma_stripes == 1U) {
+                status = av1_film_grain_luma_task(
+                    0U, 1U, 0U, &luma_parallel);
+            } else {
+                status = AVIFDEC_OK;
+            }
+            if (status != AVIFDEC_OK) return status;
+        }
+    }
     return AVIFDEC_OK;
+}
+
+AvifdecStatus av1_film_grain_apply(const Av1FilmGrainParams *params,
+                                   const Av1FilmGrainImage *image,
+                                   void *scratch,
+                                   size_t scratch_size) {
+    return av1_film_grain_apply_ex(params, image, scratch, scratch_size, 0);
 }

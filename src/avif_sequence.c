@@ -119,6 +119,24 @@ typedef struct {
     size_t base_offset;
 } AvifSeqBoxIter;
 
+/*
+ * Mirrors avif_executor_valid()/avif_executor_width() in avif.c: a null
+ * executor means "run serially", and any non-null executor must present a
+ * usable parallel_for and an in-range worker_count. Each translation unit
+ * that accepts an AvifdecExecutor directly performs this same validation
+ * locally rather than sharing a helper across files.
+ */
+static int avifseq_executor_valid(const AvifdecExecutor *executor) {
+    return executor == 0 ||
+           (executor->parallel_for != 0 &&
+            executor->worker_count != 0U &&
+            executor->worker_count <= AVIFDEC_EXECUTOR_MAX_WORKERS);
+}
+
+static size_t avifseq_executor_width(const AvifdecExecutor *executor) {
+    return executor == 0 ? 1U : executor->worker_count;
+}
+
 static AvifdecStatus avifseq_fail(AvifSeqContext *context,
                                   AvifdecStatus status,
                                   size_t offset,
@@ -1604,11 +1622,53 @@ static AvifdecStatus avifseq_build_spans(
     return AVIFDEC_OK;
 }
 
+static AvifdecStatus avifseq_track_workspace_requirement(
+    AvifSeqContext *context,
+    const AvifSeqTrack *track,
+    size_t worker_count,
+    size_t *workspace_required) {
+    size_t first = 0U;
+
+    *workspace_required = 0U;
+    while (first < track->sample_count) {
+        AvifdecSpan spans[AVIF_SEQ_MAX_DECODE_SPANS];
+        AvifdecImageInfo group_info;
+        size_t last = first;
+        size_t span_count;
+        size_t sync_index;
+        AvifdecStatus status;
+
+        while (last + 1U < track->sample_count &&
+               !track->sample_sync[last + 1U]) {
+            ++last;
+        }
+        status = avifseq_build_spans(
+            context, track, last, spans, &span_count, &sync_index);
+        if (status != AVIFDEC_OK) return status;
+        if (sync_index != first) {
+            return avifseq_fail(
+                context, AVIFDEC_INVALID_DATA,
+                track->stss.offset, track->stss.type);
+        }
+        avifdec_memory_fill(&group_info, 0U, sizeof(group_info));
+        status = avifdec_av1_query_ex(
+            spans, span_count, &context->limits, worker_count,
+            &group_info, context->error);
+        if (status != AVIFDEC_OK) return status;
+        if (group_info.workspace_required > *workspace_required) {
+            *workspace_required = group_info.workspace_required;
+        }
+        first = last + 1U;
+    }
+    return AVIFDEC_OK;
+}
+
 static AvifdecStatus avifseq_query_frame_context(
     AvifSeqContext *context,
     AvifSeqTrack *main_track,
     AvifSeqTrack *alpha_track,
     size_t frame_index,
+    size_t worker_count,
     AvifdecFrameInfo *frame) {
     AvifdecSpan spans[AVIF_SEQ_MAX_DECODE_SPANS];
     size_t span_count;
@@ -1626,8 +1686,13 @@ static AvifdecStatus avifseq_query_frame_context(
         context, main_track, frame_index, spans,
         &span_count, &sync_index);
     if (status != AVIFDEC_OK) return status;
-    status = avifdec_av1_query(
-        spans, span_count, &context->limits, &frame->image,
+    /*
+     * The main track's workspace sizing tracks the executor width the
+     * caller intends to decode with, so its tile-parallel buffers (if
+     * any) match what avifdec_av1_decode_ex() will actually allocate.
+     */
+    status = avifdec_av1_query_ex(
+        spans, span_count, &context->limits, worker_count, &frame->image,
         context->error);
     if (status != AVIFDEC_OK) return status;
     frame->image.extent_count = span_count;
@@ -1711,6 +1776,15 @@ static AvifdecStatus avifseq_query_frame_context(
             context, alpha_track, frame_index, spans,
             &alpha_span_count, &alpha_sync_index);
         if (status != AVIFDEC_OK) return status;
+        /*
+         * The alpha track is always sized (and later decoded, see
+         * avifdec_sequence_decode_frame_ex()) for a single worker,
+         * independent of worker_count above. It reuses the main track's
+         * workspace buffer sequentially rather than concurrently, and
+         * alpha planes are typically single-tile, so sizing its
+         * tile-parallel buffers for the full executor width would only
+         * add unused per-worker scratch to workspace_required.
+         */
         status = avifdec_av1_query(
             spans, alpha_span_count, &context->limits,
             &alpha_info, context->error);
@@ -1743,12 +1817,27 @@ static AvifdecStatus avifseq_fill_sequence_info(
     AvifSeqContext *context,
     AvifSeqTrack *main_track,
     AvifSeqTrack *alpha_track,
+    size_t worker_count,
     AvifdecSequenceInfo *info) {
     AvifdecFrameInfo first_frame;
+    size_t workspace_required;
     AvifdecStatus status = avifseq_query_frame_context(
-        context, main_track, alpha_track, 0U, &first_frame);
+        context, main_track, alpha_track, 0U, worker_count, &first_frame);
 
     if (status != AVIFDEC_OK) return status;
+    status = avifseq_track_workspace_requirement(
+        context, main_track, worker_count, &workspace_required);
+    if (status != AVIFDEC_OK) return status;
+    if (alpha_track != 0) {
+        size_t alpha_workspace_required;
+
+        status = avifseq_track_workspace_requirement(
+            context, alpha_track, 1U, &alpha_workspace_required);
+        if (status != AVIFDEC_OK) return status;
+        if (alpha_workspace_required > workspace_required) {
+            workspace_required = alpha_workspace_required;
+        }
+    }
     avifdec_memory_fill(info, 0U, sizeof(*info));
     info->main_track_id = main_track->track_id;
     info->alpha_track_id =
@@ -1792,8 +1881,7 @@ static AvifdecStatus avifseq_fill_sequence_info(
     info->timescale = main_track->media_timescale;
     info->duration = main_track->media_duration;
     info->frame_count = main_track->sample_count;
-    info->workspace_required =
-        first_frame.image.workspace_required;
+    info->workspace_required = workspace_required;
     info->has_alpha = alpha_track != 0;
     info->alpha_premultiplied =
         alpha_track != 0 && main_track->has_prem;
@@ -1838,10 +1926,11 @@ static AvifdecStatus avifseq_fill_sequence_info(
     return AVIFDEC_OK;
 }
 
-AvifdecStatus avifdec_sequence_query(
+AvifdecStatus avifdec_sequence_query_ex(
     const void *data,
     size_t size,
     const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
     AvifdecSequenceInfo *info,
     AvifdecError *error) {
     AvifSeqContext context;
@@ -1849,7 +1938,8 @@ AvifdecStatus avifdec_sequence_query(
     AvifSeqTrack *alpha_track;
     AvifdecStatus status;
 
-    if (info == 0 || (data == 0 && size != 0U)) {
+    if (info == 0 || !avifseq_executor_valid(executor) ||
+        (data == 0 && size != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
     status = avifseq_open(
@@ -1857,7 +1947,44 @@ AvifdecStatus avifdec_sequence_query(
         error);
     if (status != AVIFDEC_OK) return status;
     return avifseq_fill_sequence_info(
-        &context, main_track, alpha_track, info);
+        &context, main_track, alpha_track,
+        avifseq_executor_width(executor), info);
+}
+
+AvifdecStatus avifdec_sequence_query(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    AvifdecSequenceInfo *info,
+    AvifdecError *error) {
+    return avifdec_sequence_query_ex(
+        data, size, limits, 0, info, error);
+}
+
+AvifdecStatus avifdec_sequence_frame_query_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    size_t frame_index,
+    AvifdecFrameInfo *frame,
+    AvifdecError *error) {
+    AvifSeqContext context;
+    AvifSeqTrack *main_track;
+    AvifSeqTrack *alpha_track;
+    AvifdecStatus status;
+
+    if (frame == 0 || !avifseq_executor_valid(executor) ||
+        (data == 0 && size != 0U)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    status = avifseq_open(
+        &context, data, size, limits, &main_track, &alpha_track,
+        error);
+    if (status != AVIFDEC_OK) return status;
+    return avifseq_query_frame_context(
+        &context, main_track, alpha_track, frame_index,
+        avifseq_executor_width(executor), frame);
 }
 
 AvifdecStatus avifdec_sequence_frame_query(
@@ -1867,26 +1994,15 @@ AvifdecStatus avifdec_sequence_frame_query(
     size_t frame_index,
     AvifdecFrameInfo *frame,
     AvifdecError *error) {
-    AvifSeqContext context;
-    AvifSeqTrack *main_track;
-    AvifSeqTrack *alpha_track;
-    AvifdecStatus status;
-
-    if (frame == 0 || (data == 0 && size != 0U)) {
-        return AVIFDEC_INVALID_ARGUMENT;
-    }
-    status = avifseq_open(
-        &context, data, size, limits, &main_track, &alpha_track,
-        error);
-    if (status != AVIFDEC_OK) return status;
-    return avifseq_query_frame_context(
-        &context, main_track, alpha_track, frame_index, frame);
+    return avifdec_sequence_frame_query_ex(
+        data, size, limits, 0, frame_index, frame, error);
 }
 
-AvifdecStatus avifdec_sequence_decode_frame(
+AvifdecStatus avifdec_sequence_decode_frame_ex(
     const void *data,
     size_t size,
     const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
     size_t frame_index,
     void *workspace,
     size_t workspace_size,
@@ -1903,7 +2019,7 @@ AvifdecStatus avifdec_sequence_decode_frame(
     size_t sync_index;
     AvifdecStatus status;
 
-    if (image == 0 || frame == 0 ||
+    if (image == 0 || frame == 0 || !avifseq_executor_valid(executor) ||
         (data == 0 && size != 0U) ||
         (workspace == 0 && workspace_size != 0U)) {
         return AVIFDEC_INVALID_ARGUMENT;
@@ -1913,7 +2029,8 @@ AvifdecStatus avifdec_sequence_decode_frame(
         error);
     if (status != AVIFDEC_OK) return status;
     status = avifseq_query_frame_context(
-        &context, main_track, alpha_track, frame_index, frame);
+        &context, main_track, alpha_track, frame_index,
+        avifseq_executor_width(executor), frame);
     if (status != AVIFDEC_OK) return status;
     if (workspace_size < frame->image.workspace_required) {
         return AVIFDEC_OUT_OF_MEMORY;
@@ -1922,8 +2039,16 @@ AvifdecStatus avifdec_sequence_decode_frame(
         &context, main_track, frame_index, spans,
         &span_count, &sync_index);
     if (status != AVIFDEC_OK) return status;
-    status = avifdec_av1_decode(
-        spans, span_count, &context.limits, &frame->image,
+    /*
+     * This single call replays every frame from sync_index through
+     * frame_index in strict, serial dependency order internally (later
+     * frames may reference earlier ones as AV1 references), but lets
+     * each individual frame's independent AV1 tiles and post-filter row
+     * units run across the executor's workers, exactly as
+     * avifdec_decode_ex() does for a single still image.
+     */
+    status = avifdec_av1_decode_ex(
+        spans, span_count, &context.limits, executor, &frame->image,
         workspace, workspace_size, image,
         trace == 0 ? &local_trace : trace, error);
     if (status != AVIFDEC_OK || alpha_track == 0) return status;
@@ -1947,6 +2072,15 @@ AvifdecStatus avifdec_sequence_decode_frame(
         avifdec_memory_fill(&alpha_image, 0U, sizeof(alpha_image));
         alpha_image.planes[0] = image->alpha_plane;
         alpha_image.strides[0] = image->alpha_stride;
+        /*
+         * Always serial (see avifseq_query_frame_context()): alpha's
+         * workspace contribution is only ever sized for one worker, and
+         * it reuses the main track's workspace buffer after that decode
+         * has returned rather than concurrently with it, so running it
+         * through the executor here would either read/write tile-worker
+         * buffers that were never allocated, or - if sized for it - race
+         * the main decode's use of the same arena.
+         */
         status = avifdec_av1_decode(
             spans, span_count, &context.limits, &alpha_info,
             workspace, workspace_size, &alpha_image, &alpha_trace,
@@ -1959,4 +2093,20 @@ AvifdecStatus avifdec_sequence_decode_frame(
         image->alpha_premultiplied = main_track->has_prem;
     }
     return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_sequence_decode_frame(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    size_t frame_index,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecFrameInfo *frame,
+    AvifdecError *error) {
+    return avifdec_sequence_decode_frame_ex(
+        data, size, limits, 0, frame_index, workspace, workspace_size,
+        image, trace, frame, error);
 }

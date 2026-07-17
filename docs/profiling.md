@@ -440,6 +440,51 @@ files are byte-identical. A clean link remains 365,456 bytes because the added
 code fits the existing file alignment; the allocated text/read-only column
 increases from 354,605 to 355,629 bytes (1,024 bytes, 0.3%).
 
+## Remaining decoder parallelism
+
+The executor now also covers loop filtering, super-resolution, film-grain
+stripe application, frame/reference copies, diagnostic plane checksums, and
+the AV1 work inside ordered sequence-frame replay. Loop filtering uses a
+barrier between vertical mi-row units and horizontal mi-column units.
+Super-resolution dispatches independent output rows. Film-grain template and
+scaling-table generation remains serial; chroma stripes complete before luma
+stripes so chroma never reads concurrently modified luma samples.
+
+The sequence `_ex` query scans each sync group once and returns the maximum
+workspace required by any group. Tile workspace planning tracks the maximum
+tile count within a replay rather than the cumulative count across frames.
+This preserves the size-once/decode-any-frame contract. Auxiliary alpha is
+still decoded serially in the same reusable workspace.
+
+Three warm runs used the 7563x5042 eight-tile image plus generated 1920x1080
+active-filter, super-resolution, film-grain, and three-frame sequence
+fixtures:
+
+| Workload | 1 worker | 4 workers | 8 workers | Automatic (24 CPUs) |
+| --- | ---: | ---: | ---: | ---: |
+| Large raw output | 3.96 s | 1.30 s | 0.86 s | 0.85 s |
+| Large diagnostic trace | 3.89 s | 1.25 s | 0.82 s | 0.82 s |
+| Active loop filter/CDEF | 0.56 s | 0.17 s | 0.12 s | 0.10 s |
+| Active super-resolution | 0.29 s | 0.17 s | 0.16 s | 0.15 s |
+| Active film grain | 0.35 s | 0.23 s | 0.21 s | 0.21 s |
+| Sequence frame 2, three-frame replay | 2.23 s | 0.68 s | 0.48 s | 0.46 s |
+
+Automatic workers therefore provide 4.7x diagnostic-trace speedup, 5.6x on
+the active-filter fixture, and 4.8x on the sequence replay. Super-resolution
+and film grain scale less because their serial setup and the rest of the AV1
+pipeline dominate these short fixtures. All worker widths produced
+byte-identical raw frames and identical normalized trace/checksum output.
+
+Loop-filter, super-resolution, copy, and checksum dispatch add no decoder
+workspace. Film grain adds
+`2 * 34 * (width + 64) * sizeof(int16_t)` bytes per additional worker; at
+1920 pixels this is 269,824 bytes. The 1920x1080 grain fixture requires
+31,132,278 bytes with one worker, 32,109,673 with four, and 33,411,321 with
+eight; the remainder is existing tile-worker scratch. Peak RSS stayed within
+measurement noise for every non-grain workload. The clean x86-64 static PIE
+is 373,648 bytes, 8,192 bytes above the prior 365,456-byte baseline; its
+text/read-only column is 362,797 bytes.
+
 ## Validation
 
 Run the complete suite without overriding `CFLAGS` on the `make test` command line:

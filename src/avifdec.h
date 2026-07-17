@@ -294,6 +294,7 @@ typedef struct {
     AvifdecTimecode timecode;
     const unsigned char *icc_data;
     size_t icc_size;
+    size_t workspace_tile_capacity;
 } AvifdecImageInfo;
 
 typedef struct {
@@ -396,6 +397,14 @@ AvifdecStatus avifdec_trace(const void *data,
                             size_t workspace_size,
                             AvifdecEntropyTrace *trace,
                             AvifdecError *error);
+AvifdecStatus avifdec_trace_ex(const void *data,
+                               size_t size,
+                               const AvifdecLimits *limits,
+                               const AvifdecExecutor *executor,
+                               void *workspace,
+                               size_t workspace_size,
+                               AvifdecEntropyTrace *trace,
+                               AvifdecError *error);
 
 AvifdecStatus avifdec_decode(const void *data,
                              size_t size,
@@ -494,12 +503,41 @@ AvifdecStatus avifdec_sequence_query(const void *data,
                                      AvifdecSequenceInfo *info,
                                      AvifdecError *error);
 
+/*
+ * Executor-aware variant of avifdec_sequence_query(). The executor only
+ * affects how AvifdecSequenceInfo.workspace_required is sized across all
+ * frames, matching the width that will be used to decode; it is never
+ * retained. Pass the same executor (or none) that will later be passed to
+ * avifdec_sequence_decode_frame_ex() so one allocation remains valid for
+ * every frame.
+ */
+AvifdecStatus avifdec_sequence_query_ex(const void *data,
+                                        size_t size,
+                                        const AvifdecLimits *limits,
+                                        const AvifdecExecutor *executor,
+                                        AvifdecSequenceInfo *info,
+                                        AvifdecError *error);
+
 AvifdecStatus avifdec_sequence_frame_query(const void *data,
                                            size_t size,
                                            const AvifdecLimits *limits,
                                            size_t frame_index,
                                            AvifdecFrameInfo *frame,
                                            AvifdecError *error);
+
+/*
+ * Executor-aware variant of avifdec_sequence_frame_query(). Sizes
+ * AvifdecFrameInfo.image.workspace_required for the given executor's
+ * width so it matches a subsequent avifdec_sequence_decode_frame_ex()
+ * call made with the same executor.
+ */
+AvifdecStatus avifdec_sequence_frame_query_ex(const void *data,
+                                              size_t size,
+                                              const AvifdecLimits *limits,
+                                              const AvifdecExecutor *executor,
+                                              size_t frame_index,
+                                              AvifdecFrameInfo *frame,
+                                              AvifdecError *error);
 
 AvifdecStatus avifdec_sequence_decode_frame(const void *data,
                                             size_t size,
@@ -511,5 +549,38 @@ AvifdecStatus avifdec_sequence_decode_frame(const void *data,
                                             AvifdecEntropyTrace *trace,
                                             AvifdecFrameInfo *frame,
                                             AvifdecError *error);
+
+/*
+ * Executor-aware variant of avifdec_sequence_decode_frame().
+ *
+ * Frame dependency order is always replayed serially from the nearest
+ * sync frame through frame_index (each decoded AV1 frame may depend on
+ * previously decoded reference frames), but the executor is used within
+ * each individual AV1 frame decode to parallelize independent tiles and
+ * post-filter row units, exactly as avifdec_decode_ex() does for a single
+ * still image. workspace_size must satisfy the workspace_required that
+ * avifdec_sequence_frame_query_ex() (or this function's own internal
+ * query) reports for this same executor.
+ *
+ * The auxiliary alpha track (if any) is always decoded with an effective
+ * executor width of 1, matching how its contribution to
+ * workspace_required is sized: it reuses the same workspace buffer as
+ * the main track sequentially after the main track's decode returns, so
+ * running it concurrently with the main track would need either a
+ * reentrant executor capable of servicing two simultaneous top-level
+ * parallel_for calls, or a second, separately sized workspace buffer to
+ * avoid both decodes writing into the same arena at once.
+ */
+AvifdecStatus avifdec_sequence_decode_frame_ex(const void *data,
+                                               size_t size,
+                                               const AvifdecLimits *limits,
+                                               const AvifdecExecutor *executor,
+                                               size_t frame_index,
+                                               void *workspace,
+                                               size_t workspace_size,
+                                               AvifdecImage *image,
+                                               AvifdecEntropyTrace *trace,
+                                               AvifdecFrameInfo *frame,
+                                               AvifdecError *error);
 
 #endif
