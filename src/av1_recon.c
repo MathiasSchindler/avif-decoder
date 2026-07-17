@@ -148,6 +148,8 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
     }
     denominator = av1_recon_dq_denom(tx_size);
     {
+    const unsigned int denom_shift =
+        denominator == 4U ? 2U : denominator == 2U ? 1U : 0U;
     const uint32_t q_dc = av1_recon_dc_quant(
         params->bit_depth, params->q_index + av1_recon_dc_delta(params));
     const uint32_t q_ac = av1_recon_ac_quant(
@@ -170,7 +172,7 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
         }
         product = (int64_t)quantized[index] * q2;
         magnitude = product < 0 ? (uint64_t)(-product) : (uint64_t)product;
-        magnitude = (magnitude & 0xffffffU) / denominator;
+        magnitude = (magnitude & 0xffffffU) >> denom_shift;
         value = product < 0 ? -(int64_t)magnitude : (int64_t)magnitude;
         dequantized[index] = av1_recon_clip_dequant(value, params->bit_depth);
     }
