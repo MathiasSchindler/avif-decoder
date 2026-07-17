@@ -2334,6 +2334,10 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
         frame->spatial_id != state->output_spatial_layer) {
         return AVIFDEC_OK;
     }
+    if (frame->upscaled_width < state->output_width ||
+        frame->frame_height < state->output_height) {
+        return AVIFDEC_OK;
+    }
     status = av1_copy_image(
         state->image, &state->restored_planes, sequence,
         frame->upscaled_width, frame->frame_height,

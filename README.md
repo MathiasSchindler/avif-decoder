@@ -52,8 +52,9 @@ The generated-table reproduction checks run when the ignored
 `docs/av1.html` specification file is available. Without that maintainer
 input, `make test` reports the skipped check and runs the rest of the suite.
 
-`make`, `make test`, `make wasm`, and `make clean` are the complete public
-Makefile interface.
+`make`, `make test`, `make wasm`, `make fuzz`, `make fuzz-seeds`,
+`make fuzz-smoke`, `make fuzz-campaign`, `make fuzz-differential`, and
+`make clean` are the complete public Makefile interface.
 
 The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
 tiles, AV1 bitstream tiles, sample-transform output rows, loop-filter
@@ -395,9 +396,14 @@ are never linked into `avifdec`.
 
 A hosted coverage-guided harness is available at
 [`tests/fuzz.c`](tests/fuzz.c) for Clang
-`-fsanitize=fuzzer,address,undefined` campaigns. The harness uses a
-deterministic out-of-order four-worker executor so valid multi-tile inputs also
-exercise executor workspace planning and ordered parallel commits.
+libFuzzer, ASan, UBSan, and practical integer-sanitizer campaigns. It checks
+exact queried workspace sizes at varied alignments and compares serial,
+two-worker, and four-worker output and traces. Seed generation includes
+checked-in and generated valid AVIFs, retained regression inputs, and malformed
+container/table variants. Accepted still images can be compared byte-for-byte
+with available libavif backends. See
+[`docs/fuzzing.md`](docs/fuzzing.md) for the defensive pre-release robustness
+workflow.
 
 ## Known limitations
 

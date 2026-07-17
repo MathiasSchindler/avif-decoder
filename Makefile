@@ -12,6 +12,9 @@ STRICT_UNIT := $(BUILD_DIR)/unit
 HOST_UNIT := build/host/unit
 OBU_TRACE := $(BUILD_DIR)/obu-trace
 THREAD_UNIT := $(BUILD_DIR)/thread-unit
+FUZZ_BUILD_DIR := build/fuzz
+FUZZ_TARGET := $(FUZZ_BUILD_DIR)/avifdec_fuzzer
+FUZZ_CORPUS := $(FUZZ_BUILD_DIR)/corpus
 WASM_BUILD_DIR := build/wasm
 WASM_LOADER := $(WASM_BUILD_DIR)/avif-decoder.js
 WASM_BINARY := $(WASM_BUILD_DIR)/avif-decoder.wasm
@@ -77,6 +80,12 @@ HOST_TEST_CFLAGS := \
 	-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g \
 	-fsanitize=address,undefined -fno-omit-frame-pointer \
 	-Isrc -Isrc/shared
+FUZZ_CFLAGS := \
+	-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g \
+	-fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined,integer \
+	-fno-sanitize=unsigned-integer-overflow,implicit-integer-sign-change \
+	-fno-sanitize=implicit-integer-truncation,unsigned-shift-base \
+	-Isrc -Isrc/shared
 CORE_C_SOURCES := \
 	src/base.c src/bmff.c src/avif.c src/avif_sequence.c src/avif_rgb.c \
 	src/avif_sato.c src/png.c \
@@ -121,7 +130,8 @@ $(COLD_OBJECTS): CFLAGS += -Os
 
 -include $(DEPENDENCIES)
 
-.PHONY: clean test wasm
+.PHONY: clean test wasm fuzz fuzz-seeds fuzz-smoke fuzz-campaign \
+	fuzz-differential
 
 # Strip symbol/relocation metadata from the release decoder binary only;
 # the custom static-pie startup only needs the dynamic relocation section,
@@ -165,6 +175,31 @@ $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 		src/av1_filter.h src/avifdec.h src/png.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
+
+$(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
+	@mkdir -p $(@D)
+	$(CC) $(FUZZ_CFLAGS) tests/fuzz.c $(CORE_C_SOURCES) -o $@
+
+fuzz: $(FUZZ_TARGET)
+
+fuzz-seeds:
+	sh tests/fuzz-seeds.sh $(FUZZ_CORPUS)
+
+fuzz-smoke: $(FUZZ_TARGET) fuzz-seeds
+	UBSAN_OPTIONS=halt_on_error=1 $(FUZZ_TARGET) \
+		-runs=1000 -max_len=2097152 \
+		-dict=tests/avif.dict -artifact_prefix=$(FUZZ_BUILD_DIR)/ \
+		$(FUZZ_CORPUS)
+
+fuzz-campaign: $(FUZZ_TARGET) fuzz-seeds
+	UBSAN_OPTIONS=halt_on_error=1 $(FUZZ_TARGET) \
+		-max_total_time=$${FUZZ_SECONDS:-3600} -timeout=30 \
+		-max_len=2097152 -rss_limit_mb=4096 \
+		-dict=tests/avif.dict -artifact_prefix=$(FUZZ_BUILD_DIR)/ \
+		$(FUZZ_CORPUS)
+
+fuzz-differential: $(TARGET) fuzz-seeds
+	sh tests/fuzz-differential.sh $(TARGET) $(FUZZ_CORPUS)
 
 $(WASM_LOADER): wasm/avif_wasm.c $(CORE_C_SOURCES) src/avifdec.h
 	@mkdir -p $(@D)

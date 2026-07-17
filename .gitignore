@@ -1,6 +1,7 @@
 /vendor/
 /build/
 /docs/*
+!/docs/fuzzing.md
 !/docs/profiling.md
 /images/
 /.vscode/
