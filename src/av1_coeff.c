@@ -483,7 +483,6 @@ AvifdecStatus av1_coeff_parse_block_select(
     result->eob = 0U;
     result->cul_level = 0U;
     result->dc_category = 0U;
-    avifdec_memory_fill(levels, 0U, sizeof(levels));
     tx_size_context = (av1_tx_size_sqr[tx_size] +
                        av1_tx_size_sqr_up[tx_size] + 1U) >> 1;
     plane_type = plane > 0U;
@@ -497,6 +496,7 @@ AvifdecStatus av1_coeff_parse_block_select(
         av1_coeff_store_context(context, x4, y4, w4, h4, 0U, 0U);
         return AVIFDEC_OK;
     }
+    avifdec_memory_fill(levels, 0U, segment_eob * sizeof(levels[0]));
     if (select_tx_type != 0) {
         AvifdecStatus status = select_tx_type(select_user_data, decoder,
                                               tx_size, &tx_type);
