@@ -147,21 +147,18 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
         return AVIFDEC_INVALID_ARGUMENT;
     }
     denominator = av1_recon_dq_denom(tx_size);
+    {
+    const uint32_t q_dc = av1_recon_dc_quant(
+        params->bit_depth, params->q_index + av1_recon_dc_delta(params));
+    const uint32_t q_ac = av1_recon_ac_quant(
+        params->bit_depth, params->q_index + av1_recon_ac_delta(params));
     for (index = 0U; index < count; ++index) {
-        int q_index = params->q_index;
-        uint32_t q;
+        uint32_t q = index == 0U ? q_dc : q_ac;
         uint32_t q2;
         int64_t product;
         uint64_t magnitude;
         int64_t value;
 
-        if (index == 0U) {
-            q = av1_recon_dc_quant(params->bit_depth,
-                                   q_index + av1_recon_dc_delta(params));
-        } else {
-            q = av1_recon_ac_quant(params->bit_depth,
-                                   q_index + av1_recon_ac_delta(params));
-        }
         q2 = q;
         if (params->using_qmatrix != 0U && tx_type < AV1_TX_IDTX &&
             params->qm_level < 15U) {
@@ -176,6 +173,7 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
         magnitude = (magnitude & 0xffffffU) / denominator;
         value = product < 0 ? -(int64_t)magnitude : (int64_t)magnitude;
         dequantized[index] = av1_recon_clip_dequant(value, params->bit_depth);
+    }
     }
     return AVIFDEC_OK;
 }
