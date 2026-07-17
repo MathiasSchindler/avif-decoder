@@ -3702,6 +3702,7 @@ static int test_av1_loop_restoration(void) {
         Av1BlockTrace trace;
         Av1TileCdfs cdfs;
         Av1TileCdfs fresh_cdfs;
+        Av1TilePaletteContext palette_context;
         Av1SymbolDecoder decoder;
         AvifdecSpan span;
         uint8_t value;
@@ -3718,7 +3719,21 @@ static int test_av1_loop_restoration(void) {
         CHECK(av1_tile_cdfs_checksum(&cdfs) != av1_tile_cdfs_checksum(&fresh_cdfs));
         av1_tile_cdfs_init(&cdfs);
 
-        CHECK(AV1_BLOCK_BASE_CELL_SIZE < sizeof(Av1BlockCell));
+        CHECK(AV1_BLOCK_BASE_CELL_SIZE == 24U);
+        CHECK(sizeof(Av1BlockCell) == 124U);
+        CHECK(av1_tile_palette_context_init(
+                  &palette_context, 8U, 16U, 32U) == AVIFDEC_OK);
+        palette_context.above[0].y[0] = 7U;
+        palette_context.left[0].u[0] = 9U;
+        CHECK(av1_tile_palette_context_new_row_band(
+                  &palette_context, 40U) == AVIFDEC_OK);
+        CHECK(palette_context.above[0].y[0] == 7U &&
+              palette_context.left[0].u[0] == 0U &&
+              palette_context.row_band_start == 40U);
+        CHECK(av1_tile_palette_context_init(
+                  &palette_context, 0U, 0U,
+                  AV1_TILE_PALETTE_ABOVE_MI + 1U) ==
+              AVIFDEC_INVALID_ARGUMENT);
         CHECK(av1_block_state_init_compact(
                   &state, 6U, 8U,
                   (Av1BlockCell *)(void *)compact_cells.bytes,
@@ -4262,7 +4277,7 @@ static int test_av1_loop_restoration(void) {
             AVIFDEC_OK);
         CHECK(info.reduced_still_picture_header == 1U &&
             info.workspace_plane_buffer_count == 2U &&
-            info.workspace_required == 354137U &&
+            info.workspace_required == 272018U &&
             info.workspace_required <= sizeof(workspace));
         CHECK(avifdec_trace(file, sizeof(file), 0, workspace, sizeof(workspace),
                     &trace, &error) == AVIFDEC_OK);

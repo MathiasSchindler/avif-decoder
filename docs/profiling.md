@@ -61,14 +61,16 @@ The large `avifdec_memory_fill` share came from byte-at-a-time loops under `-Os 
 The large file requires 2,386,828,722 bytes of AVIF workspace. This is structural allocation, not a leak. The AV1 workspace includes:
 
 - fourteen padded planar `uint16_t` frame sets for reconstruction, filters, and references;
-- approximately six bytes per visible pixel of additional state for 8-bit color;
+- reference/current/temporal motion storage for non-reduced streams;
 - a per-4x4-cell grid containing `Av1BlockCell`, block metadata, restoration units, CDFs, and contexts.
 
-`Av1BlockCell` is 172 bytes in this build. Reduced-still frames that do not
-permit intra block copy now use a 72-byte stride containing only dimensions,
-segmentation, intra modes, transform state, deltas, and palette predictors.
+`Av1BlockCell` is 124 bytes in this build. Reduced-still frames that do not
+permit intra block copy use a 24-byte stride containing dimensions,
+segmentation, intra modes, transform state, and deltas.
 Inter-capable frames and frames permitting intra block copy retain the full
 cell because motion vectors and reference state remain observable.
+Palette colors use a 33,800-byte tile-local rolling above/left context and the
+current block trace rather than 48 bytes in every persistent cell.
 
 ### Large-image workspace reductions
 
@@ -84,18 +86,21 @@ layout changes reduce its queried workspace:
 | Identity filter and super-resolution planes aliased | 893,072,142 bytes | 471,859,200 bytes |
 | Reduced-still block cells use the 72-byte base stride | 654,301,742 bytes | 238,770,400 bytes |
 | Active quantizer matrices expand into caller workspace | 654,311,774 bytes | -10,032 bytes |
+| Palette colors move out of every block cell | 539,701,982 bytes | 114,609,792 bytes |
+| Obsolete flat pixel margin replaced by exact allocation terms | 310,906,106 bytes | 228,795,876 bytes |
+| Unused reduced-still inter-prediction scratch elided | 310,824,185 bytes | 81,921 bytes |
 
-The cumulative reduction is 1,732,516,948 bytes (72.6%, or 1,652.3 MiB).
+The cumulative reduction is 2,076,004,537 bytes (87.0%, or 1,979.8 MiB).
 Restoration capacity still covers every legal unit-size choice. Inter-frame
 streams retain all reference and motion allocations, and non-reduced streams
 retain the worst-case filter-plane layout because later frames may select
 different tools.
 
-The diagnostic command used for the original baseline now takes 4.13 seconds
-and 422,400 KiB maximum RSS, compared with 5.30 seconds and 2,063,424 KiB
-before these memory changes. A raw-output decode has a 4.22-second median and
-about 534.7 MiB maximum RSS, compared with 4.62 seconds and 766,272 KiB before
-the compact block grid.
+The diagnostic command used for the original baseline now takes 4.06 seconds
+and 310,272 KiB maximum RSS, compared with 5.30 seconds and 2,063,424 KiB
+before these memory changes. A raw-output decode has a 4.13-second median and
+about 411.9 MiB maximum RSS; the difference is the caller-owned planar output,
+which is not part of decoder workspace.
 
 ### Streaming compressed PNG
 
@@ -350,6 +355,57 @@ Four workers reduce wall time by about 60% (2.48x) while adding 450,931 bytes
 of decoder workspace. Widths 1 and 4 produced byte-identical planar output and
 identical ordered diagnostic traces. The reference suite also generates a
 four-tile image and compares serial and threaded output and trace data.
+
+## Second balanced optimization pass
+
+Profiling found that CDEF spent most of its time rechecking bounds for taps
+inside the frame. A four-corner block test now proves the complete +/-2-pixel
+neighborhood is available and bypasses those per-tap checks. Wiener and
+self-guided restoration use the same exact approach for blocks wholly inside
+the frame and restoration stripe; boundary blocks retain the original
+clamping path.
+
+Palette colors were the largest remaining block-grid field. Only the immediate
+above and left palettes are used while parsing, and reconstruction consumes the
+current block before it can be overwritten. Colors therefore moved from every
+cell to a fixed tile-local rolling context. The compact cell stride fell from
+72 to 24 bytes and the full cell from 172 to 124 bytes. Workspace sizing also
+replaced an unmatched six-byte-per-pixel margin with exact non-reduced motion
+storage and omits inter-prediction scratch for reduced-still frames without
+intra block copy.
+
+The release link now strips non-runtime symbols. `src/av1.c` and `src/avif.c`
+join the existing cold `-Os` set; entropy, coefficient, prediction, transform,
+and filter translation units remain at `-O2`.
+
+| Static PIE measurement | Round-one baseline | Round-two result | Change |
+| --- | ---: | ---: | ---: |
+| File size | 408,080 bytes | 373,648 bytes | -34,432 bytes (-8.4%) |
+| Text and read-only data reported in the `size` text column | 373,389 bytes | 365,485 bytes | -7,904 bytes (-2.1%) |
+
+Three warm raw-output runs of `images/tribu-large.avif` measured:
+
+| Workers | Median elapsed | User time | Maximum RSS | Decoder workspace |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.13 s | 3.99 s | 411.9 MiB | 310,824,185 bytes |
+| 4 | 1.61 s | 4.07 s | 412.7 MiB | 311,029,356 bytes |
+
+The immediately preceding speed audit measured 4.36-4.46 seconds with one
+worker and 1.72-1.76 seconds with four workers. The second pass therefore
+improves this workload by about 6-7% while cutting single-worker decoder
+workspace by 343,487,589 bytes (52.5%).
+
+The 4096x4096 CDEF/restoration fixture from the row-unit profile measured:
+
+| Workers | Median elapsed | User time | Maximum RSS | Decoder workspace |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.86 s | 4.69 s | 511.9 MiB | 435,946,949 bytes |
+| 4 | 1.87 s | 4.84 s | 511.9 MiB | 435,946,949 bytes |
+
+The audit baseline was 5.46-5.58 seconds with one worker and 2.06-2.09 seconds
+with four. Serial and threaded output remained byte-identical, and the CDEF
+and restoration checksums remained `0x26fd6feea1d4f415` and
+`0x6d8bb6a201107db9`.
 
 ## Validation
 

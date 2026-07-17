@@ -99,7 +99,9 @@ OBJECTS := $(OBJECTS:.S=.o)
 CORE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(CORE_C_SOURCES:.c=.o))
 ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
 COLD_OBJECTS := \
+	$(BUILD_DIR)/src/av1.o \
 	$(BUILD_DIR)/src/av1_metadata.o \
+	$(BUILD_DIR)/src/avif.o \
 	$(BUILD_DIR)/src/avif_sequence.o \
 	$(BUILD_DIR)/src/bmff.o \
 	$(BUILD_DIR)/src/main.o \
@@ -120,6 +122,12 @@ $(COLD_OBJECTS): CFLAGS += -Os
 -include $(DEPENDENCIES)
 
 .PHONY: clean test wasm
+
+# Strip symbol/relocation metadata from the release decoder binary only;
+# the custom static-pie startup only needs the dynamic relocation section,
+# not the symbol table, and this leaves the debug-oriented test binaries
+# below (unit, obu-trace, thread-unit) unstripped for debuggability.
+$(TARGET): LDFLAGS += -Wl,-s
 
 $(TARGET): $(OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)

@@ -31,6 +31,9 @@ Linux/x86-64: build/x86_64/avifdec
 macOS/arm64:  build/arm64/avifdec
 ```
 
+The release executable is stripped at link time. Unit and trace binaries keep
+their symbols for diagnostics.
+
 Run the complete test suite with:
 
 ```sh
@@ -321,9 +324,10 @@ motion fields. When CDEF, super-resolution, or restoration is an exact
 pass-through, their plane views alias the preceding stage. The queried
 `workspace_plane_buffer_count` records the conservative plane-buffer plan used
 for the returned workspace requirement. Reduced-still frames without intra
-block copy store only the 72-byte intra/base prefix of each 172-byte block
-cell; frames that allow intra block copy retain the full cell because that
-tool requires motion-vector state.
+block copy use a 24-byte intra/base cell stride; inter-capable cells are 124
+bytes. Palette colors are kept in a fixed tile-local above/left context and in
+the current block trace rather than repeated in every 4x4 cell. Reduced-still
+frames without intra block copy also omit unused inter-prediction scratch.
 
 ### Limits and errors
 

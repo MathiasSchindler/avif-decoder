@@ -1270,6 +1270,7 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
     int alias_cdef;
     int alias_superres;
     int alias_restoration;
+    int compact_block_state;
 
     if (state->initialized) return AVIFDEC_OK;
     alias_cdef = sequence->reduced_still_picture_header &&
@@ -1278,6 +1279,8 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         frame->upscaled_width == frame->frame_width;
     alias_restoration = sequence->reduced_still_picture_header &&
         av1_restoration_is_identity(sequence, frame);
+    compact_block_state = sequence->reduced_still_picture_header &&
+        !frame->allow_intrabc;
     max_mi_columns = 2U * ((sequence->max_width + 7U) >> 3);
     max_mi_rows = 2U * ((sequence->max_height + 7U) >> 3);
     if (max_mi_rows == 0U || max_mi_columns == 0U ||
@@ -1303,8 +1306,7 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
              &tile_result_bytes))) {
         return AVIFDEC_OVERFLOW;
     }
-    cell_stride = sequence->reduced_still_picture_header &&
-                          !frame->allow_intrabc
+    cell_stride = compact_block_state
                       ? AV1_BLOCK_BASE_CELL_SIZE
                       : sizeof(Av1BlockCell);
     if (!avifdec_size_multiply(cells, cell_stride, &cell_bytes)) {
@@ -1389,12 +1391,16 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         state->qmatrices[plane] = (uint8_t *)avifdec_arena_allocate(
             &state->arena, AV1_QM_TOTAL_SIZE, _Alignof(uint8_t));
     }
-    state->inter_pred0 = (uint16_t *)avifdec_arena_allocate(
-        &state->arena, 128U * 128U * sizeof(uint16_t), _Alignof(uint16_t));
-    state->inter_pred1 = (uint16_t *)avifdec_arena_allocate(
-        &state->arena, 128U * 128U * sizeof(uint16_t), _Alignof(uint16_t));
-    state->inter_mask = (uint8_t *)avifdec_arena_allocate(
-        &state->arena, 128U * 128U, _Alignof(uint8_t));
+    if (!compact_block_state) {
+        state->inter_pred0 = (uint16_t *)avifdec_arena_allocate(
+            &state->arena, 128U * 128U * sizeof(uint16_t),
+            _Alignof(uint16_t));
+        state->inter_pred1 = (uint16_t *)avifdec_arena_allocate(
+            &state->arena, 128U * 128U * sizeof(uint16_t),
+            _Alignof(uint16_t));
+        state->inter_mask = (uint8_t *)avifdec_arena_allocate(
+            &state->arena, 128U * 128U, _Alignof(uint8_t));
+    }
     avifdec_memory_fill(planes, 0U, sizeof(planes));
     for (plane = 0U; plane < (sequence->monochrome ? 1U : 3U); ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
@@ -1467,14 +1473,16 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
                 &state->arena, 1024U * sizeof(int32_t), _Alignof(int32_t));
             worker->residual_scratch = (int32_t *)avifdec_arena_allocate(
                 &state->arena, 4096U * sizeof(int32_t), _Alignof(int32_t));
-            worker->inter_pred0 = (uint16_t *)avifdec_arena_allocate(
-                &state->arena, 128U * 128U * sizeof(uint16_t),
-                _Alignof(uint16_t));
-            worker->inter_pred1 = (uint16_t *)avifdec_arena_allocate(
-                &state->arena, 128U * 128U * sizeof(uint16_t),
-                _Alignof(uint16_t));
-            worker->inter_mask = (uint8_t *)avifdec_arena_allocate(
-                &state->arena, 128U * 128U, _Alignof(uint8_t));
+            if (!compact_block_state) {
+                worker->inter_pred0 = (uint16_t *)avifdec_arena_allocate(
+                    &state->arena, 128U * 128U * sizeof(uint16_t),
+                    _Alignof(uint16_t));
+                worker->inter_pred1 = (uint16_t *)avifdec_arena_allocate(
+                    &state->arena, 128U * 128U * sizeof(uint16_t),
+                    _Alignof(uint16_t));
+                worker->inter_mask = (uint8_t *)avifdec_arena_allocate(
+                    &state->arena, 128U * 128U, _Alignof(uint8_t));
+            }
             worker->palette_map = (uint8_t *)avifdec_arena_allocate(
                 &state->arena, 64U * 64U, _Alignof(uint8_t));
             worker->palette_map_uv = (uint8_t *)avifdec_arena_allocate(
@@ -1656,15 +1664,16 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
         state->dequantized == 0 || state->residual_scratch == 0 ||
         state->qmatrices[0] == 0 || state->qmatrices[1] == 0 ||
         state->qmatrices[2] == 0 ||
-        state->inter_pred0 == 0 || state->inter_pred1 == 0 ||
-        state->inter_mask == 0) {
+        (!compact_block_state &&
+         (state->inter_pred0 == 0 || state->inter_pred1 == 0 ||
+          state->inter_mask == 0))) {
         return state->arena.status;
     }
     state->cell_count = cells;
     state->restoration_unit_capacity = restoration_units;
     avifdec_memory_fill(state->cdef_indices, 0xffU, state->cell_count);
     if (av1_coeff_context_init(&state->coeff_contexts, planes) != AVIFDEC_OK ||
-        (sequence->reduced_still_picture_header && !frame->allow_intrabc
+        (compact_block_state
              ? av1_block_state_init_compact(
                    &state->block_state, frame->mi_rows, frame->mi_cols,
                    state->cells, cells, sequence->monochrome,
@@ -2111,7 +2120,8 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     state->residual.inter_pred0 = state->inter_pred0;
     state->residual.inter_pred1 = state->inter_pred1;
     state->residual.inter_mask = state->inter_mask;
-    state->residual.inter_scratch_capacity = 128U * 128U;
+    state->residual.inter_scratch_capacity =
+        state->inter_pred0 != 0 ? 128U * 128U : 0U;
     for (plane = 0U; plane < AV1_REFS_PER_FRAME; ++plane) {
         state->residual.reference_planes[plane] =
             state->logical_reference_planes[plane];
@@ -3377,7 +3387,6 @@ static AvifdecStatus av1_workspace_requirement(
     uint32_t height,
     size_t worker_count,
     size_t *required) {
-    size_t pixels;
     size_t tile_workspace;
     size_t padded_width;
     size_t padded_height;
@@ -3385,6 +3394,7 @@ static AvifdecStatus av1_workspace_requirement(
     size_t chroma_samples = 0U;
     size_t plane_workspace;
     size_t result;
+    int compact_block_state;
 
     if (info == 0 || required == 0 || width == 0U || height == 0U ||
         worker_count == 0U ||
@@ -3392,8 +3402,9 @@ static AvifdecStatus av1_workspace_requirement(
          info->superblock_size != 128U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
-    if (!avifdec_size_multiply(width, height, &pixels) ||
-        !avifdec_size_align(
+    compact_block_state =
+        info->reduced_still_picture_header && !info->allow_intrabc;
+    if (!avifdec_size_align(
             width, info->superblock_size, &padded_width) ||
         !avifdec_size_align(
             height, info->superblock_size, &padded_height) ||
@@ -3422,30 +3433,57 @@ static AvifdecStatus av1_workspace_requirement(
                 ? info->workspace_plane_buffer_count
                 : (info->reduced_still_picture_header ? 6U : 14U),
             &plane_workspace) ||
-        !avifdec_size_multiply(
-            pixels, info->bit_depth > 8U ? 2U : 1U, &result) ||
-        !avifdec_size_multiply(
-            result, info->monochrome ? 2U : 6U, &result) ||
         av1_tile_workspace_requirement(
             width, height, info->monochrome,
             info->subsampling_x, info->subsampling_y,
-            info->reduced_still_picture_header && !info->allow_intrabc,
-            &tile_workspace) != AVIFDEC_OK ||
-        !avifdec_size_add(result, tile_workspace, &result) ||
-        !avifdec_size_add(
+            compact_block_state,
+            &tile_workspace) != AVIFDEC_OK) {
+        return AVIFDEC_OVERFLOW;
+    }
+    result = tile_workspace;
+    if (!avifdec_size_add(
             result, 6144U * sizeof(int32_t) +
                         3U * AV1_QM_TOTAL_SIZE +
                         _Alignof(int32_t) - 1U,
-            &result) ||
-        !avifdec_size_add(
-            result, 2U * 128U * 128U * sizeof(uint16_t) +
-                        128U * 128U + _Alignof(uint16_t) - 1U,
             &result) ||
         !avifdec_size_add(
             result, plane_workspace + 64U * 64U +
                         _Alignof(uint16_t) - 1U,
             &result)) {
         return AVIFDEC_OVERFLOW;
+    }
+    if (!compact_block_state &&
+        !avifdec_size_add(
+            result, 2U * 128U * 128U * sizeof(uint16_t) +
+                        128U * 128U + _Alignof(uint16_t) - 1U,
+            &result)) {
+        return AVIFDEC_OVERFLOW;
+    }
+    if (!info->reduced_still_picture_header) {
+        size_t motion_columns = ((size_t)width + 7U) / 8U;
+        size_t motion_rows = ((size_t)height + 7U) / 8U;
+        size_t motion_samples;
+        size_t motion_workspace;
+        size_t temporal_workspace;
+
+        if (!avifdec_size_multiply(
+                motion_rows, motion_columns, &motion_samples) ||
+            !avifdec_size_multiply(
+                motion_samples,
+                (AV1_NUM_REF_FRAMES + 1U) * sizeof(Av1SavedMotion),
+                &motion_workspace) ||
+            !avifdec_size_multiply(
+                motion_samples,
+                AV1_REFS_PER_FRAME * sizeof(Av1TemporalMotion),
+                &temporal_workspace) ||
+            !avifdec_size_add(
+                motion_workspace, temporal_workspace, &motion_workspace) ||
+            !avifdec_size_add(
+                result,
+                motion_workspace + _Alignof(Av1TemporalMotion) - 1U,
+                &result)) {
+            return AVIFDEC_OVERFLOW;
+        }
     }
     if (info->film_grain_params_present) {
         size_t film_grain_scratch = 0U;
@@ -3498,11 +3536,15 @@ static AvifdecStatus av1_workspace_requirement(
                 (void)avifdec_arena_allocate(
                     &sizing, 6144U * sizeof(int32_t),
                     _Alignof(int32_t));
+                if (!compact_block_state) {
+                    (void)avifdec_arena_allocate(
+                        &sizing, 2U * 128U * 128U * sizeof(uint16_t),
+                        _Alignof(uint16_t));
+                }
                 (void)avifdec_arena_allocate(
-                    &sizing, 2U * 128U * 128U * sizeof(uint16_t),
-                    _Alignof(uint16_t));
-                (void)avifdec_arena_allocate(
-                    &sizing, 128U * 128U + 2U * 64U * 64U,
+                    &sizing,
+                    (compact_block_state ? 0U : 128U * 128U) +
+                        2U * 64U * 64U,
                     _Alignof(uint8_t));
                 for (plane = 0U;
                      plane < (info->monochrome ? 1U : 3U);

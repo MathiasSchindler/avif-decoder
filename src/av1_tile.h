@@ -98,9 +98,12 @@ typedef struct {
     int8_t cfl_alpha_u;
     int8_t cfl_alpha_v;
     int8_t delta_lf[4];
-    uint16_t palette_colors_y[8];
-    uint16_t palette_colors_u[8];
-    uint16_t palette_colors_v[8];
+    /* Palette colors are intentionally not stored here: they used to be
+       broadcast into every mi cell a block covers (48 bytes/cell), which
+       dominates whole-frame memory. Above/left palette color prediction
+       now uses the tile-local rolling context in av1_tile_internal.h, and
+       reconstruction reads colors from the current Av1BlockTraceFields
+       instead of the persistent grid. */
     int32_t warp_params[2][6];
     uint8_t ref_frame[2];
     uint8_t ref_mv_index;

@@ -322,12 +322,9 @@ AvifdecStatus av1_block_state_record(Av1BlockState *state,
     cell.cfl_alpha_v = fields->cfl_alpha_v;
     avifdec_memory_copy(cell.delta_lf, fields->delta_lf,
                         sizeof(cell.delta_lf));
-    avifdec_memory_copy(cell.palette_colors_y, fields->palette_colors_y,
-                        sizeof(cell.palette_colors_y));
-    avifdec_memory_copy(cell.palette_colors_u, fields->palette_colors_u,
-                        sizeof(cell.palette_colors_u));
-    avifdec_memory_copy(cell.palette_colors_v, fields->palette_colors_v,
-                        sizeof(cell.palette_colors_v));
+    /* Palette colors are not broadcast into the cell grid; reconstruction
+       reads them from `fields` directly (see av1_tile.c), and above/left
+       prediction reads them from the rolling Av1TilePaletteContext. */
     for (row = fields->row; row < row_end; ++row) {
         for (column = fields->column; column < column_end; ++column) {
             size_t index = av1_block_index(state, row, column);

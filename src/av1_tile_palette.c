@@ -52,6 +52,7 @@ static void av1_tile_sort_colors(uint16_t colors[8], uint8_t count) {
 }
 
 static size_t av1_tile_palette_cache(const Av1BlockState *state,
+                                     const Av1TilePaletteContext *color_context,
                                      const Av1BlockAvailability *availability,
                                      const Av1BlockTraceFields *fields,
                                      unsigned int plane,
@@ -72,13 +73,30 @@ static size_t av1_tile_palette_cache(const Av1BlockState *state,
     if (availability->left) {
         left = av1_block_cell(state, fields->row, fields->column - 1U);
     }
+    /* Colors themselves come from the tile-local rolling context, not the
+       cell grid; `above`/`left` are only consulted for palette_size_*,
+       which is still tracked per mi cell. */
     if (above != 0) {
+        size_t index = fields->column - color_context->tile_column_start;
+
         above_count = plane == 0U ? above->palette_size_y : above->palette_size_uv;
-        above_colors = plane == 0U ? above->palette_colors_y : above->palette_colors_u;
+        if (index < AV1_TILE_PALETTE_ABOVE_MI) {
+            above_colors = plane == 0U ? color_context->above[index].y
+                                       : color_context->above[index].u;
+        } else {
+            above_count = 0U;
+        }
     }
     if (left != 0) {
+        size_t index = fields->row - color_context->row_band_start;
+
         left_count = plane == 0U ? left->palette_size_y : left->palette_size_uv;
-        left_colors = plane == 0U ? left->palette_colors_y : left->palette_colors_u;
+        if (index < AV1_TILE_PALETTE_LEFT_MI) {
+            left_colors = plane == 0U ? color_context->left[index].y
+                                      : color_context->left[index].u;
+        } else {
+            left_count = 0U;
+        }
     }
     while (above_index < above_count || left_index < left_count) {
         uint16_t value;
@@ -101,6 +119,7 @@ static size_t av1_tile_palette_cache(const Av1BlockState *state,
 static AvifdecStatus av1_tile_read_palette_plane_colors(
     Av1SymbolDecoder *decoder,
     const Av1TileModeConfig *config,
+    const Av1TilePaletteContext *color_context,
     const Av1BlockAvailability *availability,
     Av1BlockTraceFields *fields,
     unsigned int plane,
@@ -108,7 +127,8 @@ static AvifdecStatus av1_tile_read_palette_plane_colors(
     uint16_t colors[8]) {
     uint16_t cache[16];
     size_t cache_count = av1_tile_palette_cache(
-        config->block_state, availability, fields, plane, cache);
+        config->block_state, color_context, availability, fields, plane,
+        cache);
     uint32_t maximum = (1U << config->bit_depth) - 1U;
     unsigned int index = 0U;
     size_t cache_index;
@@ -146,13 +166,87 @@ static AvifdecStatus av1_tile_read_palette_plane_colors(
     return decoder->status;
 }
 
+AvifdecStatus av1_tile_palette_context_init(Av1TilePaletteContext *context,
+                                            uint32_t tile_row_start,
+                                            uint32_t tile_column_start,
+                                            uint32_t tile_column_end) {
+    if (context == 0 || tile_column_end <= tile_column_start ||
+        tile_column_end - tile_column_start > AV1_TILE_PALETTE_ABOVE_MI) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    avifdec_memory_fill(context, 0U, sizeof(*context));
+    context->tile_column_start = tile_column_start;
+    context->row_band_start = tile_row_start;
+    return AVIFDEC_OK;
+}
+
+AvifdecStatus av1_tile_palette_context_new_row_band(
+    Av1TilePaletteContext *context,
+    uint32_t row_band_start) {
+    if (context == 0) return AVIFDEC_INVALID_ARGUMENT;
+    /* Only "left" is band-local; "above" must survive across row bands
+       for the whole tile, so it is left untouched here. */
+    avifdec_memory_fill(context->left, 0U, sizeof(context->left));
+    context->row_band_start = row_band_start;
+    return AVIFDEC_OK;
+}
+
+/* Publish this block's own palette colors into the rolling context so
+   later blocks below/right of it see them as above/left neighbors. Only
+   entries actually covered by the block are updated (clipped to the
+   fixed capacities, which tile width/superblock size already guarantee
+   are never exceeded); non-palette blocks need not clear anything since
+   readers gate on the always up to date palette_size_* in the cell grid. */
+static void av1_tile_palette_context_store(
+    Av1TilePaletteContext *color_context,
+    const Av1BlockTraceFields *fields) {
+    uint32_t above_start;
+    uint32_t above_end;
+    uint32_t left_start;
+    uint32_t left_end;
+    uint32_t index;
+
+    if (fields->palette_size_y == 0U && fields->palette_size_uv == 0U) return;
+    above_start = fields->column - color_context->tile_column_start;
+    above_end = above_start + fields->width;
+    if (above_end > AV1_TILE_PALETTE_ABOVE_MI) above_end = AV1_TILE_PALETTE_ABOVE_MI;
+    left_start = fields->row - color_context->row_band_start;
+    left_end = left_start + fields->height;
+    if (left_end > AV1_TILE_PALETTE_LEFT_MI) left_end = AV1_TILE_PALETTE_LEFT_MI;
+    for (index = above_start; index < above_end; ++index) {
+        if (fields->palette_size_y != 0U) {
+            avifdec_memory_copy(color_context->above[index].y,
+                                fields->palette_colors_y,
+                                sizeof(color_context->above[index].y));
+        }
+        if (fields->palette_size_uv != 0U) {
+            avifdec_memory_copy(color_context->above[index].u,
+                                fields->palette_colors_u,
+                                sizeof(color_context->above[index].u));
+        }
+    }
+    for (index = left_start; index < left_end; ++index) {
+        if (fields->palette_size_y != 0U) {
+            avifdec_memory_copy(color_context->left[index].y,
+                                fields->palette_colors_y,
+                                sizeof(color_context->left[index].y));
+        }
+        if (fields->palette_size_uv != 0U) {
+            avifdec_memory_copy(color_context->left[index].u,
+                                fields->palette_colors_u,
+                                sizeof(color_context->left[index].u));
+        }
+    }
+}
+
 AvifdecStatus av1_tile_read_palette_info(
     Av1SymbolDecoder *decoder,
     Av1TileCdfs *cdfs,
     const Av1TileModeConfig *config,
     const Av1BlockAvailability *availability,
     Av1BlockTraceFields *fields,
-    uint8_t block_size) {
+    uint8_t block_size,
+    Av1TilePaletteContext *color_context) {
     unsigned int block_context;
     unsigned int palette_context = 0U;
 
@@ -181,7 +275,7 @@ AvifdecStatus av1_tile_read_palette_info(
                 decoder, cdfs->palette_y_size[block_context], 7U) + 2U);
             if (decoder->status != AVIFDEC_OK) return decoder->status;
             if (av1_tile_read_palette_plane_colors(
-                    decoder, config, availability, fields, 0U,
+                    decoder, config, color_context, availability, fields, 0U,
                     fields->palette_size_y, fields->palette_colors_y) != AVIFDEC_OK) {
                 return decoder->status;
             }
@@ -196,7 +290,7 @@ AvifdecStatus av1_tile_read_palette_info(
             decoder, cdfs->palette_uv_size[block_context], 7U) + 2U);
         if (decoder->status != AVIFDEC_OK) return decoder->status;
         if (av1_tile_read_palette_plane_colors(
-                decoder, config, availability, fields, 1U,
+                decoder, config, color_context, availability, fields, 1U,
                 fields->palette_size_uv, fields->palette_colors_u) != AVIFDEC_OK) {
             return decoder->status;
         }
@@ -226,6 +320,7 @@ AvifdecStatus av1_tile_read_palette_info(
             }
         }
     }
+    av1_tile_palette_context_store(color_context, fields);
     return decoder->status;
 }
 

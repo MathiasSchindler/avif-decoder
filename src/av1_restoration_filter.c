@@ -56,6 +56,45 @@ static uint16_t av1_restoration_source_sample(const Av1RestorationSource *source
     return data[(size_t)y * stride + (size_t)x];
 }
 
+/*
+ * av1_restoration_source_sample() takes the cdef (unclamped, in-stripe)
+ * branch whenever, using the exact same predicates it checks: x is
+ * already within [0, width), and y is already within [0, height) and
+ * within [stripe_start_y, stripe_end_y]. Both filter kernels only ever
+ * read a fixed margin of taps around the (x, y) block being produced
+ * (margin pixels on every side), so if the whole margin-expanded block
+ * rectangle satisfies those bounds, every sample in the block can skip
+ * straight to the cdef buffer with no clamping or stripe branching.
+ * This mirrors the ~96% no-clamp case measured by the speed audit while
+ * leaving the exact slow path untouched for boundary/stripe-edge blocks.
+ */
+static int av1_restoration_block_interior(const Av1RestorationSource *source,
+                                          int x,
+                                          int y,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          unsigned int margin) {
+    int x_min = x - (int)margin;
+    int x_max = x + (int)width - 1 + (int)margin;
+    int y_min = y - (int)margin;
+    int y_max = y + (int)height - 1 + (int)margin;
+
+    return x_min >= 0 && (uint32_t)x_max < source->width &&
+           y_min >= 0 && (uint32_t)y_max < source->height &&
+           y_min >= source->stripe_start_y &&
+           y_max <= source->stripe_end_y;
+}
+
+static uint16_t av1_restoration_sample(const Av1RestorationSource *source,
+                                       int x,
+                                       int y,
+                                       int interior) {
+    if (interior) {
+        return source->cdef[(size_t)y * source->cdef_stride + (size_t)x];
+    }
+    return av1_restoration_source_sample(source, x, y);
+}
+
 static void av1_restoration_wiener_coefficients(const int8_t input[3],
                                                  int output[7]) {
     unsigned int index;
@@ -85,20 +124,23 @@ static void av1_restoration_wiener_block(
     unsigned int round1 = bit_depth == 12U ? 9U : 11U;
     int offset = 1 << (bit_depth + 7U - round0 - 1U);
     int limit = (1 << (bit_depth + 1U + 7U - round0)) - 1;
+    int interior;
     uint32_t row;
     uint32_t column;
 
     av1_restoration_wiener_coefficients(unit->wiener[0], vertical);
     av1_restoration_wiener_coefficients(unit->wiener[1], horizontal);
+    interior = av1_restoration_block_interior(
+        source, (int)x, (int)y, width, height, 3U);
     for (row = 0U; row < height + 6U; ++row) {
         for (column = 0U; column < width; ++column) {
             int64_t sum = 0;
             unsigned int tap;
             int value;
             for (tap = 0U; tap < 7U; ++tap) {
-                sum += horizontal[tap] * av1_restoration_source_sample(
+                sum += horizontal[tap] * av1_restoration_sample(
                     source, (int)(x + column) + (int)tap - 3,
-                    (int)(y + row) - 3);
+                    (int)(y + row) - 3, interior);
             }
             value = (int)av1_restoration_round64(sum, round0);
             intermediate[row][column] = av1_restoration_clip(
@@ -141,6 +183,8 @@ static void av1_restoration_sgr_box(
     unsigned int n2e = n * n * epsilon;
     unsigned int scale = ((1U << 20U) + n2e / 2U) / n2e;
     unsigned int reciprocal = ((1U << 12U) + n / 2U) / n;
+    int interior = av1_restoration_block_interior(
+        source, (int)x, (int)y, width, height, radius + 1U);
     int row;
     int column;
 
@@ -157,8 +201,9 @@ static void av1_restoration_sgr_box(
             int64_t rounded_sum;
             for (dy = -(int)radius; dy <= (int)radius; ++dy) {
                 for (dx = -(int)radius; dx <= (int)radius; ++dx) {
-                    int64_t sample = av1_restoration_source_sample(
-                        source, (int)x + column + dx, (int)y + row + dy);
+                    int64_t sample = av1_restoration_sample(
+                        source, (int)x + column + dx, (int)y + row + dy,
+                        interior);
                     square_sum += sample * sample;
                     sum += sample;
                 }

@@ -573,6 +573,12 @@ typedef struct {
     int32_t current_q_index;
     int32_t delta_lf[4];
     uint8_t read_deltas;
+    /* Tile-local rolling above/left palette color state (replaces the
+       persistent palette_colors_* fields formerly in Av1BlockCell). Lives
+       for the duration of one tile's mode decode, like `config` above. */
+    Av1TilePaletteContext palette_context;
+    Av1TileBeforeSuperblock original_before_superblock;
+    void *original_before_superblock_user_data;
 } Av1TileModeContext;
 
 enum {
@@ -2504,6 +2510,30 @@ static int32_t av1_tile_clip_int32(int32_t minimum,
     return value;
 }
 
+static AvifdecStatus av1_tile_mode_before_superblock(void *user_data,
+                                                     Av1SymbolDecoder *decoder,
+                                                     Av1TileCdfs *cdfs,
+                                                     uint32_t row,
+                                                     uint32_t column,
+                                                     uint32_t superblock_mi) {
+    Av1TileModeContext *context = (Av1TileModeContext *)user_data;
+    AvifdecStatus status;
+
+    /* The "left" palette color context only spans one superblock row
+       band; reset it whenever the tile loop starts a new band, before
+       chaining to whatever before_superblock callback the caller set
+       (e.g. loop restoration parsing). */
+    if (column == context->config.block_state->tile_column_start) {
+        status = av1_tile_palette_context_new_row_band(
+            &context->palette_context, row);
+        if (status != AVIFDEC_OK) return status;
+    }
+    if (context->original_before_superblock == 0) return AVIFDEC_OK;
+    return context->original_before_superblock(
+        context->original_before_superblock_user_data, decoder, cdfs, row,
+        column, superblock_mi);
+}
+
 static AvifdecStatus av1_tile_decode_mode_block(
     void *user_data,
     Av1SymbolDecoder *decoder,
@@ -2720,7 +2750,8 @@ static AvifdecStatus av1_tile_decode_mode_block(
         }
         if (config->allow_screen_content_tools) {
             status = av1_tile_read_palette_info(
-                decoder, cdfs, config, &availability, &fields, block_size);
+                decoder, cdfs, config, &availability, &fields, block_size,
+                &context->palette_context);
             if (status != AVIFDEC_OK) return status;
         }
         if (config->enable_filter_intra && fields.y_mode == 0U &&
@@ -2760,6 +2791,7 @@ AvifdecStatus av1_tile_decode_modes(
     Av1PartitionTrace *partition_trace) {
     Av1TilePartitionConfig config;
     Av1TileModeContext context;
+    AvifdecStatus status;
 
     if (partition_config == 0 || mode_config == 0 ||
         mode_config->block_state == 0 || mode_config->block_trace == 0 ||
@@ -2802,8 +2834,18 @@ AvifdecStatus av1_tile_decode_modes(
     context.config = *mode_config;
     context.current_q_index = mode_config->base_q_index;
     context.read_deltas = mode_config->delta_q_present;
+    status = av1_tile_palette_context_init(
+        &context.palette_context, partition_config->tile_row_start,
+        partition_config->tile_column_start,
+        partition_config->tile_column_end);
+    if (status != AVIFDEC_OK) return status;
+    context.original_before_superblock = partition_config->before_superblock;
+    context.original_before_superblock_user_data =
+        partition_config->before_superblock_user_data;
     config.decode_mode_block = av1_tile_decode_mode_block;
     config.user_data = &context;
+    config.before_superblock = av1_tile_mode_before_superblock;
+    config.before_superblock_user_data = &context;
     return av1_tile_decode_partitions(&config, frame_cdfs, tile_cdfs,
                                       partition_trace);
 }
