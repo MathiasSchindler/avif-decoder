@@ -4273,7 +4273,7 @@ static AvifdecStatus av1_tile_predict_inter_plane(
             visible_width, visible_height);
         if (status != AVIFDEC_OK) return status;
     }
-    {
+    if (!state->disable_trace) {
         uint32_t row;
         av1_tile_checkpoint_hash(&state->predictor_checksum, plane);
         av1_tile_checkpoint_hash(&state->predictor_checksum, x >> 2);
@@ -4449,7 +4449,7 @@ AvifdecStatus av1_tile_parse_residual(void *user_data,
                         if (checkpoint_height4 > max_y4 - y4) {
                             checkpoint_height4 = (uint32_t)(max_y4 - y4);
                         }
-                        if (!block->is_inter) {
+                        if (!block->is_inter && !state->disable_trace) {
                             av1_tile_checkpoint_hash(
                                 &state->predictor_checksum, plane);
                             av1_tile_checkpoint_hash(
