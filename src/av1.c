@@ -579,6 +579,9 @@ static AvifdecStatus av1_parse_tile_info(Av1Bits *bits,
             uint32_t maximum = sb_cols - start;
             uint32_t size;
 
+            if (frame->tile_columns >= 64U) {
+                return AVIFDEC_INVALID_DATA;
+            }
             if (maximum > max_tile_width_sb) maximum = max_tile_width_sb;
             frame->mi_col_starts[frame->tile_columns] =
                 start << (sequence->use_128x128_superblock ? 5U : 4U);
@@ -599,6 +602,9 @@ static AvifdecStatus av1_parse_tile_info(Av1Bits *bits,
             uint32_t maximum = sb_rows - start;
             uint32_t size;
 
+            if (frame->tile_rows >= 64U) {
+                return AVIFDEC_INVALID_DATA;
+            }
             if (maximum > max_height) maximum = max_height;
             frame->mi_row_starts[frame->tile_rows] =
                 start << (sequence->use_128x128_superblock ? 5U : 4U);
@@ -2323,7 +2329,7 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
             if (status != AVIFDEC_OK) return status;
         }
     }
-    if (state->image == 0) return AVIFDEC_OK;
+    if (state->image == 0 || !frame->show_frame) return AVIFDEC_OK;
     if (state->output_spatial_layer_set &&
         frame->spatial_id != state->output_spatial_layer) {
         return AVIFDEC_OK;
@@ -4128,8 +4134,9 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                 }
             }
             frame.spatial_id = spatial_id;
-            if (select_spatial_layer &&
-                spatial_id == selected_spatial_layer) {
+            if (frame.show_frame &&
+                (!select_spatial_layer ||
+                 spatial_id == selected_spatial_layer)) {
                 selected_frame = frame;
                 selected_frame_found = 1;
             }
@@ -4330,14 +4337,14 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
         return av1_fail(error, AVIFDEC_TRUNCATED, av1_stream_file_offset(&stream, stream.size),
                         AV1_OBU_TILE_GROUP);
     }
-    if (select_spatial_layer) {
-        if (!selected_frame_found ||
-            (trace_state != 0 && trace_state->image != 0 &&
-             !trace_state->output_frame_seen)) {
-            return av1_fail(
-                error, AVIFDEC_INVALID_DATA,
-                av1_stream_file_offset(&stream, stream.size), 0U);
-        }
+    if (!selected_frame_found ||
+        (trace_state != 0 && trace_state->image != 0 &&
+         !trace_state->output_frame_seen)) {
+        return av1_fail(
+            error, AVIFDEC_INVALID_DATA,
+            av1_stream_file_offset(&stream, stream.size), 0U);
+    }
+    if (selected_frame_found) {
         frame = selected_frame;
     }
     if (info->width == 0U && info->height == 0U) {

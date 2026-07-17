@@ -1548,9 +1548,8 @@ static size_t avifseq_sync_index(
 static int avifseq_sample_has_sequence_header(
     const unsigned char *data, size_t size) {
     size_t position = 0U;
-    size_t obu_count = 0U;
 
-    while (position < size && obu_count++ < 64U) {
+    while (position < size) {
         uint8_t header = data[position++];
         uint8_t obu_type = (header >> 3U) & 15U;
         uint8_t extension_flag = (header >> 2U) & 1U;

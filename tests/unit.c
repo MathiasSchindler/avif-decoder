@@ -4362,6 +4362,7 @@ static int test_av1_loop_restoration(void) {
             &executor_state, 4U, test_reverse_parallel_for
         };
         AvifdecError error;
+        size_t workspace_offset;
 
         CHECK(avifdec_query(file, sizeof(file), 0, 0, 0U, &info, &error) ==
             AVIFDEC_OK);
@@ -4413,6 +4414,19 @@ static int test_av1_loop_restoration(void) {
                     info.workspace_required - 1U,
                     &untraced_image, 0, &error) ==
             AVIFDEC_OUT_OF_MEMORY);
+        for (workspace_offset = 0U;
+             workspace_offset < 16U;
+             ++workspace_offset) {
+            CHECK(avifdec_decode(
+                file, sizeof(file), 0, workspace + workspace_offset,
+                info.workspace_required, &untraced_image, 0, &error) ==
+                AVIFDEC_OK);
+            CHECK(avifdec_decode_ex(
+                file, sizeof(file), 0, &executor,
+                workspace + workspace_offset,
+                parallel_info.workspace_required,
+                &untraced_image, 0, &error) == AVIFDEC_OK);
+        }
         CHECK(traced_image.widths[0] == untraced_image.widths[0] &&
             traced_image.heights[0] == untraced_image.heights[0] &&
             traced_planes[0] == untraced_planes[0] &&
