@@ -1,8 +1,14 @@
 /vendor/
 /build/
 /docs/*
+!/docs/architecture.md
+!/docs/api.md
 !/docs/fuzzing.md
 !/docs/profiling.md
+!/docs/support.md
+!/docs/testing.md
+!/docs/usage.md
+!/docs/wasm.md
 /images/
 /.vscode/
 .DS_Store

@@ -35,8 +35,15 @@ printf '%s\n' "$output" | grep -q '^entropy_nonzero_transforms=180$'
 printf '%s\n' "$output" | grep -q '^entropy_coefficients=1793$'
 printf '%s\n' "$output" | grep -q '^entropy_checksum=0xef1e43e67f7938d3$'
 
-perl -e 'local $/; my $data = <>; substr($data, -1, 1) = chr(ord(substr($data, -1, 1)) ^ 1); print $data' \
-  "$fixture_dir/segmentation.avif" > "$tmp_dir/corrupt-segmentation.avif"
+# Flip the low bit of the final byte using only coreutils so the
+# self-contained test suite stays free of third-party dependencies.
+cp "$fixture_dir/segmentation.avif" "$tmp_dir/corrupt-segmentation.avif"
+corrupt_size=$(wc -c < "$tmp_dir/corrupt-segmentation.avif")
+corrupt_last=$(od -An -tu1 -j "$((corrupt_size - 1))" -N1 \
+  "$tmp_dir/corrupt-segmentation.avif" | tr -d ' ')
+printf "$(printf '\\%03o' "$((corrupt_last ^ 1))")" | \
+  dd of="$tmp_dir/corrupt-segmentation.avif" bs=1 seek="$((corrupt_size - 1))" \
+    conv=notrunc 2>/dev/null
 if output=$($binary "$tmp_dir/corrupt-segmentation.avif" 2>&1); then
     echo 'feature fixture test: corrupt segmentation tile was accepted' >&2
     exit 1

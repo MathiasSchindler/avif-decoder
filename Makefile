@@ -130,7 +130,7 @@ $(COLD_OBJECTS): CFLAGS += -Os
 
 -include $(DEPENDENCIES)
 
-.PHONY: clean test wasm fuzz fuzz-seeds fuzz-smoke fuzz-campaign \
+.PHONY: clean test test-all wasm fuzz fuzz-seeds fuzz-smoke fuzz-campaign \
 	fuzz-differential
 
 # Strip symbol/relocation metadata from the release decoder binary only;
@@ -249,17 +249,27 @@ $(GENERATED_CHECK): tools/generate-av1-coeff-tables.pl \
 	cmp $(FILM_GRAIN_TABLE) $(FILM_GRAIN_TABLE_CHECK)
 	@touch $@
 
-test: $(TEST_GENERATED_CHECK) $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) \
-		$(OBU_TRACE) $(THREAD_UNIT)
-	@if test -z "$(TEST_GENERATED_CHECK)"; then \
-		printf '%s\n' 'Skipping generated-table reproduction checks: docs/av1.html is unavailable.'; \
-	fi
+# Self-contained test suite. Uses only the compiler, coreutils, and the
+# checked-in fixtures/corpus; it needs no codec, image, or other third-party
+# tools, so `make test` runs anywhere the decoder itself builds.
+test: $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) $(THREAD_UNIT)
 	$(STRICT_UNIT)
 	$(HOST_UNIT)
 	$(THREAD_UNIT)
 	sh tests/smoke.sh $(TARGET)
 	sh tests/features.sh $(TARGET)
 	sh tests/corpus.sh $(TARGET)
+
+# Full suite: the self-contained tests above plus the reference and
+# differential comparisons. These additionally require ffmpeg, ffprobe,
+# libavif (avifenc/avifdec), aom (aomenc), ImageMagick (magick), and perl;
+# tests/reference-block.sh also builds libaom through git and cmake. The
+# generated-table reproduction checks run when the ignored docs/av1.html
+# specification file is present.
+test-all: test $(TEST_GENERATED_CHECK)
+	@if test -z "$(TEST_GENERATED_CHECK)"; then \
+		printf '%s\n' 'Skipping generated-table reproduction checks: docs/av1.html is unavailable.'; \
+	fi
 	sh tests/differential.sh $(TARGET)
 	sh tests/reference.sh $(TARGET)
 	sh tests/presentation.sh $(TARGET)
