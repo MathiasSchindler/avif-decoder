@@ -62,10 +62,15 @@ restoration copying and filtering use the same row-unit executor:
 
 ```sh
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
+build/x86_64/avifdec --png grid.avif grid.png --workers 4
 ```
 
 The default is one worker. `--workers 0` selects the available CPU count,
 capped by the available tile, plane-row, or CDEF-row work and 32 workers.
+One `--workers N` pair may appear anywhere in the command line. For packed
+RGB/RGBA output, the CLI also reuses the pool to convert presentation rows.
+Streaming PNG converts bounded batches of up to 64 rows in parallel before
+feeding them to the ordered compressor.
 macOS currently uses the serial task-pool backend.
 
 ### Browser experiment
@@ -146,11 +151,12 @@ PNG output is encoded internally without zlib or another image library.
 - `pasp` is preserved through a PNG `pHYs` chunk.
 - NCLX primaries and transfer characteristics are preserved through `cICP`.
 
-The CLI converts one presentation row at a time, selects among the five PNG
-row filters, and feeds a fixed-Huffman LZ77 encoder adapted from newos's CC0
-compression code. Compressed bytes are emitted as bounded 32 KiB `IDAT`
-chunks. PNG output therefore does not allocate a complete packed RGB/RGBA
-image.
+The CLI supplies presentation rows to the encoder in order, selects among the
+five PNG row filters, and feeds a fixed-Huffman LZ77 encoder adapted from
+newos's CC0 compression code. With multiple workers it converts up to 64 RGB
+rows at a time into a bounded temporary cache; filtering and the DEFLATE stream
+remain ordered. Compressed bytes are emitted as bounded 32 KiB `IDAT` chunks.
+PNG output therefore does not allocate a complete packed RGB/RGBA image.
 
 ### Raw planar YUV
 
@@ -281,8 +287,10 @@ state. The current parallel regions cover independent tiles of a top-level
 primary grid, independent AV1 bitstream tiles, independent output rows of a
 primary sample transform, and two-mi-row CDEF units plus four-luma-row
 restoration units in a direct primary AV1 item. Sample-transform input images
-remain serial. Nested derived images, auxiliary alpha, sequences, RGB
-conversion, loop filtering, and super-resolution remain serial.
+remain serial. Nested derived images, auxiliary alpha, sequences, loop
+filtering, and super-resolution remain serial. The core RGB conversion API is
+row-addressable but does not own an executor; the CLI parallelizes those rows
+after decode.
 
 Parallel grid query results include one copied parser context, tile buffer,
 and child decoder workspace per executor worker. Sample-transform row

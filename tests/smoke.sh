@@ -27,6 +27,21 @@ printf '%s\n' "$output" | grep -q '^major_brand=avif$'
 printf '%s\n' "$output" | grep -q '^compatible_brand=miaf$'
 printf '%s\n' "$output" | grep -q '^boxes=6$'
 
+output=$($binary --boxes "$tmp_dir/minimal.avif" --workers 0)
+printf '%s\n' "$output" | grep -q '^boxes=6$'
+output=$($binary --workers 1 --boxes "$tmp_dir/minimal.avif")
+printf '%s\n' "$output" | grep -q '^boxes=6$'
+if $binary --boxes "$tmp_dir/minimal.avif" \
+        --workers 1 --workers 1 >/dev/null 2>&1; then
+    echo 'duplicate worker option was accepted' >&2
+    exit 1
+fi
+if $binary --boxes "$tmp_dir/minimal.avif" \
+        --workers >/dev/null 2>&1; then
+    echo 'worker option without a count was accepted' >&2
+    exit 1
+fi
+
 output=$($binary --boxes "$tmp_dir/idat.avif")
 printf '%s\n' "$output" | grep -q '^mdat offset=24 size=8$'
 printf '%s\n' "$output" | grep -q '^meta offset=32 size=20$'

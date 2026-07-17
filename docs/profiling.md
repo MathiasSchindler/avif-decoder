@@ -380,8 +380,8 @@ and filter translation units remain at `-O2`.
 
 | Static PIE measurement | Round-one baseline | Round-two result | Change |
 | --- | ---: | ---: | ---: |
-| File size | 408,080 bytes | 373,648 bytes | -34,432 bytes (-8.4%) |
-| Text and read-only data reported in the `size` text column | 373,389 bytes | 365,485 bytes | -7,904 bytes (-2.1%) |
+| File size | 408,080 bytes | 365,456 bytes | -42,624 bytes (-10.4%) |
+| Text and read-only data reported in the `size` text column | 373,389 bytes | 354,605 bytes | -18,784 bytes (-5.0%) |
 
 Three warm raw-output runs of `images/tribu-large.avif` measured:
 
@@ -406,6 +406,39 @@ The audit baseline was 5.46-5.58 seconds with one worker and 2.06-2.09 seconds
 with four. Serial and threaded output remained byte-identical, and the CDEF
 and restoration checksums remained `0x26fd6feea1d4f415` and
 `0x6d8bb6a201107db9`.
+
+## Worker option and output-row follow-up
+
+The CLI now removes one validated `--workers N` pair before interpreting the
+remaining mode and path arguments, so the option can appear at the beginning,
+between operands, or after the output path. Duplicate, missing, non-numeric,
+and over-limit counts remain errors.
+
+After still-image decoding, packed RGB/RGBA conversion reuses the synchronous
+task pool across presentation rows. Streaming PNG keeps its adaptive filters
+and fixed-Huffman LZ77 stream ordered, but converts bounded batches of up to 64
+source rows in parallel and then supplies the cached rows to the compressor in
+order. The cache adds at most `64 * packed_row_bytes` of CLI-only memory and
+does not change decoder or PNG API workspace.
+
+One scaling run of `images/tribu-large.avif` measured:
+
+| Workers | Packed RGB elapsed | PNG elapsed |
+| ---: | ---: | ---: |
+| 1 | 4.52 s | 7.04 s |
+| 2 | 2.66 s | 5.26 s |
+| 4 | 1.75 s | 4.34 s |
+| 8 | 1.29 s | 3.89 s |
+| 0 (24 available CPUs) | 1.28 s | 3.87 s |
+
+Before row-parallel output conversion, automatic workers took about 1.60
+seconds for packed RGB and 4.15 seconds for PNG on the same machine. Packed
+RGB now adds almost no wall time beyond the 1.23-second parallel raw decode.
+PNG improves by about 7%; its remaining roughly 2.6-second tail is primarily
+the single ordered filter/LZ77/IDAT stream. Serial and parallel RGB and PNG
+files are byte-identical. A clean link remains 365,456 bytes because the added
+code fits the existing file alignment; the allocated text/read-only column
+increases from 354,605 to 355,629 bytes (1,024 bytes, 0.3%).
 
 ## Validation
 

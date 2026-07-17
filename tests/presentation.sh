@@ -93,9 +93,12 @@ render_rgb "$work/grid.avif" grid
 [ "$(wc -c < "$work/grid-ours.rgb")" -eq 15762 ]
 "$decoder" --workers 1 --rgb "$work/grid.avif" \
     "$work/grid-worker1.rgb" >"$work/grid-worker1.out"
-"$decoder" --workers 4 --rgb "$work/grid.avif" \
-    "$work/grid-worker4.rgb" >"$work/grid-worker4.out"
+"$decoder" --rgb "$work/grid.avif" \
+    "$work/grid-worker4.rgb" --workers 4 >"$work/grid-worker4.out"
 cmp "$work/grid-worker1.rgb" "$work/grid-worker4.rgb"
+"$decoder" --png "$work/grid.avif" \
+    "$work/grid-worker4.png" --workers 4 >/dev/null
+cmp "$work/grid-ours.png" "$work/grid-worker4.png"
 grep -q '^decode_workers=1$' "$work/grid-worker1.out"
 if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
     grep -q '^decode_workers=4$' "$work/grid-worker4.out"
