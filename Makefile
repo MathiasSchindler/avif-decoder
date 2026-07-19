@@ -8,8 +8,11 @@ OS := $(shell uname -s)
 ARCH := $(shell uname -m)
 BUILD_DIR := build/$(ARCH)
 TARGET := $(BUILD_DIR)/avifdec
+ENCODER_TARGET := $(BUILD_DIR)/avifenc
 STRICT_UNIT := $(BUILD_DIR)/unit
 HOST_UNIT := build/host/unit
+ENCODER_STRICT_UNIT := $(BUILD_DIR)/encoder-unit
+ENCODER_HOST_UNIT := build/host/encoder-unit
 OBU_TRACE := $(BUILD_DIR)/obu-trace
 THREAD_UNIT := $(BUILD_DIR)/thread-unit
 FUZZ_BUILD_DIR := build/fuzz
@@ -99,6 +102,9 @@ CORE_C_SOURCES := \
 	src/av1_tile_palette.c src/av1_block.c \
 	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
 	src/av1_restoration_filter.c
+ENCODER_CORE_C_SOURCES := src/encoder/avifenc.c src/base.c
+ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
+	$(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
 C_SOURCES := src/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
@@ -106,7 +112,11 @@ SOURCES := $(C_SOURCES) $(ARCH_SOURCES)
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
 OBJECTS := $(OBJECTS:.S=.o)
 CORE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(CORE_C_SOURCES:.c=.o))
+ENCODER_CORE_OBJECTS := \
+	$(addprefix $(BUILD_DIR)/,$(ENCODER_CORE_C_SOURCES:.c=.o))
 ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
+ENCODER_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ENCODER_C_SOURCES:.c=.o)) \
+	$(ARCH_OBJECTS)
 COLD_OBJECTS := \
 	$(BUILD_DIR)/src/av1.o \
 	$(BUILD_DIR)/src/av1_metadata.o \
@@ -117,6 +127,8 @@ COLD_OBJECTS := \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
+ENCODER_STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/encoder_unit.o \
+	$(ENCODER_CORE_OBJECTS) $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
@@ -124,14 +136,15 @@ THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
-	$(OBU_TRACE_OBJECTS:.o=.d) $(THREAD_UNIT_OBJECTS:.o=.d)
+	$(ENCODER_STRICT_UNIT_OBJECTS:.o=.d) $(OBU_TRACE_OBJECTS:.o=.d) \
+	$(THREAD_UNIT_OBJECTS:.o=.d) $(ENCODER_OBJECTS:.o=.d)
 
 $(COLD_OBJECTS): CFLAGS += -Os
 
 -include $(DEPENDENCIES)
 
-.PHONY: clean test test-all wasm fuzz fuzz-seeds fuzz-smoke fuzz-campaign \
-	fuzz-differential
+.PHONY: clean encoder test test-encoder test-all wasm fuzz fuzz-seeds \
+	fuzz-smoke fuzz-campaign fuzz-differential
 
 # Strip symbol/relocation metadata from the release decoder binary only;
 # the custom static-pie startup only needs the dynamic relocation section,
@@ -144,9 +157,21 @@ $(TARGET): $(OBJECTS) $(LINK_TOOLS)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
+$(ENCODER_TARGET): $(ENCODER_OBJECTS) $(LINK_TOOLS)
+	@mkdir -p $(@D)
+	$(CC) $(ENCODER_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+encoder: $(ENCODER_TARGET)
+
 $(STRICT_UNIT): $(STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
 	$(CC) $(STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+$(ENCODER_STRICT_UNIT): $(ENCODER_STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
+	@mkdir -p $(@D)
+	$(CC) $(ENCODER_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
 $(OBU_TRACE): $(OBU_TRACE_OBJECTS) $(LINK_TOOLS)
@@ -175,6 +200,12 @@ $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 		src/av1_filter.h src/avifdec.h src/png.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
+
+$(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_CORE_C_SOURCES) \
+		src/encoder/avifenc.h src/base.h
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
+		$(ENCODER_CORE_C_SOURCES) -o $@
 
 $(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
 	@mkdir -p $(@D)
@@ -259,6 +290,11 @@ test: $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) $(THREAD_UNIT)
 	sh tests/smoke.sh $(TARGET)
 	sh tests/features.sh $(TARGET)
 	sh tests/corpus.sh $(TARGET)
+
+test-encoder: $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) $(ENCODER_HOST_UNIT)
+	$(ENCODER_STRICT_UNIT)
+	$(ENCODER_HOST_UNIT)
+	sh tests/encoder.sh $(ENCODER_TARGET)
 
 # Full suite: the self-contained tests above plus the reference and
 # differential comparisons. These additionally require ffmpeg, ffprobe,

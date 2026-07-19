@@ -39,6 +39,17 @@ Linux/x86-64: build/x86_64/avifdec
 macOS/arm64:  build/arm64/avifdec
 ```
 
+The first freestanding encoder target is under development. Build its public
+API and validation-only CLI skeleton with:
+
+```sh
+make encoder
+make test-encoder
+```
+
+The current `avifenc` target validates the planned 8-bit 4:2:0 input contract
+but intentionally reports that bitstream encoding is not implemented yet.
+
 The macOS build requires the Xcode command-line tools and targets macOS 11 or
 newer. The release executable is stripped at link time; the unit and trace
 binaries keep their symbols for diagnostics.
@@ -88,7 +99,7 @@ The API is declared in [`src/avifdec.h`](src/avifdec.h) and documented in
 
 ## Makefile interface
 
-`make`, `make test`, `make test-all`, `make wasm`, `make fuzz`,
+`make`, `make encoder`, `make test`, `make test-encoder`, `make test-all`, `make wasm`, `make fuzz`,
 `make fuzz-seeds`, `make fuzz-smoke`, `make fuzz-campaign`,
 `make fuzz-differential`, and `make clean` are the complete public Makefile
 interface.

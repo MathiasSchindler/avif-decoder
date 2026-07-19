@@ -1,6 +1,8 @@
 /vendor/
 /build/
 /docs/*
+!/docs/encoder/
+!/docs/encoder/plan.md
 !/docs/architecture.md
 !/docs/api.md
 !/docs/fuzzing.md
