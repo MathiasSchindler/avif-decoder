@@ -104,9 +104,11 @@ CORE_C_SOURCES := \
 	src/av1_restoration_filter.c
 ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 	src/encoder/avif_write.c src/encoder/av1_write.c \
-	src/encoder/av1_symbol_write.c src/encoder/av1_tile_write.c
+	src/encoder/av1_symbol_write.c src/encoder/av1_tile_write.c \
+	src/encoder/av1_transform_write.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
-	src/shared/av1_cdf.c src/av1_predict.c
+	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
+	src/av1_predict.c src/av1_recon.c
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
@@ -213,7 +215,9 @@ $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
 		src/encoder/avifenc.h src/encoder/write.h \
 		src/encoder/avif_write.h src/encoder/av1_write.h \
 		src/encoder/av1_symbol_write.h src/encoder/av1_tile_write.h \
-		src/shared/av1_cdf.h \
+		src/encoder/av1_transform_write.h \
+		src/shared/av1_cdf.h src/av1_coeff.h src/av1_coeff_defaults.inc \
+		src/av1_coeff_tables.inc src/av1_recon.h \
 		src/base.h src/bmff.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \

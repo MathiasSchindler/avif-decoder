@@ -1,4 +1,5 @@
 #include "encoder/av1_tile_write.h"
+#include "encoder/av1_transform_write.h"
 #include "av1_predict.h"
 #include "base.h"
 
@@ -12,6 +13,7 @@ typedef struct {
     uint8_t *block_widths;
     uint8_t *block_heights;
     uint8_t *block_flags;
+    AvifencAv1TransformState transform;
     uint16_t partition8[4][5];
     uint16_t partition16[4][11];
     uint16_t partition32[4][11];
@@ -71,10 +73,18 @@ static int tile_size_multiply(size_t left, size_t right, size_t *result) {
     return 1;
 }
 
+static int tile_size_add(size_t left, size_t right, size_t *result) {
+    if (right > (size_t)-1 - left) return 0;
+    *result = left + right;
+    return 1;
+}
+
 static AvifencStatus tile_requirements(
     const AvifencAv1TileSource *source,
     AvifencAv1TileRequirements *requirements) {
     size_t cells;
+    size_t block_workspace;
+    size_t transform_workspace;
     size_t workspace_required;
     uint32_t mi_columns;
     uint32_t mi_rows;
@@ -93,8 +103,13 @@ static AvifencStatus tile_requirements(
     }
     mi_columns = 2U * ((source->width + 7U) >> 3U);
     mi_rows = 2U * ((source->height + 7U) >> 3U);
+    if (source->quantizer == 0U) return AVIFENC_UNSUPPORTED;
     if (!tile_size_multiply(mi_columns, mi_rows, &cells) ||
-        !tile_size_multiply(cells, 3U, &workspace_required)) {
+        !tile_size_multiply(cells, 3U, &block_workspace) ||
+        avifenc_av1_transform_context_size(
+            mi_columns, mi_rows, &transform_workspace) != AVIFENC_OK ||
+        !tile_size_add(
+            block_workspace, transform_workspace, &workspace_required)) {
         return AVIFENC_OVERFLOW;
     }
     requirements->workspace_required = workspace_required;
@@ -161,6 +176,7 @@ static AvifencStatus tile_predict_plane(AvifencAv1TileState *state,
 static AvifencStatus tile_write_block(AvifencAv1TileState *state,
                                       uint32_t row,
                                       uint32_t column) {
+    AvifencAv1TransformBlock transform_block;
     size_t index = (size_t)row * state->mi_columns + column;
     unsigned int skip_context = 0U;
     AvifencStatus status;
@@ -172,12 +188,12 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
     }
     if (column != 0U) skip_context += state->block_flags[index - 1U] & 1U;
     status = avifenc_av1_symbol_writer_write(
-        state->writer, state->skip[skip_context], 2U, 1U);
+        state->writer, state->skip[skip_context], 2U, 0U);
     if (status != AVIFENC_OK) return status;
     status = avifenc_av1_symbol_writer_write(
         state->writer, state->y_mode_dc_dc, 13U, 0U);
     if (status != AVIFENC_OK) return status;
-    state->block_flags[index] = 1U;
+    state->block_flags[index] = 0U;
     status = tile_predict_plane(
         state, 0U, column << 2U, row << 2U,
         (uint8_t)(row != 0U), (uint8_t)(column != 0U));
@@ -193,6 +209,30 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
         status = tile_predict_plane(
             state, 2U, (column >> 1U) << 2U, (row >> 1U) << 2U,
             (uint8_t)(row > 1U), (uint8_t)(column > 1U));
+        if (status != AVIFENC_OK) return status;
+    }
+    status = avifenc_av1_transform_encode_4x4(
+        &state->transform, state->writer, 0U, column, row,
+        state->source->planes[0], state->source->strides[0],
+        state->source->width, state->source->height,
+        state->reconstruction->planes[0],
+        state->reconstruction->strides[0], (uint8_t)state->quantizer,
+        1, &transform_block);
+    if (status != AVIFENC_OK) return status;
+    if ((row & 1U) != 0U && (column & 1U) != 0U) {
+        unsigned int plane;
+
+        for (plane = 1U; plane < 3U; ++plane) {
+            status = avifenc_av1_transform_encode_4x4(
+                &state->transform, state->writer, plane,
+                column >> 1U, row >> 1U,
+                state->source->planes[plane], state->source->strides[plane],
+                state->source->width >> 1U, state->source->height >> 1U,
+                state->reconstruction->planes[plane],
+                state->reconstruction->strides[plane],
+                (uint8_t)state->quantizer, 0, &transform_block);
+            if (status != AVIFENC_OK) return status;
+        }
     }
     return status;
 }
@@ -337,6 +377,11 @@ AvifencStatus avifenc_av1_tile_write(
     state.block_flags = state.block_heights + cells;
     avifdec_memory_fill(workspace, 0U, requirements.workspace_required);
     tile_cdfs_init(&state);
+    status = avifenc_av1_transform_state_init(
+        &state.transform, (uint8_t)source->quantizer,
+        state.mi_columns, state.mi_rows, state.block_flags + cells,
+        workspace_size - 3U * cells);
+    if (status != AVIFENC_OK) return status;
     for (row = 0U; row < state.mi_rows; row += 16U) {
         for (column = 0U; column < state.mi_columns; column += 16U) {
             status = tile_write_partition(&state, row, column, 16U);
