@@ -1,9 +1,11 @@
 #include "encoder/avifenc.h"
+#include "encoder/av1_symbol_write.h"
 #include "encoder/av1_write.h"
 #include "encoder/avif_write.h"
 #include "encoder/write.h"
 #include "av1.h"
 #include "av1_bitstream.h"
+#include "av1_symbol.h"
 #include "base.h"
 #include "bmff.h"
 
@@ -319,6 +321,265 @@ static int test_av1_code_writers(void) {
     avifenc_bit_writer_init_sizing(&sizing);
       CHECK(avifenc_bit_writer_ns(&sizing, 0U, 0x80000001U) == AVIFENC_OK);
       CHECK(sizing.bit_position == 31U);
+    return 0;
+}
+
+static int test_av1_symbol_writer_vectors(void) {
+      static const unsigned char expected_one[1] = { 0xc0U };
+      static const unsigned char expected_zero[1] = { 0x20U };
+    unsigned char output[8];
+    AvifencAv1SymbolWriter writer;
+    Av1SymbolDecoder decoder;
+    AvifdecSpan span;
+    uint16_t cdf[3];
+
+    cdf[0] = 16384U;
+    cdf[1] = 32768U;
+    cdf[2] = 0U;
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, cdf, 2U, 1U) ==
+          AVIFENC_OK);
+    CHECK(cdf[0] == 15360U && cdf[1] == 32768U && cdf[2] == 1U);
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) == sizeof(expected_one));
+    CHECK(avifdec_memory_compare(
+              output, expected_one, sizeof(expected_one)) == 0);
+
+    span.data = output;
+    span.size = avifenc_av1_symbol_writer_size(&writer);
+    span.file_offset = 0U;
+    cdf[0] = 16384U;
+    cdf[1] = 32768U;
+    cdf[2] = 0U;
+    CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 0) ==
+          AVIFDEC_OK);
+    CHECK(av1_symbol_read(&decoder, cdf, 2U) == 1U);
+    CHECK(av1_symbol_exit(&decoder) == AVIFDEC_OK);
+
+    cdf[0] = 16384U;
+    cdf[1] = 32768U;
+    cdf[2] = 0U;
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, cdf, 2U, 0U) ==
+          AVIFENC_OK);
+    CHECK(cdf[0] == 17408U && cdf[1] == 32768U && cdf[2] == 1U);
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) == sizeof(expected_zero));
+    CHECK(avifdec_memory_compare(
+              output, expected_zero, sizeof(expected_zero)) == 0);
+    return 0;
+}
+
+static void init_symbol_test_cdfs(uint16_t cdf2[3],
+                                  uint16_t cdf3[4],
+                                  uint16_t cdf5[6],
+                                  uint16_t cdf16[17]) {
+    size_t index;
+
+    cdf2[0] = 9000U;
+    cdf2[1] = 32768U;
+    cdf2[2] = 0U;
+    cdf3[0] = 4000U;
+    cdf3[1] = 20000U;
+    cdf3[2] = 32768U;
+    cdf3[3] = 0U;
+    cdf5[0] = 1000U;
+    cdf5[1] = 6000U;
+    cdf5[2] = 14000U;
+    cdf5[3] = 25000U;
+    cdf5[4] = 32768U;
+    cdf5[5] = 0U;
+    for (index = 0U; index < 16U; ++index) {
+        cdf16[index] = (uint16_t)((index + 1U) * 2048U);
+    }
+    cdf16[16] = 0U;
+}
+
+static int test_av1_symbol_writer_round_trip(void) {
+    unsigned char output[512];
+    AvifencAv1SymbolWriter writer;
+    Av1SymbolDecoder decoder;
+    AvifdecSpan span;
+    uint16_t encode2[3];
+    uint16_t encode3[4];
+    uint16_t encode5[6];
+    uint16_t encode16[17];
+    uint16_t decode2[3];
+    uint16_t decode3[4];
+    uint16_t decode5[6];
+    uint16_t decode16[17];
+    unsigned int iteration;
+
+    init_symbol_test_cdfs(encode2, encode3, encode5, encode16);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    for (iteration = 0U; iteration < 96U; ++iteration) {
+        unsigned int bits = iteration % 7U + 1U;
+        uint32_t mask = ((uint32_t)1U << bits) - 1U;
+        uint32_t literal = (iteration * 37U + 5U) & mask;
+
+        CHECK(avifenc_av1_symbol_writer_literal(
+                  &writer, literal, bits) == AVIFENC_OK);
+        CHECK(avifenc_av1_symbol_writer_write(
+                  &writer, encode2, 2U, iteration % 2U) == AVIFENC_OK);
+        CHECK(avifenc_av1_symbol_writer_write(
+                  &writer, encode3, 3U, (iteration * 2U) % 3U) ==
+              AVIFENC_OK);
+        CHECK(avifenc_av1_symbol_writer_write(
+                  &writer, encode5, 5U, (iteration * 3U) % 5U) ==
+              AVIFENC_OK);
+        CHECK(avifenc_av1_symbol_writer_write(
+                  &writer, encode16, 16U, (iteration * 7U) % 16U) ==
+              AVIFENC_OK);
+    }
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) > 100U);
+
+    span.data = output;
+    span.size = avifenc_av1_symbol_writer_size(&writer);
+    span.file_offset = 0U;
+    init_symbol_test_cdfs(decode2, decode3, decode5, decode16);
+    CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 0) ==
+          AVIFDEC_OK);
+    for (iteration = 0U; iteration < 96U; ++iteration) {
+        unsigned int bits = iteration % 7U + 1U;
+        uint32_t mask = ((uint32_t)1U << bits) - 1U;
+        uint32_t literal = (iteration * 37U + 5U) & mask;
+
+        CHECK(av1_symbol_read_literal(&decoder, bits) == literal);
+        CHECK(av1_symbol_read(&decoder, decode2, 2U) == iteration % 2U);
+        CHECK(av1_symbol_read(&decoder, decode3, 3U) ==
+              (iteration * 2U) % 3U);
+        CHECK(av1_symbol_read(&decoder, decode5, 5U) ==
+              (iteration * 3U) % 5U);
+        CHECK(av1_symbol_read(&decoder, decode16, 16U) ==
+              (iteration * 7U) % 16U);
+    }
+    CHECK(av1_symbol_exit(&decoder) == AVIFDEC_OK);
+    CHECK(avifdec_memory_compare(encode2, decode2, sizeof(encode2)) == 0);
+    CHECK(avifdec_memory_compare(encode3, decode3, sizeof(encode3)) == 0);
+    CHECK(avifdec_memory_compare(encode5, decode5, sizeof(encode5)) == 0);
+    CHECK(avifdec_memory_compare(encode16, decode16, sizeof(encode16)) == 0);
+    return 0;
+}
+
+static int test_av1_symbol_writer_carry_and_tail(void) {
+    unsigned char output[16];
+    AvifencAv1SymbolWriter writer;
+    Av1SymbolDecoder decoder;
+    AvifdecSpan span;
+    uint16_t equal[3] = { 16384U, 32768U, 0U };
+    uint16_t rare_one[3] = { 32256U, 32768U, 0U };
+    uint16_t likely_zero[3] = { 24576U, 32768U, 0U };
+
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 1);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, equal, 2U, 0U) ==
+          AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, equal, 2U, 0U) ==
+          AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, rare_one, 2U, 1U) ==
+          AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, likely_zero, 2U, 0U) ==
+          AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) == 2U &&
+          output[0] == 63U);
+    CHECK(equal[0] == 16384U && equal[2] == 0U &&
+          rare_one[0] == 32256U && likely_zero[0] == 24576U);
+
+    span.data = output;
+    span.size = avifenc_av1_symbol_writer_size(&writer);
+    span.file_offset = 0U;
+    CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 1) ==
+          AVIFDEC_OK);
+    CHECK(av1_symbol_read(&decoder, equal, 2U) == 0U);
+    CHECK(av1_symbol_read(&decoder, equal, 2U) == 0U);
+    CHECK(av1_symbol_read(&decoder, rare_one, 2U) == 1U);
+    CHECK(av1_symbol_read(&decoder, likely_zero, 2U) == 0U);
+    CHECK(av1_symbol_exit(&decoder) == AVIFDEC_OK);
+
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 1);
+    CHECK(avifenc_av1_symbol_writer_literal(&writer, 1U, 1U) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) == 1U &&
+          output[0] == 0xc0U);
+    output[1] = 0x01U;
+    span.size = 2U;
+    CHECK(av1_symbol_init(&decoder, &span, 1U, 0U, span.size, 1) ==
+          AVIFDEC_OK);
+    CHECK(av1_symbol_read_literal(&decoder, 1U) == 1U);
+    CHECK(av1_symbol_exit(&decoder) == AVIFDEC_INVALID_DATA);
+    return 0;
+}
+
+static AvifencStatus write_symbol_sizing_sequence(
+    AvifencAv1SymbolWriter *writer) {
+    unsigned int index;
+
+    for (index = 0U; index < 512U; ++index) {
+        AvifencStatus status = avifenc_av1_symbol_writer_literal(
+            writer, (index * 29U + 7U) & 255U, 8U);
+
+        if (status != AVIFENC_OK) return status;
+    }
+    return avifenc_av1_symbol_writer_finish(writer);
+}
+
+static int test_av1_symbol_writer_boundaries(void) {
+    unsigned char output[1024];
+    unsigned char bounded[1024];
+    AvifencAv1SymbolWriter writer;
+    AvifencAv1SymbolWriter sizing;
+    uint16_t cdf[3] = { 16384U, 32768U, 0U };
+    uint16_t invalid_cdf[3] = { 32768U, 16384U, 0U };
+    size_t required;
+    size_t index;
+
+    avifenc_av1_symbol_writer_init_sizing(&sizing, 1);
+    CHECK(write_symbol_sizing_sequence(&sizing) == AVIFENC_OK);
+    required = avifenc_av1_symbol_writer_size(&sizing);
+    CHECK(required > 512U && required < sizeof(output));
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 1);
+    CHECK(write_symbol_sizing_sequence(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) == required);
+
+    for (index = 0U; index < sizeof(bounded); ++index) bounded[index] = 0x5aU;
+    avifenc_av1_symbol_writer_init(&writer, bounded, required - 1U, 1);
+    CHECK(write_symbol_sizing_sequence(&writer) == AVIFENC_OUTPUT_TOO_SMALL);
+    CHECK(avifenc_av1_symbol_writer_size(&writer) <= required - 1U);
+    for (index = required - 1U; index < sizeof(bounded); ++index) {
+        CHECK(bounded[index] == 0x5aU);
+    }
+
+    avifenc_av1_symbol_writer_init(&writer, 0, 1U, 0);
+    CHECK(writer.status == AVIFENC_INVALID_ARGUMENT);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, 0, 2U, 0U) ==
+          AVIFENC_INVALID_ARGUMENT);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_write(
+              &writer, invalid_cdf, 2U, 0U) == AVIFENC_INVALID_ARGUMENT);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_write(&writer, cdf, 2U, 2U) ==
+          AVIFENC_INVALID_ARGUMENT);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_literal(&writer, 0U, 33U) ==
+          AVIFENC_INVALID_ARGUMENT);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_literal(&writer, 8U, 3U) ==
+          AVIFENC_INVALID_ARGUMENT);
+    avifenc_av1_symbol_writer_init(&writer, output, sizeof(output), 0);
+    CHECK(avifenc_av1_symbol_writer_literal(&writer, UINT32_MAX, 0U) ==
+          AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) == AVIFENC_OK);
+    CHECK(avifenc_av1_symbol_writer_finish(&writer) ==
+          AVIFENC_INVALID_ARGUMENT);
+
+    avifenc_av1_symbol_writer_init_sizing(&sizing, 1);
+    sizing.position = SIZE_MAX;
+    for (index = 0U; index < 64U && sizing.status == AVIFENC_OK; ++index) {
+        (void)avifenc_av1_symbol_writer_literal(&sizing, 0U, 1U);
+    }
+    CHECK(sizing.status == AVIFENC_OVERFLOW && sizing.position == SIZE_MAX);
     return 0;
 }
 
@@ -873,6 +1134,14 @@ int main(int argc, char **argv) {
       result = test_bit_writer();
       if (result != 0) return result;
       result = test_av1_code_writers();
+      if (result != 0) return result;
+      result = test_av1_symbol_writer_vectors();
+      if (result != 0) return result;
+      result = test_av1_symbol_writer_round_trip();
+      if (result != 0) return result;
+      result = test_av1_symbol_writer_carry_and_tail();
+      if (result != 0) return result;
+      result = test_av1_symbol_writer_boundaries();
       if (result != 0) return result;
       result = test_av1_header_writer();
       if (result != 0) return result;

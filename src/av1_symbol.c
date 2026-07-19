@@ -1,4 +1,5 @@
 #include "av1_symbol.h"
+#include "av1_cdf.h"
 
 #define AV1_CDF_PROB_TOP 32768U
 #define AV1_EC_PROB_SHIFT 6U
@@ -69,25 +70,6 @@ static uint32_t av1_symbol_raw_bits(Av1SymbolDecoder *decoder, unsigned int coun
 
 static unsigned int av1_symbol_floor_log2(uint32_t value) {
     return 31U - (unsigned int)__builtin_clz(value);
-}
-
-static void av1_symbol_update_cdf(uint16_t *cdf, size_t symbols, size_t symbol) {
-    unsigned int rate = 3U + (cdf[symbols] > 15U) + (cdf[symbols] > 31U);
-    unsigned int symbol_bits =
-        av1_symbol_floor_log2((uint32_t)symbols);
-    uint32_t target = 0U;
-    size_t index;
-
-    rate += symbol_bits < 2U ? symbol_bits : 2U;
-    for (index = 0U; index + 1U < symbols; ++index) {
-        if (index == symbol) target = AV1_CDF_PROB_TOP;
-        if (target < cdf[index]) {
-            cdf[index] = (uint16_t)(cdf[index] - ((cdf[index] - target) >> rate));
-        } else {
-            cdf[index] = (uint16_t)(cdf[index] + ((target - cdf[index]) >> rate));
-        }
-    }
-    if (cdf[symbols] < 32U) ++cdf[symbols];
 }
 
 AvifdecStatus av1_symbol_init(Av1SymbolDecoder *decoder,
@@ -230,7 +212,7 @@ uint32_t av1_symbol_read(Av1SymbolDecoder *decoder, uint16_t *cdf, size_t symbol
     decoder->value = (new_data << (bits - read_bits)) ^
                      (((decoder->value + 1U) << bits) - 1U);
     decoder->max_bits -= bits;
-    if (!decoder->disable_cdf_update) av1_symbol_update_cdf(cdf, symbols, symbol);
+    if (!decoder->disable_cdf_update) av1_cdf_update(cdf, symbols, symbol);
     return (uint32_t)symbol;
 }
 

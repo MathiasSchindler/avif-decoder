@@ -90,7 +90,7 @@ FUZZ_CFLAGS := \
 	-fno-sanitize=implicit-integer-truncation,unsigned-shift-base \
 	-Isrc -Isrc/shared
 CORE_C_SOURCES := \
-	src/base.c src/bmff.c src/avif.c src/avif_sequence.c src/avif_rgb.c \
+	src/base.c src/shared/av1_cdf.c src/bmff.c src/avif.c src/avif_sequence.c src/avif_rgb.c \
 	src/avif_sato.c src/png.c \
 	src/av1.c src/av1_bitstream.c src/av1_metadata.c src/av1_profile.c \
 	src/av1_reference.c \
@@ -103,8 +103,10 @@ CORE_C_SOURCES := \
 	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
 	src/av1_restoration_filter.c
 ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
-	src/encoder/avif_write.c src/encoder/av1_write.c
-ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c
+	src/encoder/avif_write.c src/encoder/av1_write.c \
+	src/encoder/av1_symbol_write.c
+ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
+	src/shared/av1_cdf.c
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
@@ -194,6 +196,7 @@ $(MACHO_DYLIB_REMOVER): tools/macho_dylib_remover.c
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 $< -o $@
 
 $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
+		src/shared/av1_cdf.h \
 		src/av1.h src/av1_bitstream.h src/av1_metadata.h src/av1_profile.h \
 		src/av1_film_grain.h src/av1_film_grain_gaussian.inc \
 		src/av1_inter.h \
@@ -208,7 +211,9 @@ $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 
 $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
 		src/encoder/avifenc.h src/encoder/write.h \
-		src/encoder/avif_write.h src/encoder/av1_write.h src/base.h src/bmff.h
+		src/encoder/avif_write.h src/encoder/av1_write.h \
+		src/encoder/av1_symbol_write.h src/shared/av1_cdf.h \
+		src/base.h src/bmff.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
 		$(ENCODER_TEST_C_SOURCES) -o $@
