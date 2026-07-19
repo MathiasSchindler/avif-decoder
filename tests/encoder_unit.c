@@ -1,7 +1,11 @@
 #include "encoder/avifenc.h"
+#include "encoder/av1_write.h"
+#include "encoder/avif_write.h"
 #include "encoder/write.h"
+#include "av1.h"
 #include "av1_bitstream.h"
 #include "base.h"
+#include "bmff.h"
 
 #define CHECK(condition) do { if (!(condition)) return __LINE__; } while (0)
 
@@ -318,6 +322,367 @@ static int test_av1_code_writers(void) {
     return 0;
 }
 
+typedef struct {
+      uint32_t width;
+      uint32_t height;
+      uint8_t level;
+      const uint8_t *bytes;
+      size_t size;
+} Av1HeaderGolden;
+
+static int test_av1_header_writer(void) {
+      static const uint8_t golden_2x2[] = {
+            0x0aU, 0x08U, 0x18U, 0x00U, 0x30U, 0x08U, 0x08U, 0x08U,
+            0x08U, 0x20U, 0x1aU, 0x05U, 0x98U, 0x00U, 0x00U, 0x00U,
+            0x18U, 0x22U, 0x01U, 0x00U
+      };
+      static const uint8_t golden_64x64[] = {
+            0x0aU, 0x09U, 0x18U, 0x15U, 0x7fU, 0xfcU, 0x02U, 0x02U,
+            0x02U, 0x02U, 0x08U, 0x1aU, 0x05U, 0x98U, 0x00U, 0x00U,
+            0x00U, 0x18U, 0x22U, 0x01U, 0x00U
+      };
+      static const uint8_t golden_130x66[] = {
+            0x0aU, 0x09U, 0x18U, 0x1dU, 0xa0U, 0x60U, 0x80U, 0x40U,
+            0x40U, 0x40U, 0x41U, 0x1aU, 0x05U, 0x92U, 0x00U, 0x00U,
+            0x00U, 0x06U, 0x22U, 0x01U, 0x00U
+      };
+      static const uint8_t golden_640x480[] = {
+            0x0aU, 0x0aU, 0x19U, 0x26U, 0x27U, 0xfeU, 0xf8U, 0x04U,
+            0x04U, 0x04U, 0x04U, 0x10U, 0x1aU, 0x05U, 0x92U, 0x00U,
+            0x00U, 0x00U, 0x06U, 0x22U, 0x01U, 0x00U
+      };
+      static const Av1HeaderGolden golden[] = {
+            { 2U, 2U, 0U, golden_2x2, sizeof(golden_2x2) },
+            { 64U, 64U, 0U, golden_64x64, sizeof(golden_64x64) },
+            { 130U, 66U, 0U, golden_130x66, sizeof(golden_130x66) },
+            { 640U, 480U, 4U, golden_640x480, sizeof(golden_640x480) }
+      };
+      static unsigned char trace_workspace[700000U];
+      unsigned char output[64];
+      unsigned char bounded[64];
+      AvifencAv1Config config = { 0 };
+      AvifencByteWriter writer;
+      AvifencByteWriter sizing;
+      AvifdecImageInfo info;
+      AvifdecEntropyTrace trace;
+      AvifdecError error;
+      AvifdecSpan span;
+      AvifdecStatus trace_status;
+      size_t index;
+      size_t byte;
+      uint8_t level;
+
+      config.color.color_primaries = 1U;
+      config.color.transfer_characteristics = 1U;
+      config.color.matrix_coefficients = 1U;
+      config.quantizer = 128U;
+      for (index = 0U; index < sizeof(golden) / sizeof(golden[0]); ++index) {
+            config.width = golden[index].width;
+            config.height = golden[index].height;
+            avifenc_byte_writer_init_sizing(&sizing);
+            CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_OK);
+            CHECK(avifenc_byte_writer_size(&sizing) == golden[index].size);
+            avifenc_byte_writer_init(&writer, output, sizeof(output));
+            CHECK(avifenc_av1_write(&writer, &config) == AVIFENC_OK);
+            CHECK(avifenc_byte_writer_size(&writer) == golden[index].size);
+            CHECK(avifdec_memory_compare(
+                          output, golden[index].bytes, golden[index].size) == 0);
+
+            span.data = output;
+            span.size = avifenc_byte_writer_size(&writer);
+            span.file_offset = 0U;
+            avifdec_memory_fill(&info, 0U, sizeof(info));
+            CHECK(avifdec_av1_query(&span, 1U, 0, &info, &error) == AVIFDEC_OK);
+            CHECK(info.width == config.width && info.height == config.height &&
+                    info.render_width == config.width &&
+                    info.render_height == config.height && info.profile == 0U &&
+                    info.level == golden[index].level && info.bit_depth == 8U &&
+                    info.channel_count == 3U && info.subsampling_x == 1U &&
+                    info.subsampling_y == 1U && info.chroma_sample_position == 0U);
+            CHECK(info.reduced_still_picture_header == 1U &&
+                    info.frame_type == 0U && info.base_q_index == 128U &&
+                    info.coded_lossless == 0U &&
+                    info.allow_screen_content_tools == 0U &&
+                    info.allow_intrabc == 0U && info.enable_filter_intra == 0U &&
+                    info.enable_intra_edge_filter == 0U &&
+                    info.segmentation_enabled == 0U &&
+                    info.delta_q_present == 0U && info.tx_mode == 1U &&
+                    info.reduced_tx_set == 1U && info.superblock_size == 64U);
+            CHECK(info.tile_columns == 1U && info.tile_rows == 1U &&
+                    info.tile_count == 1U && info.tile_data_size == 1U &&
+                    info.obu_count == 3U && info.film_grain_params_present == 0U);
+            CHECK(info.color_primaries == 1U &&
+                    info.transfer_characteristics == 1U &&
+                    info.matrix_coefficients == 1U && info.color_range == 0U);
+      }
+
+      span.data = golden_2x2;
+      span.size = sizeof(golden_2x2);
+      span.file_offset = 0U;
+      avifdec_memory_fill(&info, 0U, sizeof(info));
+      CHECK(avifdec_av1_query(&span, 1U, 0, &info, &error) == AVIFDEC_OK);
+      CHECK(info.workspace_required <= sizeof(trace_workspace));
+      trace_status = avifdec_av1_trace(
+            &span, 1U, 0, &info, trace_workspace,
+            sizeof(trace_workspace), &trace, &error);
+      CHECK(trace_status != AVIFDEC_OK);
+
+      config.width = 2U;
+      config.height = 2U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_OK);
+      for (byte = 0U; byte < sizeof(bounded); ++byte) bounded[byte] = 0x5aU;
+      avifenc_byte_writer_init(
+            &writer, bounded, avifenc_byte_writer_size(&sizing) - 1U);
+      CHECK(avifenc_av1_write(&writer, &config) == AVIFENC_OUTPUT_TOO_SMALL);
+      for (byte = avifenc_byte_writer_size(&sizing) - 1U;
+             byte < sizeof(bounded); ++byte) {
+            CHECK(bounded[byte] == 0x5aU);
+      }
+
+      CHECK(avifenc_av1_select_level(2U, 2U, &level) == AVIFENC_OK &&
+              level == 0U);
+      CHECK(avifenc_av1_select_level(2048U, 1152U, &level) == AVIFENC_OK &&
+              level == 8U);
+      CHECK(avifenc_av1_select_level(4096U, 2304U, &level) == AVIFENC_OK &&
+              level == 16U);
+      CHECK(avifenc_av1_select_level(16384U, 8704U, &level) == AVIFENC_OK &&
+              level == 31U);
+      CHECK(avifenc_av1_select_level(0U, 2U, &level) ==
+              AVIFENC_INVALID_ARGUMENT);
+      CHECK(avifenc_av1_select_level(2U, 2U, 0) == AVIFENC_INVALID_ARGUMENT);
+
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_av1_write(&sizing, 0) == AVIFENC_INVALID_ARGUMENT);
+      config.width = 3U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_INVALID_ARGUMENT);
+      config.width = 4098U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_UNSUPPORTED);
+      config.width = 2U;
+      config.quantizer = 256U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_INVALID_ARGUMENT);
+      config.quantizer = 128U;
+      config.color.transfer_characteristics = 13U;
+      config.color.matrix_coefficients = 0U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_INVALID_ARGUMENT);
+      return 0;
+}
+
+static int test_av1_avif_integration(void) {
+      unsigned char av1[64];
+      unsigned char avif[512];
+      AvifencAv1Config av1_config = { 0 };
+      AvifencAvifConfig avif_config = { 0 };
+      AvifencByteWriter av1_writer;
+      AvifencByteWriter avif_writer;
+      AvifdecImageInfo info;
+      AvifdecError error;
+      uint8_t level;
+
+      av1_config.width = 640U;
+      av1_config.height = 480U;
+      av1_config.quantizer = 128U;
+      av1_config.color.color_primaries = 9U;
+      av1_config.color.transfer_characteristics = 16U;
+      av1_config.color.matrix_coefficients = 9U;
+      av1_config.color.full_range = 1U;
+      av1_config.color.chroma_sample_position = 2U;
+      avifenc_byte_writer_init(&av1_writer, av1, sizeof(av1));
+      CHECK(avifenc_av1_write(&av1_writer, &av1_config) == AVIFENC_OK);
+      CHECK(avifenc_av1_select_level(
+                    av1_config.width, av1_config.height, &level) == AVIFENC_OK);
+
+      avif_config.width = av1_config.width;
+      avif_config.height = av1_config.height;
+      avif_config.color = av1_config.color;
+      avif_config.seq_level_idx_0 = level;
+      avifenc_byte_writer_init(&avif_writer, avif, sizeof(avif));
+      CHECK(avifenc_avif_write(
+                    &avif_writer, &avif_config, av1,
+                    avifenc_byte_writer_size(&av1_writer)) == AVIFENC_OK);
+      avifdec_memory_fill(&info, 0U, sizeof(info));
+      CHECK(avifdec_query(
+                    avif, avifenc_byte_writer_size(&avif_writer), 0, 0, 0,
+                    &info, &error) == AVIFDEC_OK);
+      CHECK(info.width == av1_config.width && info.height == av1_config.height &&
+              info.level == level && info.profile == 0U &&
+              info.bit_depth == 8U && info.subsampling_x == 1U &&
+              info.subsampling_y == 1U &&
+              info.chroma_sample_position ==
+                    av1_config.color.chroma_sample_position &&
+              info.color_primaries == av1_config.color.color_primaries &&
+              info.transfer_characteristics ==
+                    av1_config.color.transfer_characteristics &&
+              info.matrix_coefficients ==
+                    av1_config.color.matrix_coefficients &&
+              info.color_range == av1_config.color.full_range);
+      return 0;
+}
+
+typedef struct {
+      AvifdecBmffBox boxes[32];
+      size_t count;
+} EncoderBoxTrace;
+
+static void encoder_box_visitor(const AvifdecBmffBox *box, void *user_data) {
+      EncoderBoxTrace *trace = (EncoderBoxTrace *)user_data;
+
+      if (trace->count < sizeof(trace->boxes) / sizeof(trace->boxes[0])) {
+            trace->boxes[trace->count++] = *box;
+      }
+}
+
+static const AvifdecBmffBox *encoder_find_box(const EncoderBoxTrace *trace,
+                                                                    uint32_t type) {
+      size_t index;
+
+      for (index = 0U; index < trace->count; ++index) {
+            if (trace->boxes[index].type == type) return &trace->boxes[index];
+      }
+      return 0;
+}
+
+static int test_avif_writer(void) {
+      static const unsigned char placeholder_av1[] = { 0xffU, 0x00U, 0x55U };
+      static const uint32_t expected_types[] = {
+            AVIFDEC_FOURCC('f', 't', 'y', 'p'),
+            AVIFDEC_FOURCC('m', 'e', 't', 'a'),
+            AVIFDEC_FOURCC('h', 'd', 'l', 'r'),
+            AVIFDEC_FOURCC('p', 'i', 't', 'm'),
+            AVIFDEC_FOURCC('i', 'l', 'o', 'c'),
+            AVIFDEC_FOURCC('i', 'i', 'n', 'f'),
+            AVIFDEC_FOURCC('i', 'n', 'f', 'e'),
+            AVIFDEC_FOURCC('i', 'p', 'r', 'p'),
+            AVIFDEC_FOURCC('i', 'p', 'c', 'o'),
+            AVIFDEC_FOURCC('i', 's', 'p', 'e'),
+            AVIFDEC_FOURCC('p', 'i', 'x', 'i'),
+            AVIFDEC_FOURCC('a', 'v', '1', 'C'),
+            AVIFDEC_FOURCC('c', 'o', 'l', 'r'),
+            AVIFDEC_FOURCC('i', 'p', 'm', 'a'),
+            AVIFDEC_FOURCC('m', 'd', 'a', 't')
+      };
+      static const size_t expected_depths[] = {
+            0U, 0U, 1U, 1U, 1U, 1U, 2U, 1U, 2U, 3U, 3U, 3U, 3U, 2U, 0U
+      };
+      unsigned char output[512];
+      unsigned char repeated[512];
+      unsigned char bounded[512];
+      AvifencAvifConfig config = { 0 };
+      AvifencByteWriter writer;
+      AvifencByteWriter sizing;
+      AvifdecBmffInfo bmff_info;
+      AvifdecBmffLimits bmff_limits = { 8U, 32U };
+      AvifdecImageInfo image_info;
+      AvifdecError error;
+      EncoderBoxTrace trace = { { { 0 } }, 0U };
+      const AvifdecBmffBox *iloc;
+      const AvifdecBmffBox *mdat;
+      size_t required;
+      size_t index;
+      AvifdecStatus decode_status;
+
+      config.width = 16U;
+      config.height = 8U;
+      config.color.color_primaries = 1U;
+      config.color.transfer_characteristics = 13U;
+      config.color.matrix_coefficients = 6U;
+      config.color.full_range = 1U;
+      config.color.chroma_sample_position = 2U;
+      config.seq_level_idx_0 = 4U;
+
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_avif_write(
+                    &sizing, &config, placeholder_av1,
+                    sizeof(placeholder_av1)) == AVIFENC_OK);
+      required = avifenc_byte_writer_size(&sizing);
+      CHECK(required != 0U && required <= sizeof(output));
+
+      avifenc_byte_writer_init(&writer, output, sizeof(output));
+      CHECK(avifenc_avif_write(
+                    &writer, &config, placeholder_av1,
+                    sizeof(placeholder_av1)) == AVIFENC_OK);
+      CHECK(avifenc_byte_writer_size(&writer) == required);
+      avifenc_byte_writer_init(&writer, repeated, sizeof(repeated));
+      CHECK(avifenc_avif_write(
+                    &writer, &config, placeholder_av1,
+                    sizeof(placeholder_av1)) == AVIFENC_OK);
+      CHECK(avifenc_byte_writer_size(&writer) == required);
+      CHECK(avifdec_memory_compare(output, repeated, required) == 0);
+
+      CHECK(avifdec_bmff_inspect(
+                    output, required, &bmff_limits, encoder_box_visitor, &trace,
+                    &bmff_info, &error) == AVIFDEC_OK);
+      CHECK(trace.count == sizeof(expected_types) / sizeof(expected_types[0]));
+      for (index = 0U; index < trace.count; ++index) {
+            CHECK(trace.boxes[index].type == expected_types[index]);
+            CHECK(trace.boxes[index].depth == expected_depths[index]);
+      }
+      CHECK(bmff_info.has_avif_brand && bmff_info.meta_count == 1U &&
+              bmff_info.handler_count == 1U && bmff_info.media_data_count == 1U);
+      CHECK(bmff_info.maximum_depth == 3U);
+
+      iloc = encoder_find_box(&trace, AVIFDEC_FOURCC('i', 'l', 'o', 'c'));
+      mdat = encoder_find_box(&trace, AVIFDEC_FOURCC('m', 'd', 'a', 't'));
+      CHECK(iloc != 0 && mdat != 0 && iloc->payload_size == 22U);
+      CHECK(avifdec_load_u32be(output + iloc->payload_offset + 14U) ==
+              mdat->payload_offset);
+      CHECK(avifdec_load_u32be(output + iloc->payload_offset + 18U) ==
+              sizeof(placeholder_av1));
+      CHECK(mdat->payload_size == sizeof(placeholder_av1));
+      CHECK(avifdec_memory_compare(
+                    output + mdat->payload_offset, placeholder_av1,
+                    sizeof(placeholder_av1)) == 0);
+
+      decode_status = avifdec_query(
+            output, required, 0, 0, 0, &image_info, &error);
+      CHECK(decode_status != AVIFDEC_OK);
+      CHECK(image_info.width == config.width &&
+              image_info.height == config.height && image_info.profile == 0U &&
+              image_info.level == config.seq_level_idx_0 &&
+              image_info.bit_depth == 8U && image_info.channel_count == 3U &&
+              image_info.subsampling_x == 1U && image_info.subsampling_y == 1U &&
+              image_info.chroma_sample_position ==
+                    config.color.chroma_sample_position &&
+              image_info.color_primaries == config.color.color_primaries &&
+              image_info.transfer_characteristics ==
+                    config.color.transfer_characteristics &&
+              image_info.matrix_coefficients == config.color.matrix_coefficients &&
+              image_info.color_range == config.color.full_range);
+
+      for (index = 0U; index < sizeof(bounded); ++index) bounded[index] = 0x5aU;
+      avifenc_byte_writer_init(&writer, bounded, required - 1U);
+      CHECK(avifenc_avif_write(
+                    &writer, &config, placeholder_av1,
+                    sizeof(placeholder_av1)) == AVIFENC_OUTPUT_TOO_SMALL);
+      CHECK(writer.position <= required - 1U);
+      for (index = required - 1U; index < sizeof(bounded); ++index) {
+            CHECK(bounded[index] == 0x5aU);
+      }
+
+      config.width = 15U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_avif_write(
+                    &sizing, &config, placeholder_av1,
+                    sizeof(placeholder_av1)) == AVIFENC_INVALID_ARGUMENT);
+      config.width = 16U;
+      config.seq_level_idx_0 = 32U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_avif_write(
+                    &sizing, &config, placeholder_av1,
+                    sizeof(placeholder_av1)) == AVIFENC_INVALID_ARGUMENT);
+      config.seq_level_idx_0 = 4U;
+      avifenc_byte_writer_init_sizing(&sizing);
+      CHECK(avifenc_avif_write(
+                    &sizing, &config, placeholder_av1,
+                    (size_t)UINT32_MAX) == AVIFENC_LIMIT_EXCEEDED);
+      CHECK(sizing.position == 0U);
+      return 0;
+}
+
 static AvifencImage valid_image(void) {
     static const uint8_t y[4] = { 16U, 32U, 48U, 64U };
     static const uint8_t u[1] = { 128U };
@@ -508,6 +873,12 @@ int main(int argc, char **argv) {
       result = test_bit_writer();
       if (result != 0) return result;
       result = test_av1_code_writers();
+      if (result != 0) return result;
+      result = test_av1_header_writer();
+      if (result != 0) return result;
+      result = test_av1_avif_integration();
+      if (result != 0) return result;
+      result = test_avif_writer();
       if (result != 0) return result;
       result = test_public_contract();
     if (result != 0) return result;

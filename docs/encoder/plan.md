@@ -4,8 +4,8 @@
 | --- | --- |
 | 1. Contract, build target, and test skeleton | Complete |
 | 2. Bounded byte and bit output primitives | Complete |
-| 3. Minimal AVIF container serializer | Planned |
-| 4. Reduced-still AV1 headers and OBU framing | Planned |
+| 3. Minimal AVIF container serializer | Complete |
+| 4. Reduced-still AV1 headers and OBU framing | Complete |
 | 5. AV1 symbol writer and CDF evolution | Planned |
 | 6. Input validation, block layout, and intra prediction | Planned |
 | 7. Forward transform, quantization, and reconstruction loop | Planned |

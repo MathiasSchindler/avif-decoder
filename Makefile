@@ -102,8 +102,10 @@ CORE_C_SOURCES := \
 	src/av1_tile_palette.c src/av1_block.c \
 	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
 	src/av1_restoration_filter.c
-ENCODER_CORE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c src/base.c
-ENCODER_TEST_C_SOURCES := $(ENCODER_CORE_C_SOURCES) src/av1_bitstream.c
+ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
+	src/encoder/avif_write.c src/encoder/av1_write.c
+ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c
+ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
@@ -115,6 +117,8 @@ OBJECTS := $(OBJECTS:.S=.o)
 CORE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(CORE_C_SOURCES:.c=.o))
 ENCODER_CORE_OBJECTS := \
 	$(addprefix $(BUILD_DIR)/,$(ENCODER_CORE_C_SOURCES:.c=.o))
+ENCODER_MODULE_OBJECTS := \
+	$(addprefix $(BUILD_DIR)/,$(ENCODER_MODULE_C_SOURCES:.c=.o))
 ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
 ENCODER_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ENCODER_C_SOURCES:.c=.o)) \
 	$(ARCH_OBJECTS)
@@ -129,7 +133,7 @@ COLD_OBJECTS := \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
 ENCODER_STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/encoder_unit.o \
-	$(ENCODER_CORE_OBJECTS) $(BUILD_DIR)/src/av1_bitstream.o $(ARCH_OBJECTS)
+	$(ENCODER_MODULE_OBJECTS) $(CORE_OBJECTS) $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
@@ -203,8 +207,8 @@ $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
 
 $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
-		src/encoder/avifenc.h src/encoder/write.h src/base.h \
-		src/av1_bitstream.h
+		src/encoder/avifenc.h src/encoder/write.h \
+		src/encoder/avif_write.h src/encoder/av1_write.h src/base.h src/bmff.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
 		$(ENCODER_TEST_C_SOURCES) -o $@
