@@ -168,9 +168,19 @@ static AvifencStatus av1_write_obu(AvifencByteWriter *writer,
 
 AvifencStatus avifenc_av1_write(AvifencByteWriter *writer,
                                 const AvifencAv1Config *config) {
+    static const uint8_t tile_stub[1] = { 0U };
+
+    return avifenc_av1_write_with_tile(
+        writer, config, tile_stub, sizeof(tile_stub));
+}
+
+AvifencStatus avifenc_av1_write_with_tile(
+    AvifencByteWriter *writer,
+    const AvifencAv1Config *config,
+    const uint8_t *tile_payload,
+    size_t tile_payload_size) {
     uint8_t sequence_payload[32];
     uint8_t frame_payload[32];
-    static const uint8_t tile_stub[1] = { 0U };
     AvifencBitWriter bits;
     AvifencStatus status;
     uint8_t level;
@@ -179,7 +189,8 @@ AvifencStatus avifenc_av1_write(AvifencByteWriter *writer,
 
     if (writer == 0) return AVIFENC_INVALID_ARGUMENT;
     if (writer->status != AVIFENC_OK) return writer->status;
-    if (config == 0 || config->width == 0U || config->height == 0U ||
+    if (config == 0 || tile_payload == 0 || tile_payload_size == 0U ||
+        config->width == 0U || config->height == 0U ||
         (config->width & 1U) != 0U || (config->height & 1U) != 0U ||
         config->width > AVIFENC_MAX_DIMENSION ||
         config->height > AVIFENC_MAX_DIMENSION ||
@@ -217,5 +228,5 @@ AvifencStatus avifenc_av1_write(AvifencByteWriter *writer,
         avifenc_bit_writer_bytes(&bits));
     if (status != AVIFENC_OK) return status;
     return av1_write_obu(
-        writer, AVIFENC_OBU_TILE_GROUP, tile_stub, sizeof(tile_stub));
+        writer, AVIFENC_OBU_TILE_GROUP, tile_payload, tile_payload_size);
 }

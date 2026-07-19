@@ -1,5 +1,6 @@
 #include "encoder/avifenc.h"
 #include "encoder/av1_symbol_write.h"
+#include "encoder/av1_tile_write.h"
 #include "encoder/av1_write.h"
 #include "encoder/avif_write.h"
 #include "encoder/write.h"
@@ -733,6 +734,187 @@ static int test_av1_header_writer(void) {
       return 0;
 }
 
+static int test_av1_tile_writer(void) {
+      static const uint32_t dimensions[][2] = {
+            { 2U, 2U }, { 8U, 8U }, { 10U, 6U }, { 66U, 66U }
+      };
+      static uint8_t source_y[66U * 66U];
+      static uint8_t source_u[33U * 33U];
+      static uint8_t source_v[33U * 33U];
+      static uint16_t reconstructed_y[72U * 72U];
+      static uint16_t reconstructed_u[36U * 36U];
+      static uint16_t reconstructed_v[36U * 36U];
+      static uint16_t decoded_y[66U * 66U];
+      static uint16_t decoded_u[33U * 33U];
+      static uint16_t decoded_v[33U * 33U];
+      static uint8_t decode_workspace[800000U];
+      uint8_t tile[8192U];
+      uint8_t repeated_tile[8192U];
+      uint8_t short_tile[8192U];
+      uint8_t av1[9216U];
+      uint8_t tile_workspace[1024U];
+      AvifencAv1TileSource source = { { 0 }, { 0 }, 0U, 0U, 128U };
+      AvifencAv1TileReconstruction reconstruction = {
+            { reconstructed_y, reconstructed_u, reconstructed_v },
+            { 72U, 36U, 36U }, { 72U, 36U, 36U }, { 72U, 36U, 36U }
+      };
+      AvifencAv1TileRequirements requirements;
+      AvifencAv1SymbolWriter symbol_writer;
+      AvifencByteWriter av1_writer;
+      AvifencAv1Config config = { 0 };
+      AvifdecSpan span;
+      AvifdecImageInfo info;
+      AvifdecImage image = { { 0 }, { 0 }, { 0 }, { 0 }, 0U, 0U, 0U, 0U,
+                             0, 0U, 0U, 0U, 0U, 0U, 0U };
+      AvifdecEntropyTrace trace;
+      AvifdecError error;
+      size_t tile_size;
+      size_t repeated_size;
+      size_t index;
+      size_t row;
+      size_t column;
+
+      source.planes[0] = source_y;
+      source.planes[1] = source_u;
+      source.planes[2] = source_v;
+      avifdec_memory_fill(source_y, 128U, sizeof(source_y));
+      avifdec_memory_fill(source_u, 128U, sizeof(source_u));
+      avifdec_memory_fill(source_v, 128U, sizeof(source_v));
+      source.strides[0] = 66U;
+      source.strides[1] = 33U;
+      source.strides[2] = 33U;
+      config.quantizer = 128U;
+      config.color.color_primaries = 1U;
+      config.color.transfer_characteristics = 1U;
+      config.color.matrix_coefficients = 1U;
+      image.planes[0] = decoded_y;
+      image.planes[1] = decoded_u;
+      image.planes[2] = decoded_v;
+
+      for (index = 0U; index < sizeof(dimensions) / sizeof(dimensions[0]);
+           ++index) {
+            source.width = dimensions[index][0];
+            source.height = dimensions[index][1];
+            config.width = source.width;
+            config.height = source.height;
+            CHECK(avifenc_av1_tile_query(&source, &requirements) ==
+                  AVIFENC_OK);
+            CHECK(requirements.workspace_required <= sizeof(tile_workspace));
+            CHECK(requirements.reconstruction_widths[0] ==
+                  8U * ((source.width + 7U) >> 3U));
+            CHECK(requirements.reconstruction_heights[0] ==
+                  8U * ((source.height + 7U) >> 3U));
+
+            avifenc_av1_symbol_writer_init_sizing(&symbol_writer, 1);
+            CHECK(avifenc_av1_tile_write(
+                        &symbol_writer, &source, &reconstruction,
+                        tile_workspace, sizeof(tile_workspace)) == AVIFENC_OK);
+            tile_size = avifenc_av1_symbol_writer_size(&symbol_writer);
+            CHECK(tile_size != 0U && tile_size <= sizeof(tile));
+
+            avifdec_memory_fill(reconstructed_y, 0xffU,
+                                sizeof(reconstructed_y));
+            avifdec_memory_fill(reconstructed_u, 0xffU,
+                                sizeof(reconstructed_u));
+            avifdec_memory_fill(reconstructed_v, 0xffU,
+                                sizeof(reconstructed_v));
+            avifenc_av1_symbol_writer_init(
+                  &symbol_writer, tile, sizeof(tile), 1);
+            CHECK(avifenc_av1_tile_write(
+                        &symbol_writer, &source, &reconstruction,
+                        tile_workspace, sizeof(tile_workspace)) == AVIFENC_OK);
+            CHECK(avifenc_av1_symbol_writer_size(&symbol_writer) == tile_size);
+            for (row = 0U; row < requirements.reconstruction_heights[0]; ++row) {
+                  for (column = 0U;
+                       column < requirements.reconstruction_widths[0]; ++column) {
+                        CHECK(reconstructed_y[row * 72U + column] == 128U);
+                  }
+            }
+            for (row = 0U; row < requirements.reconstruction_heights[1]; ++row) {
+                  for (column = 0U;
+                       column < requirements.reconstruction_widths[1]; ++column) {
+                        CHECK(reconstructed_u[row * 36U + column] == 128U);
+                        CHECK(reconstructed_v[row * 36U + column] == 128U);
+                  }
+            }
+
+            avifenc_av1_symbol_writer_init(
+                  &symbol_writer, repeated_tile, sizeof(repeated_tile), 1);
+            CHECK(avifenc_av1_tile_write(
+                        &symbol_writer, &source, &reconstruction,
+                        tile_workspace, sizeof(tile_workspace)) == AVIFENC_OK);
+            repeated_size = avifenc_av1_symbol_writer_size(&symbol_writer);
+            CHECK(repeated_size == tile_size &&
+                  avifdec_memory_compare(tile, repeated_tile, tile_size) == 0);
+
+            avifenc_byte_writer_init(&av1_writer, av1, sizeof(av1));
+            CHECK(avifenc_av1_write_with_tile(
+                        &av1_writer, &config, tile, tile_size) == AVIFENC_OK);
+            span.data = av1;
+            span.size = avifenc_byte_writer_size(&av1_writer);
+            span.file_offset = 0U;
+            avifdec_memory_fill(&info, 0U, sizeof(info));
+            CHECK(avifdec_av1_query(&span, 1U, 0, &info, &error) ==
+                  AVIFDEC_OK);
+            CHECK(info.workspace_required <= sizeof(decode_workspace));
+            image.strides[0] = source.width;
+            image.strides[1] = source.width >> 1U;
+            image.strides[2] = source.width >> 1U;
+            CHECK(avifdec_av1_decode(
+                        &span, 1U, 0, &info, decode_workspace,
+                        sizeof(decode_workspace), &image, &trace, &error) ==
+                  AVIFDEC_OK);
+            CHECK(trace.nonzero_transform_count == 0U &&
+                  trace.coefficient_count == 0U);
+            CHECK(image.widths[0] == source.width &&
+                  image.heights[0] == source.height &&
+                  image.widths[1] == (source.width >> 1U) &&
+                  image.heights[1] == (source.height >> 1U));
+            for (row = 0U; row < source.height; ++row) {
+                  for (column = 0U; column < source.width; ++column) {
+                        CHECK(decoded_y[row * source.width + column] ==
+                              reconstructed_y[row * 72U + column]);
+                  }
+            }
+            for (row = 0U; row < (source.height >> 1U); ++row) {
+                  for (column = 0U; column < (source.width >> 1U); ++column) {
+                        CHECK(decoded_u[row * (source.width >> 1U) + column] ==
+                              reconstructed_u[row * 36U + column]);
+                        CHECK(decoded_v[row * (source.width >> 1U) + column] ==
+                              reconstructed_v[row * 36U + column]);
+                  }
+            }
+
+            avifdec_memory_fill(short_tile, 0x5aU, sizeof(short_tile));
+            avifenc_av1_symbol_writer_init(
+                  &symbol_writer, short_tile, tile_size - 1U, 1);
+            CHECK(avifenc_av1_tile_write(
+                        &symbol_writer, &source, &reconstruction,
+                        tile_workspace, sizeof(tile_workspace)) ==
+                  AVIFENC_OUTPUT_TOO_SMALL);
+            for (row = tile_size - 1U; row < sizeof(short_tile); ++row) {
+                  CHECK(short_tile[row] == 0x5aU);
+            }
+      }
+
+      source.width = 3U;
+      CHECK(avifenc_av1_tile_query(&source, &requirements) ==
+            AVIFENC_INVALID_ARGUMENT);
+      source.width = 2U;
+      source.height = 2U;
+      CHECK(avifenc_av1_tile_query(0, &requirements) ==
+            AVIFENC_INVALID_ARGUMENT);
+      CHECK(avifenc_av1_tile_query(&source, 0) == AVIFENC_INVALID_ARGUMENT);
+      CHECK(avifenc_av1_tile_query(&source, &requirements) == AVIFENC_OK);
+      avifenc_av1_symbol_writer_init(
+            &symbol_writer, tile, sizeof(tile), 1);
+      CHECK(avifenc_av1_tile_write(
+                  &symbol_writer, &source, &reconstruction,
+                  tile_workspace, requirements.workspace_required - 1U) ==
+            AVIFENC_OUT_OF_MEMORY);
+      return 0;
+}
+
 static int test_av1_avif_integration(void) {
       unsigned char av1[64];
       unsigned char avif[512];
@@ -1144,6 +1326,8 @@ int main(int argc, char **argv) {
       result = test_av1_symbol_writer_boundaries();
       if (result != 0) return result;
       result = test_av1_header_writer();
+      if (result != 0) return result;
+      result = test_av1_tile_writer();
       if (result != 0) return result;
       result = test_av1_avif_integration();
       if (result != 0) return result;
