@@ -323,6 +323,7 @@ test-all: test $(TEST_GENERATED_CHECK)
 		printf '%s\n' 'Skipping generated-table reproduction checks: docs/av1.html is unavailable.'; \
 	fi
 	sh tests/differential.sh $(TARGET)
+	sh tests/encoder-reference.sh
 	sh tests/reference.sh $(TARGET)
 	sh tests/presentation.sh $(TARGET)
 	sh tests/sequence.sh $(TARGET)

@@ -809,6 +809,7 @@ static int test_av1_tile_writer(void) {
             { 2U, 2U }, { 8U, 8U }, { 8U, 8U },
             { 10U, 6U }, { 66U, 66U }
       };
+      static const uint8_t quantizers[] = { 128U, 255U, 1U, 60U, 100U };
       static uint8_t source_y[66U * 66U];
       static uint8_t source_u[33U * 33U];
       static uint8_t source_v[33U * 33U];
@@ -864,6 +865,7 @@ static int test_av1_tile_writer(void) {
            ++index) {
             source.width = dimensions[index][0];
             source.height = dimensions[index][1];
+            source.quantizer = quantizers[index];
             avifdec_memory_fill(source_y, 128U, sizeof(source_y));
             avifdec_memory_fill(source_u, 128U, sizeof(source_u));
             avifdec_memory_fill(source_v, 128U, sizeof(source_v));
@@ -878,6 +880,7 @@ static int test_av1_tile_writer(void) {
                   source.height >> 1U, (unsigned int)index, 2U);
             config.width = source.width;
             config.height = source.height;
+            config.quantizer = source.quantizer;
             CHECK(avifenc_av1_tile_query(&source, &requirements) ==
                   AVIFENC_OK);
             CHECK(requirements.workspace_required <= sizeof(tile_workspace));
