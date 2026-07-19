@@ -132,12 +132,16 @@ uint32_t av1_bits_uvlc(Av1Bits *bits) {
 
 uint32_t av1_bits_ns(Av1Bits *bits, uint32_t n) {
     unsigned int width = 0U;
+    uint64_t power = 1U;
     uint32_t value;
     uint32_t minimum;
 
     if (n <= 1U) return 0U;
-    while ((1U << width) < n) ++width;
-    minimum = (1U << width) - n;
+    while (power < n) {
+        power <<= 1U;
+        ++width;
+    }
+    minimum = (uint32_t)(power - n);
     value = av1_bits_read(bits, width - 1U);
     if (value < minimum) return value;
     return (value << 1) - minimum + av1_bits_read(bits, 1U);

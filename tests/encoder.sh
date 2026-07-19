@@ -77,4 +77,4 @@ case $(uname -s) in
         ;;
 esac
 
-echo 'encoder WP1 tests: ok'
+echo 'encoder CLI tests: ok'

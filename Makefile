@@ -102,7 +102,8 @@ CORE_C_SOURCES := \
 	src/av1_tile_palette.c src/av1_block.c \
 	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
 	src/av1_restoration_filter.c
-ENCODER_CORE_C_SOURCES := src/encoder/avifenc.c src/base.c
+ENCODER_CORE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c src/base.c
+ENCODER_TEST_C_SOURCES := $(ENCODER_CORE_C_SOURCES) src/av1_bitstream.c
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
@@ -128,7 +129,7 @@ COLD_OBJECTS := \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
 ENCODER_STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/encoder_unit.o \
-	$(ENCODER_CORE_OBJECTS) $(ARCH_OBJECTS)
+	$(ENCODER_CORE_OBJECTS) $(BUILD_DIR)/src/av1_bitstream.o $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
@@ -201,11 +202,12 @@ $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
 
-$(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_CORE_C_SOURCES) \
-		src/encoder/avifenc.h src/base.h
+$(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
+		src/encoder/avifenc.h src/encoder/write.h src/base.h \
+		src/av1_bitstream.h
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
-		$(ENCODER_CORE_C_SOURCES) -o $@
+		$(ENCODER_TEST_C_SOURCES) -o $@
 
 $(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
 	@mkdir -p $(@D)
