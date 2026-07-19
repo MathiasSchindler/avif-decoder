@@ -51,4 +51,28 @@ make fuzz-differential
 
 The comparison is byte-exact over native planar color output. Alpha is removed from the reference format because the CLI's `--raw` contract intentionally emits only Y, U, and V. Intentionally malformed inputs rejected by this decoder are not sent through the pixel comparison.
 
-The workflow intentionally stays local to this decoder repository: it does not require containers, a service account, or an external fuzzing platform. The harness, seed preparation, dictionary, reference comparison, artifacts, and regression corpus all remain versioned beside the code they test.
+The workflow intentionally stays local to this codec repository: it does not require containers, a service account, or an external fuzzing platform. The harness, seed preparation, dictionary, reference comparison, artifacts, and regression corpus all remain versioned beside the code they test.
+
+## Encoder campaign
+
+The encoder has a separate bounded harness and corpus:
+
+```sh
+make encoder-fuzz
+make encoder-fuzz-seeds
+make encoder-fuzz-smoke
+FUZZ_SECONDS=21600 make encoder-fuzz-campaign
+```
+
+Inputs select even dimensions up to 32x32, quantizer, speed, source planes,
+and independent workspace/output/decode alignments. Each run repeats query to
+check stable capacities, verifies one-byte-short workspace and output failures,
+encodes twice at different alignments, checks output guards and byte-identical
+determinism, and decodes the result through the in-tree decoder. Static bounded
+buffers cap workspace, output, and decoded images regardless of fuzzer input.
+
+Minimized encoder regressions use the `.seed` suffix under
+`tests/encoder-fuzz-regressions`. The seed target copies those files and the
+checked-in starter vectors into `build/fuzz/encoder-corpus`. Encoder campaigns
+use the same ASan, UBSan, integer-sanitizer, and halt-on-error policy as the
+decoder campaign.

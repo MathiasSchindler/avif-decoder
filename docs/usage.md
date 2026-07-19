@@ -76,8 +76,9 @@ The CLI rejects input files larger than 1 GiB.
 
 ## Encoding still images
 
-The encoder accepts one tightly packed 8-bit 4:2:0 planar frame. Both luma
-dimensions must be even; the file stores Y first, then U, then V:
+The encoder's raw form accepts one tightly packed 8-bit 4:2:0 planar frame.
+Both luma dimensions must be nonzero and even; the file stores Y first, then U,
+then V:
 
 ```sh
 build/x86_64/avifenc --quantizer 128 --speed 0 \
@@ -88,10 +89,34 @@ The quantizer range is 1 through 255 and defaults to 128. Input from standard
 input and output to standard output are selected with `-`. The encoder rejects
 truncated input and trailing bytes.
 
+The CLI also reads dimensions directly from PNG and JPEG files:
+
+```sh
+build/x86_64/avifenc --quantizer 96 --speed 1 photo.jpg photo.avif
+build/x86_64/avifenc artwork.png artwork.avif
+```
+
+PNG input supports non-interlaced 8-bit grayscale, grayscale-alpha, indexed,
+RGB, and RGBA images. JPEG input supports baseline 8-bit Huffman grayscale and
+YCbCr/RGB images with common 4:4:4, 4:2:2, and 4:2:0 sampling. Progressive
+JPEG and interlaced PNG are rejected. Alpha is not part of the first encoder
+profile and is discarded by image input.
+
+Image pixels are converted with integer arithmetic to limited-range BT.709
+YUV420. Odd source dimensions repeat the final row or column to satisfy the
+planar encoder's even-dimension contract. Inputs outside the one-tile limit are
+aspect-preservingly downscaled with nearest-neighbor sampling, with a notice on
+standard error. Raw YUV input is never resized.
+
 Speed 0, the default, evaluates DC, vertical, horizontal, smooth, and Paeth
 luma prediction. Speed 1 evaluates DC, vertical, and horizontal. Speed 2 uses
 the fixed-DC baseline. All levels retain DC chroma prediction and 4x4 blocks
 and transforms; speed changes search work, not the supported file format.
+
+The first-release encoder writes one 8-bit Main-profile reduced-still key frame
+with one tile. Alpha, lossless mode, grids, sequences, inter prediction, rate
+control, and target-size encoding are unsupported. See
+[`api.md`](api.md) for exact one-tile limits and caller-owned buffer contracts.
 
 ## Output formats
 

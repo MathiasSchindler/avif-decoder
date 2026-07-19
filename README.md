@@ -102,9 +102,9 @@ make test       # self-contained: compiler + coreutils only, no third-party tool
 make test-all   # adds reference/differential comparisons against ffmpeg/libavif/aom
 ```
 
-`make test` runs the unit, fixture, and corpus suites with no codec, image, or
-network dependencies. `make test-all` additionally requires `ffmpeg`,
-`ffprobe`, `avifenc`/`avifdec`, `aomenc`, `magick`, and `perl` (and `git` +
+`make test` runs decoder and encoder unit, fixture, and corpus suites with no
+codec, image, or network dependencies. `make test-all` additionally requires
+`ffmpeg`, `ffprobe`, `avifenc`/`avifdec`, `aomenc`/`aomdec`, `magick`, and `perl` (and `git` +
 `cmake` for the libaom block reference). Details in
 [`docs/testing.md`](docs/testing.md).
 
@@ -123,16 +123,20 @@ network dependencies. `make test-all` additionally requires `ffmpeg`,
 
 ## Public API
 
-The API is declared in [`src/avifdec.h`](src/avifdec.h) and documented in
-[`docs/api.md`](docs/api.md). Version 1.3.0 is reported through
-`AVIFDEC_VERSION_MAJOR`/`MINOR`/`PATCH` and `avifdec_version_string()`.
+The decoder API is declared in [`src/avifdec.h`](src/avifdec.h), and the
+encoder API in [`src/encoder/avifenc.h`](src/encoder/avifenc.h). Both are
+documented in [`docs/api.md`](docs/api.md). Decoder version 1.3.0 and encoder
+version 0.1.0 are reported through their respective version constants and
+version-string functions.
 
 ## Makefile interface
 
-`make`, `make encoder`, `make test`, `make test-encoder`, `make test-all`, `make wasm`, `make fuzz`,
-`make fuzz-seeds`, `make fuzz-smoke`, `make fuzz-campaign`,
-`make fuzz-differential`, and `make clean` are the complete public Makefile
-interface.
+`make`, `make encoder`, `make test`, `make test-encoder`, `make test-all`,
+`make wasm`, `make fuzz`, `make fuzz-seeds`, `make fuzz-smoke`,
+`make fuzz-campaign`, `make fuzz-differential`, `make encoder-fuzz`,
+`make encoder-fuzz-seeds`, `make encoder-fuzz-smoke`,
+`make encoder-fuzz-campaign`, and `make clean` are the complete public
+Makefile interface.
 
 ## License and authorship
 

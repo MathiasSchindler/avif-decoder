@@ -11,7 +11,7 @@
 | 7. Forward transform, quantization, and reconstruction loop | Complete |
 | 8. Complete tile, frame, and AVIF assembly | Complete |
 | 9. Bounded mode selection and quality controls | Complete |
-| 10. Hardening, interoperability, and release documentation | Planned |
+| 10. Hardening, interoperability, and release documentation | Complete |
 
 This plan describes a freestanding, dependency-free sister encoder built in
 `src/encoder/`. Its first release targets one 8-bit 4:2:0 still image using a
@@ -19,10 +19,12 @@ reduced-still-picture AV1 sequence, one key frame, one tile, a fixed quantizer,
 and a deliberately small set of intra modes and transform sizes. Caller-owned
 input, workspace, and output buffers remain the governing memory model.
 
-The first release does not include RGB conversion, alpha, grids, image
-sequences, inter prediction, rate control, target-size encoding, film grain,
-super-resolution, or advanced metadata. It should produce interoperable AVIF
-files, not compete with mature AV1 encoders on compression efficiency.
+The first-release core API does not include RGB conversion, alpha, grids,
+image sequences, inter prediction, rate control, target-size encoding, film
+grain, super-resolution, or advanced metadata. The freestanding CLI provides a
+separate dependency-free PNG/baseline-JPEG decoder and RGB-to-YUV adapter
+without broadening that planar API. It should produce interoperable AVIF files,
+not compete with mature AV1 encoders on compression efficiency.
 
 ## Reuse policy
 

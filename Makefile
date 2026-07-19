@@ -20,6 +20,8 @@ THREAD_UNIT := $(BUILD_DIR)/thread-unit
 FUZZ_BUILD_DIR := build/fuzz
 FUZZ_TARGET := $(FUZZ_BUILD_DIR)/avifdec_fuzzer
 FUZZ_CORPUS := $(FUZZ_BUILD_DIR)/corpus
+ENCODER_FUZZ_TARGET := $(FUZZ_BUILD_DIR)/avifenc_fuzzer
+ENCODER_FUZZ_CORPUS := $(FUZZ_BUILD_DIR)/encoder-corpus
 WASM_BUILD_DIR := build/wasm
 WASM_LOADER := $(WASM_BUILD_DIR)/avif-decoder.js
 WASM_BINARY := $(WASM_BUILD_DIR)/avif-decoder.wasm
@@ -161,7 +163,8 @@ $(COLD_OBJECTS): CFLAGS += -Os
 -include $(DEPENDENCIES)
 
 .PHONY: clean encoder test test-encoder test-all wasm fuzz fuzz-seeds \
-	fuzz-smoke fuzz-campaign fuzz-differential
+	fuzz-smoke fuzz-campaign fuzz-differential encoder-fuzz \
+	encoder-fuzz-seeds encoder-fuzz-smoke encoder-fuzz-campaign
 
 # Strip symbol/relocation metadata from the release decoder binary only;
 # the custom static-pie startup only needs the dynamic relocation section,
@@ -248,6 +251,14 @@ $(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
 
 fuzz: $(FUZZ_TARGET)
 
+$(ENCODER_FUZZ_TARGET): tests/encoder_fuzz.c $(ENCODER_TEST_C_SOURCES) \
+		src/encoder/avifenc.h
+	@mkdir -p $(@D)
+	$(CC) $(FUZZ_CFLAGS) tests/encoder_fuzz.c \
+		$(ENCODER_TEST_C_SOURCES) -o $@
+
+encoder-fuzz: $(ENCODER_FUZZ_TARGET)
+
 fuzz-seeds:
 	sh tests/fuzz-seeds.sh $(FUZZ_CORPUS)
 
@@ -266,6 +277,22 @@ fuzz-campaign: $(FUZZ_TARGET) fuzz-seeds
 
 fuzz-differential: $(TARGET) fuzz-seeds
 	sh tests/fuzz-differential.sh $(TARGET) $(FUZZ_CORPUS)
+
+encoder-fuzz-seeds:
+	sh tests/encoder-fuzz-seeds.sh $(ENCODER_FUZZ_CORPUS)
+
+encoder-fuzz-smoke: $(ENCODER_FUZZ_TARGET) encoder-fuzz-seeds
+	UBSAN_OPTIONS=halt_on_error=1 $(ENCODER_FUZZ_TARGET) \
+		-runs=1000 -max_len=4096 \
+		-artifact_prefix=$(FUZZ_BUILD_DIR)/ \
+		$(ENCODER_FUZZ_CORPUS)
+
+encoder-fuzz-campaign: $(ENCODER_FUZZ_TARGET) encoder-fuzz-seeds
+	UBSAN_OPTIONS=halt_on_error=1 $(ENCODER_FUZZ_TARGET) \
+		-max_total_time=$${FUZZ_SECONDS:-3600} -timeout=30 \
+		-max_len=4096 -rss_limit_mb=2048 \
+		-artifact_prefix=$(FUZZ_BUILD_DIR)/ \
+		$(ENCODER_FUZZ_CORPUS)
 
 $(WASM_LOADER): wasm/avif_wasm.c $(CORE_C_SOURCES) src/avifdec.h
 	@mkdir -p $(@D)
@@ -315,10 +342,11 @@ $(GENERATED_CHECK): tools/generate-av1-coeff-tables.pl \
 	cmp $(FILM_GRAIN_TABLE) $(FILM_GRAIN_TABLE_CHECK)
 	@touch $@
 
-# Self-contained test suite. Uses only the compiler, coreutils, and the
-# checked-in fixtures/corpus; it needs no codec, image, or other third-party
-# tools, so `make test` runs anywhere the decoder itself builds.
-test: $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) $(THREAD_UNIT)
+# Self-contained decoder and encoder suite. Uses only the compiler, coreutils,
+# and checked-in fixtures/corpus; it needs no codec, image, or other
+# third-party tools, so `make test` runs anywhere the project itself builds.
+test: test-encoder $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) \
+		$(THREAD_UNIT)
 	$(STRICT_UNIT)
 	$(HOST_UNIT)
 	$(THREAD_UNIT)
@@ -336,7 +364,7 @@ test-encoder: $(TARGET) $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) \
 
 # Full suite: the self-contained tests above plus the reference and
 # differential comparisons. These additionally require ffmpeg, ffprobe,
-# libavif (avifenc/avifdec), aom (aomenc), ImageMagick (magick), and perl;
+# libavif (avifenc/avifdec), aom (aomenc/aomdec), ImageMagick (magick), and perl;
 # tests/reference-block.sh also builds libaom through git and cmake. The
 # generated-table reproduction checks run when the ignored docs/av1.html
 # specification file is present.
@@ -346,6 +374,7 @@ test-all: test $(TEST_GENERATED_CHECK)
 	fi
 	sh tests/differential.sh $(TARGET)
 	sh tests/encoder-reference.sh
+	sh tests/encoder-interoperability.sh $(ENCODER_TARGET) $(TARGET)
 	sh tests/reference.sh $(TARGET)
 	sh tests/presentation.sh $(TARGET)
 	sh tests/sequence.sh $(TARGET)

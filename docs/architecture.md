@@ -1,10 +1,11 @@
 # Architecture
 
-`avif-decoder` is a dependency-free AVIF still-image and image-sequence decoder
-written in freestanding C. This document describes how the project is put
-together; see [`usage.md`](usage.md) for the command line, [`api.md`](api.md)
-for the library interface, and [`support.md`](support.md) for the feature
-matrix.
+`avif-decoder` is a dependency-free AVIF still-image and image-sequence codec
+written in freestanding C. The decoder remains the larger API; its sister
+encoder writes a deliberately narrow reduced-still AVIF profile. This document
+describes how the project is put together; see [`usage.md`](usage.md) for the
+command line, [`api.md`](api.md) for the library interfaces, and
+[`support.md`](support.md) for the feature matrix.
 
 ## Design goals
 
@@ -13,17 +14,16 @@ matrix.
   library. Linux builds are static PIE executables without an interpreter.
   macOS builds use the system dyld as their process launcher but carry no
   dynamic-library load commands.
-- **Allocation- and I/O-free core.** The decoder core never allocates memory
-  and never performs file I/O. It operates on immutable input memory plus
-  caller-owned workspace and output buffers, with explicit limits and
-  structured errors for untrusted input.
+- **Allocation- and I/O-free cores.** The decoder and encoder cores never
+  allocate memory or perform file I/O. They operate on caller-owned input,
+  workspace, and output buffers, with explicit limits and structured errors.
 - **Reentrancy.** Separate input, workspace, output, trace, and error objects
   make every call reentrant.
 
 ## Layering
 
-The code separates a portable, freestanding **decoder core** from a thin
-**CLI/runtime/platform** layer:
+The code separates portable, freestanding codec cores from thin
+**CLI/runtime/platform** layers:
 
 - The **core** (`CORE_C_SOURCES` in the `Makefile`) is the only code compiled
   into the library surface, the tests, the fuzzer, and the WebAssembly build.
@@ -32,6 +32,11 @@ The code separates a portable, freestanding **decoder core** from a thin
   `src/platform/<os>/io.c`, `src/platform/<os>/thread.c`, and the
   `src/arch/<arch>/<os>` startup/syscall stubs) turns the core into a
   standalone executable and provides the optional parallel task pool.
+- The **encoder core** (`ENCODER_MODULE_C_SOURCES`) accepts planar YUV420 and
+  owns byte/range writing, AV1 transform and tile coding, and AVIF assembly.
+  `src/encoder/main.c` adds raw file I/O plus project-owned PNG/JPEG decoding
+  and RGB-to-YUV conversion. None of those CLI adapters broaden the planar
+  public encoder contract.
 
 ## Source tree
 
@@ -51,6 +56,13 @@ src/
   arch/<arch>/<os>/      crt0 startup and raw syscall stubs
   platform/<os>/         io.c (native I/O) and thread.c (thread primitives)
   shared/                Freestanding stdint/stddef/stdbool and platform shims
+  encoder/
+    avifenc.h             Public allocation-free encoder API
+    avifenc.c             Validation, sizing, workspace, and assembly
+    avif_write.c          Single-item AVIF serializer
+    av1_*_write.c         Reduced-still AV1 headers, symbols, tile, transform
+    image_input.c         Allocation-free PNG/baseline-JPEG CLI decoder
+    main.c                Freestanding avifenc command-line front end
   av1_*_tables.inc       Generated AV1 constant tables (see below)
 tests/                   Unit binaries, shell test suites, fuzz harness/seeds
 tools/                   Table generators and the macOS dylib remover

@@ -62,9 +62,33 @@ Implemented decoding includes:
 Tile-list OBUs and large-scale-tile mode are intentionally not supported and are
 reported through capability flags and `AVIFDEC_UNSUPPORTED`.
 
+## Encoder support
+
+The encoder core accepts one nonzero, even-sized 8-bit planar YUV420 frame and
+writes one Main-profile reduced-still key frame in a single-item AVIF. It uses
+one tile, 64x64 superblocks partitioned to 4x4 coding blocks, 4x4 DCT
+transforms, DC chroma prediction, and a deterministic bounded luma mode search.
+Quantizers 1 through 255 and speeds 0 through 2 are supported.
+
+Each dimension is at most 65,536. One-tile syntax further limits the image to
+64 superblock columns and 2,304 total superblocks. The encoder API does not
+resize inputs. It performs no allocation or I/O and reports conservative
+caller-owned workspace and output capacities before encoding.
+
+The `avifenc` CLI additionally accepts non-interlaced 8-bit PNG and baseline
+8-bit JPEG. It converts decoded RGB to limited-range BT.709 YUV420, extends odd
+edges to even dimensions, and aspect-preservingly downsizes image files that
+exceed the one-tile limit. The core API remains planar and preserves the
+caller-supplied NCLX color fields.
+
 ## Known limitations
 
-- The supplied freestanding executable is wired only for Linux/x86-64.
+- Supplied freestanding executables target Linux/x86-64 and macOS/arm64.
+- Encoding is limited to one 8-bit 4:2:0 reduced-still key frame. Alpha,
+  sequences, grids, inter prediction, lossless mode, rate control, target-size
+  encoding, film grain, super-resolution, and advanced metadata are not
+  supported.
+- Encoder image input rejects progressive JPEG and interlaced PNG.
 - Tile-list OBUs and large-scale-tile mode are unsupported.
 - Tone-map/gain-map metadata is retained but not applied.
 - ICC color transforms and transfer-function conversion are not applied.

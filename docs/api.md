@@ -25,14 +25,48 @@ The sister encoder API is declared in
 3. Call `avifenc_encode()` with buffers meeting those capacities.
 
 The encoder produces one reduced-still AV1 key frame in a single-item AVIF.
-It supports even dimensions up to `AVIFENC_MAX_DIMENSION`, quantizers 1 through
-255, speed levels 0 through `AVIFENC_MAX_SPEED`, one tile, bounded luma intra
-mode search, DC chroma prediction, 4x4 blocks, and 4x4 transforms. Speed 0
-searches five luma predictors, speed 1 searches three, and speed 2 retains the
-fixed-DC baseline. Search trials do not mutate committed CDF or neighbor state.
-The core performs no allocation or file I/O, accepts unaligned workspace, and
-reports the exact encoded length through `output_written`. Workspace and output
-capacity requirements are independent of source pixel values and speed level.
+Input dimensions must be nonzero and even, each no greater than
+`AVIFENC_MAX_DIMENSION` (65,536). The one-tile writer additionally requires at
+most 64 superblock columns and 2,304 total 64x64 superblocks:
+
+```text
+ceil(width / 64) <= 64
+ceil(width / 64) * ceil(height / 64) <= 2304
+```
+
+Plane strides are measured in bytes. Y is full resolution; U and V are each
+half width and half height. `AvifencColor` is written as NCLX/AV1 color
+configuration: each color index must fit in 8 bits, `full_range` is 0 or 1,
+and `chroma_sample_position` is 0 through 3.
+
+Quantizers 1 through 255 and speed levels 0 through `AVIFENC_MAX_SPEED` (2)
+are supported. Quantizer 0, including lossless encoding, returns
+`AVIFENC_UNSUPPORTED`. Speed 0 searches DC, vertical, horizontal, smooth, and
+Paeth luma predictors; speed 1 searches DC, vertical, and horizontal; speed 2
+retains the fixed-DC baseline. Every speed uses DC chroma prediction, one tile,
+4x4 blocks, and 4x4 DCT transforms. Lower quantizers generally preserve more
+detail and increase output size. Speed changes bounded search work, not the
+format surface or memory requirement.
+
+`avifenc_query()` returns conservative capacities that are independent of
+source pixel values and speed. `avifenc_encode()` accepts an unaligned
+workspace, requires capacities at least as large as the query result, sets
+`output_written` to the exact encoded length on success, and sets it to zero on
+failure. The core performs no allocation or file I/O. Repeated calls with the
+same image bytes, metadata, and options are byte-identical.
+
+Encoder failures distinguish invalid arguments, checked arithmetic overflow,
+implementation limits, insufficient workspace, insufficient output,
+and valid but unsupported requests. `AvifencError` identifies the failing
+context and, for capacity errors, records the required and provided sizes.
+
+The CLI is an adapter around this planar API. Raw input is tightly packed Y,
+then U, then V. PNG and baseline JPEG input is decoded by project-owned
+freestanding code and converted to limited-range BT.709 YUV420 with integer
+arithmetic. Odd image dimensions repeat the last row or column. Image inputs
+outside the one-tile limit are aspect-preservingly downscaled with
+nearest-neighbor sampling; the planar API itself returns `AVIFENC_UNSUPPORTED`
+instead of resizing. Progressive JPEG and interlaced PNG are unsupported.
 
 ## Still images
 
