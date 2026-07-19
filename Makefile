@@ -307,10 +307,10 @@ test: $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) $(THREAD_UNIT)
 	sh tests/features.sh $(TARGET)
 	sh tests/corpus.sh $(TARGET)
 
-test-encoder: $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) $(ENCODER_HOST_UNIT)
+test-encoder: $(TARGET) $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) $(ENCODER_HOST_UNIT)
 	$(ENCODER_STRICT_UNIT)
 	$(ENCODER_HOST_UNIT)
-	sh tests/encoder.sh $(ENCODER_TARGET)
+	sh tests/encoder.sh $(ENCODER_TARGET) $(TARGET)
 
 # Full suite: the self-contained tests above plus the reference and
 # differential comparisons. These additionally require ffmpeg, ffprobe,

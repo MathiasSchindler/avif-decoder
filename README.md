@@ -39,16 +39,24 @@ Linux/x86-64: build/x86_64/avifdec
 macOS/arm64:  build/arm64/avifdec
 ```
 
-The first freestanding encoder target is under development. Build its public
-API and validation-only CLI skeleton with:
+The freestanding encoder writes one 8-bit 4:2:0 reduced-still AVIF from planar
+YUV input. Build its public API and CLI with:
 
 ```sh
 make encoder
 make test-encoder
 ```
 
-The current `avifenc` target validates the planned 8-bit 4:2:0 input contract
-but intentionally reports that bitstream encoding is not implemented yet.
+Encode a frame by supplying its even luma dimensions. The input contains the Y
+plane followed by half-width, half-height U and V planes:
+
+```sh
+build/arm64/avifenc --quantizer 128 640 480 frame.yuv frame.avif
+```
+
+Quantizers 1 through 255 are supported. The current encoder uses one tile, DC
+intra prediction, and 4x4 transforms; it is intended as a bounded interoperable
+baseline rather than a compression-efficiency replacement for libaom.
 
 The macOS build requires the Xcode command-line tools and targets macOS 11 or
 newer. The release executable is stripped at link time; the unit and trace

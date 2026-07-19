@@ -13,6 +13,23 @@ avifdec_version_string()
 The decoder core performs no allocation and no file I/O; see
 [`architecture.md`](architecture.md) for the memory model.
 
+## Encoder
+
+The sister encoder API is declared in
+[`src/encoder/avifenc.h`](../src/encoder/avifenc.h). Populate an
+`AvifencImage` with 8-bit 4:2:0 Y, U, and V planes, then:
+
+1. Initialize `AvifencOptions` with `avifenc_options_default()`.
+2. Call `avifenc_query()` to validate the image and obtain caller-owned
+  workspace and output capacities.
+3. Call `avifenc_encode()` with buffers meeting those capacities.
+
+The encoder produces one reduced-still AV1 key frame in a single-item AVIF.
+It supports even dimensions up to `AVIFENC_MAX_DIMENSION`, quantizers 1 through
+255, one tile, DC intra prediction, and 4x4 transforms. The core performs no
+allocation or file I/O, accepts unaligned workspace, and reports the exact
+encoded length through `output_written`.
+
 ## Still images
 
 The usual workflow is:

@@ -1360,61 +1360,86 @@ static int test_query_validation(void) {
     CHECK(avifenc_query(&image, &options, &requirements, &error) ==
           AVIFENC_OK);
     CHECK(error.status == AVIFENC_OK && error.context == AVIFENC_CONTEXT_NONE);
-    CHECK(requirements.workspace_required == 12U);
-    CHECK(requirements.output_capacity_required == 65600U);
+    CHECK(requirements.workspace_required != 0U);
+    CHECK(requirements.output_capacity_required != 0U);
     return 0;
 }
 
 static int test_encode_boundaries(void) {
-    static unsigned char workspace[12];
-    static unsigned char output[65600];
+    static unsigned char workspace[20000];
+    static unsigned char decode_workspace[800000];
+    static unsigned char output[10000];
+    static uint16_t decoded_y[4];
+    static uint16_t decoded_u[1];
+    static uint16_t decoded_v[1];
     AvifencImage image = valid_image();
     AvifencOptions options;
     AvifencRequirements requirements;
+    AvifdecImageInfo info;
+    AvifdecImage decoded = {
+        { decoded_y, decoded_u, decoded_v }, { 2U, 1U, 1U },
+        { 0U, 0U, 0U }, { 0U, 0U, 0U }, 0U, 0U, 0U, 0U,
+        0, 0U, 0U, 0U, 0U, 0U, 0U
+    };
     AvifencError error;
+    AvifdecError decode_error;
     size_t output_written = 99U;
-    size_t index;
 
     avifenc_options_default(&options);
     CHECK(avifenc_query(&image, &options, &requirements, &error) ==
           AVIFENC_OK);
-    CHECK(avifenc_encode(&image, &options, workspace, sizeof(workspace),
+    CHECK(requirements.workspace_required <= sizeof(workspace));
+    CHECK(requirements.output_capacity_required <= sizeof(output));
+    CHECK(avifenc_encode(&image, &options, workspace,
+                         requirements.workspace_required,
                          output, sizeof(output), 0, &error) ==
           AVIFENC_INVALID_ARGUMENT);
     CHECK(error.context == AVIFENC_CONTEXT_OUTPUT);
-    CHECK(avifenc_encode(&image, &options, workspace, sizeof(workspace) - 1U,
+    CHECK(avifenc_encode(&image, &options, workspace,
+                         requirements.workspace_required - 1U,
                          output, sizeof(output), &output_written, &error) ==
           AVIFENC_OUT_OF_MEMORY);
     CHECK(output_written == 0U && error.context == AVIFENC_CONTEXT_WORKSPACE);
     CHECK(error.required_size == requirements.workspace_required &&
-          error.provided_size == sizeof(workspace) - 1U);
-    CHECK(avifenc_encode(&image, &options, 0, sizeof(workspace),
+          error.provided_size == requirements.workspace_required - 1U);
+    CHECK(avifenc_encode(&image, &options, 0,
+                         requirements.workspace_required,
                          output, sizeof(output), &output_written, &error) ==
           AVIFENC_INVALID_ARGUMENT);
     CHECK(error.context == AVIFENC_CONTEXT_WORKSPACE);
-    CHECK(avifenc_encode(&image, &options, workspace, sizeof(workspace),
-                         output, sizeof(output) - 1U,
+    CHECK(avifenc_encode(&image, &options, workspace,
+                         requirements.workspace_required,
+                         output, requirements.output_capacity_required - 1U,
                          &output_written, &error) ==
           AVIFENC_OUTPUT_TOO_SMALL);
     CHECK(error.required_size == requirements.output_capacity_required &&
-          error.provided_size == sizeof(output) - 1U);
-    CHECK(avifenc_encode(&image, &options, workspace, sizeof(workspace),
+          error.provided_size == requirements.output_capacity_required - 1U);
+    CHECK(avifenc_encode(&image, &options, workspace,
+                         requirements.workspace_required,
                          0, sizeof(output), &output_written, &error) ==
           AVIFENC_INVALID_ARGUMENT);
     CHECK(error.context == AVIFENC_CONTEXT_OUTPUT);
 
-    for (index = 0U; index < sizeof(workspace); ++index) workspace[index] = 0x5aU;
-    for (index = 0U; index < sizeof(output); ++index) output[index] = 0xa5U;
-    CHECK(avifenc_encode(&image, &options, workspace, sizeof(workspace),
+    CHECK(avifenc_encode(&image, &options, workspace,
+                         requirements.workspace_required,
                          output, sizeof(output), &output_written, &error) ==
-          AVIFENC_UNSUPPORTED);
-    CHECK(output_written == 0U && error.context == AVIFENC_CONTEXT_IMPLEMENTATION);
-    for (index = 0U; index < sizeof(workspace); ++index) {
-        CHECK(workspace[index] == 0x5aU);
-    }
-    for (index = 0U; index < sizeof(output); ++index) {
-        CHECK(output[index] == 0xa5U);
-    }
+          AVIFENC_OK);
+    CHECK(output_written != 0U &&
+          output_written <= requirements.output_capacity_required);
+    avifdec_memory_fill(&info, 0U, sizeof(info));
+    CHECK(avifdec_query(output, output_written, 0, 0, 0,
+                        &info, &decode_error) == AVIFDEC_OK);
+    CHECK(info.width == 2U && info.height == 2U &&
+          info.base_q_index == options.quantizer &&
+          info.workspace_required <= sizeof(decode_workspace));
+    CHECK(avifdec_decode(output, output_written, 0,
+                         decode_workspace, sizeof(decode_workspace),
+                         &decoded, 0, &decode_error) == AVIFDEC_OK);
+    CHECK(decoded.widths[0] == 2U && decoded.heights[0] == 2U &&
+          decoded.widths[1] == 1U && decoded.heights[1] == 1U &&
+          decoded.widths[2] == 1U && decoded.heights[2] == 1U &&
+          decoded.bit_depth == 8U && decoded.subsampling_x == 1U &&
+          decoded.subsampling_y == 1U);
     return 0;
 }
 

@@ -74,6 +74,19 @@ macOS currently uses the serial task-pool backend.
 
 The CLI rejects input files larger than 1 GiB.
 
+## Encoding still images
+
+The encoder accepts one tightly packed 8-bit 4:2:0 planar frame. Both luma
+dimensions must be even; the file stores Y first, then U, then V:
+
+```sh
+build/x86_64/avifenc --quantizer 128 640 480 frame.yuv frame.avif
+```
+
+The quantizer range is 1 through 255 and defaults to 128. Input from standard
+input and output to standard output are selected with `-`. The encoder rejects
+truncated input and trailing bytes.
+
 ## Output formats
 
 ### PNG

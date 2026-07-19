@@ -1,4 +1,5 @@
 #include "encoder/avifenc.h"
+#include "base.h"
 #include "platform.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -51,6 +52,19 @@ static int write_bytes(int fd, const void *data, size_t size) {
     return 0;
 }
 
+static int read_bytes(int fd, void *data, size_t size) {
+    unsigned char *bytes = (unsigned char *)data;
+    size_t received = 0U;
+
+    while (received < size) {
+        long result = platform_read(fd, bytes + received, size - received);
+
+        if (result <= 0) return -1;
+        received += (size_t)result;
+    }
+    return 0;
+}
+
 static int write_text(int fd, const char *text) {
     return write_bytes(fd, text, text_length(text));
 }
@@ -58,7 +72,7 @@ static int write_text(int fd, const char *text) {
 static void write_usage(int fd) {
     (void)write_text(
         fd,
-        "usage: avifenc [--quantizer 0..255] WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
+        "usage: avifenc [--quantizer 1..255] WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
         "       avifenc --help\n"
         "       avifenc --version\n");
 }
@@ -81,8 +95,18 @@ int main(int argc, char **argv) {
     AvifencRequirements requirements;
     AvifencError error;
     AvifencStatus status;
+    unsigned char *input = 0;
+    void *workspace = 0;
+    unsigned char *output = 0;
+    size_t luma_size;
+    size_t chroma_size;
+    size_t input_size;
+    size_t output_written = 0U;
     uint32_t quantizer = AVIFENC_DEFAULT_QUANTIZER;
+    int input_fd = -1;
+    int output_fd = -1;
     int argument = 1;
+    int result = 3;
 
     if (argc == 2 && text_equal(argv[1], "--help")) {
         write_usage(1);
@@ -125,14 +149,90 @@ int main(int argc, char **argv) {
         (void)write_error(status, &error);
         return 2;
     }
+    if (!avifdec_size_multiply(image.width, image.height, &luma_size) ||
+        !avifdec_size_multiply(
+            image.width / 2U, image.height / 2U, &chroma_size) ||
+        chroma_size > (SIZE_MAX - luma_size) / 2U) {
+        (void)write_text(2, "avifenc: input dimensions overflow\n");
+        return 2;
+    }
+    input_size = luma_size + 2U * chroma_size;
+    if (input_size == 0U) {
+        (void)write_text(2, "avifenc: invalid dimensions\n");
+        return 2;
+    }
+    input = (unsigned char *)platform_allocate_pages(input_size);
+    if (input == 0) {
+        (void)write_text(2, "avifenc: out of memory: input\n");
+        return 3;
+    }
+    input_fd = platform_open_read(argv[argument + 2]);
+    if (input_fd < 0 || read_bytes(input_fd, input, input_size) != 0) {
+        (void)write_text(2, "avifenc: failed to read complete YUV input\n");
+        result = 4;
+        goto cleanup;
+    }
+    {
+        unsigned char trailing;
+        long extra = platform_read(input_fd, &trailing, 1U);
 
-    (void)argv[argument + 2];
-    (void)argv[argument + 3];
-    status = AVIFENC_UNSUPPORTED;
-    error.status = status;
-    error.context = AVIFENC_CONTEXT_IMPLEMENTATION;
-    error.required_size = requirements.output_capacity_required;
-    error.provided_size = 0U;
-    (void)write_error(status, &error);
-    return 3;
+        if (extra != 0) {
+            (void)write_text(2, "avifenc: YUV input has trailing data\n");
+            result = 4;
+            goto cleanup;
+        }
+    }
+    if (platform_close(input_fd) != 0) {
+        input_fd = -1;
+        (void)write_text(2, "avifenc: failed to close YUV input\n");
+        result = 4;
+        goto cleanup;
+    }
+    input_fd = -1;
+    image.planes[0] = input;
+    image.planes[1] = input + luma_size;
+    image.planes[2] = input + luma_size + chroma_size;
+    workspace = platform_allocate_pages(requirements.workspace_required);
+    output = (unsigned char *)platform_allocate_pages(
+        requirements.output_capacity_required);
+    if (workspace == 0 || output == 0) {
+        (void)write_text(2, "avifenc: out of memory: encode buffers\n");
+        goto cleanup;
+    }
+    status = avifenc_encode(
+        &image, &options, workspace, requirements.workspace_required,
+        output, requirements.output_capacity_required,
+        &output_written, &error);
+    if (status != AVIFENC_OK) {
+        (void)write_error(status, &error);
+        goto cleanup;
+    }
+    output_fd = platform_open_write(argv[argument + 3], 0644U);
+    if (output_fd < 0 || write_bytes(output_fd, output, output_written) != 0) {
+        (void)write_text(2, "avifenc: failed to write AVIF output\n");
+        result = 4;
+        goto cleanup;
+    }
+    if (platform_close(output_fd) != 0) {
+        output_fd = -1;
+        (void)write_text(2, "avifenc: failed to close AVIF output\n");
+        result = 4;
+        goto cleanup;
+    }
+    output_fd = -1;
+    result = 0;
+
+cleanup:
+    if (input_fd >= 0) (void)platform_close(input_fd);
+    if (output_fd >= 0) (void)platform_close(output_fd);
+    if (output != 0) {
+        (void)platform_free_pages(
+            output, requirements.output_capacity_required);
+    }
+    if (workspace != 0) {
+        (void)platform_free_pages(
+            workspace, requirements.workspace_required);
+    }
+    (void)platform_free_pages(input, input_size);
+    return result;
 }
