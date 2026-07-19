@@ -10,7 +10,7 @@
 | 6. Input validation, block layout, and intra prediction | Complete |
 | 7. Forward transform, quantization, and reconstruction loop | Complete |
 | 8. Complete tile, frame, and AVIF assembly | Complete |
-| 9. Bounded mode selection and quality controls | Planned |
+| 9. Bounded mode selection and quality controls | Complete |
 | 10. Hardening, interoperability, and release documentation | Planned |
 
 This plan describes a freestanding, dependency-free sister encoder built in

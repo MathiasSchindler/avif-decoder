@@ -51,12 +51,16 @@ Encode a frame by supplying its even luma dimensions. The input contains the Y
 plane followed by half-width, half-height U and V planes:
 
 ```sh
-build/arm64/avifenc --quantizer 128 640 480 frame.yuv frame.avif
+build/arm64/avifenc --quantizer 128 --speed 0 \
+  640 480 frame.yuv frame.avif
 ```
 
-Quantizers 1 through 255 are supported. The current encoder uses one tile, DC
-intra prediction, and 4x4 transforms; it is intended as a bounded interoperable
-baseline rather than a compression-efficiency replacement for libaom.
+Quantizers 1 through 255 and speed levels 0 through 2 are supported. Speed 0
+searches DC, vertical, horizontal, smooth, and Paeth luma prediction; speed 1
+searches DC, vertical, and horizontal; speed 2 uses DC only. The current
+encoder uses one tile, DC chroma prediction, 4x4 blocks, and 4x4 transforms. It
+is intended as a bounded interoperable baseline rather than a
+compression-efficiency replacement for libaom.
 
 The macOS build requires the Xcode command-line tools and targets macOS 11 or
 newer. The release executable is stripped at link time; the unit and trace

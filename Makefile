@@ -108,7 +108,7 @@ ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 	src/encoder/av1_transform_write.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
-	src/av1_predict.c src/av1_recon.c
+	src/av1_intra.c src/av1_predict.c src/av1_recon.c
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c

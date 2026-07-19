@@ -458,45 +458,139 @@ static AvifencStatus transform_write_coefficients(
     return AVIFENC_OK;
 }
 
-AvifencStatus avifenc_av1_transform_encode_4x4(
-    AvifencAv1TransformState *state,
-    AvifencAv1SymbolWriter *writer,
+static uint64_t transform_symbol_cost(const uint16_t *cdf,
+                                      size_t symbol) {
+    uint32_t low = symbol == 0U ? 0U : cdf[symbol - 1U];
+    uint32_t probability = cdf[symbol] - low;
+    uint64_t cost = 0U;
+
+    if (probability == 0U) probability = 1U;
+    while (probability < 32768U) {
+        probability <<= 1U;
+        cost += 256U;
+    }
+    return cost;
+}
+
+static uint64_t transform_estimate_cost(
+    const AvifencAv1TransformState *state,
     unsigned int plane,
     size_t x4,
     size_t y4,
+    int write_tx_type,
+    const AvifencAv1TransformBlock *block) {
+    const Av1CoeffPlaneContext *context = &state->contexts.plane[plane];
+    uint32_t levels[16] = { 0U };
+    unsigned int plane_type = plane != 0U;
+    unsigned int skip_context = transform_txb_skip_context(
+        context, plane, x4, y4);
+    uint64_t cost = transform_symbol_cost(
+        state->cdfs.txb_skip[0][skip_context], block->eob == 0U);
+    size_t scan_index;
+
+    if (block->eob == 0U) return cost;
+    if (write_tx_type) {
+        cost += transform_symbol_cost(state->tx_type_set2, 1U);
+    }
+    {
+        unsigned int point = block->eob <= 1U
+            ? block->eob
+            : transform_floor_log2(block->eob - 1U) + 2U;
+
+        cost += transform_symbol_cost(
+            state->cdfs.eob_pt_16[plane_type][0], point - 1U);
+        if (point >= 3U) {
+            unsigned int high_shift = point - 3U;
+            uint32_t offset = block->eob -
+                ((1U << (point - 2U)) + 1U);
+
+            cost += transform_symbol_cost(
+                state->cdfs.eob_extra[0][plane_type][high_shift],
+                (offset >> high_shift) & 1U);
+            cost += (uint64_t)(point - 3U) * 256U;
+        }
+    }
+    for (scan_index = block->eob; scan_index-- > 0U;) {
+        size_t position = transform_scan_4x4[scan_index];
+        uint32_t level = block->quantized[position] < 0
+            ? (uint32_t)(-(int64_t)block->quantized[position])
+            : (uint32_t)block->quantized[position];
+        unsigned int base_context = transform_base_context(
+            levels, position, scan_index, scan_index == block->eob - 1U);
+
+        if (scan_index == block->eob - 1U) {
+            cost += transform_symbol_cost(
+                state->cdfs.coeff_base_eob[0][plane_type]
+                                                  [base_context - 38U],
+                (level < 3U ? level : 3U) - 1U);
+        } else {
+            cost += transform_symbol_cost(
+                state->cdfs.coeff_base[0][plane_type][base_context],
+                level < 3U ? level : 3U);
+        }
+        if (level > TRANSFORM_BASE_LEVELS) {
+            unsigned int range_context = transform_br_context(
+                levels, position);
+            uint32_t remaining = level - 3U;
+            unsigned int index;
+
+            for (index = 0U; index < TRANSFORM_BASE_RANGE /
+                                      (TRANSFORM_BR_CDF_SIZE - 1U);
+                 ++index) {
+                uint32_t increment = remaining < 3U ? remaining : 3U;
+
+                cost += transform_symbol_cost(
+                    state->cdfs.coeff_br[0][plane_type][range_context],
+                    increment);
+                remaining -= increment;
+                if (increment < 3U) break;
+            }
+            if (level > TRANSFORM_BASE_LEVELS + TRANSFORM_BASE_RANGE) {
+                uint32_t golomb = level - TRANSFORM_BASE_LEVELS -
+                    TRANSFORM_BASE_RANGE;
+
+                cost += (uint64_t)(2U * transform_floor_log2(golomb) + 1U)
+                    * 256U;
+            }
+        }
+        levels[position] = level;
+        if (level != 0U) {
+            if (scan_index == 0U) {
+                unsigned int dc_context = transform_dc_sign_context(
+                    context, x4, y4);
+                cost += transform_symbol_cost(
+                    state->cdfs.dc_sign[plane_type][dc_context],
+                    block->quantized[position] < 0);
+            } else {
+                cost += 256U;
+            }
+        }
+    }
+    return cost;
+}
+
+static AvifencStatus transform_prepare_4x4(
     const uint8_t *source,
     size_t source_stride,
     uint32_t source_width,
     uint32_t source_height,
-    uint16_t *reconstruction,
-    size_t reconstruction_stride,
+    const uint16_t *prediction,
+    size_t prediction_stride,
+    size_t pixel_x,
+    size_t pixel_y,
     uint8_t quantizer,
-    int write_tx_type,
     AvifencAv1TransformBlock *block) {
     int16_t input[16];
     int32_t transformed[16];
-    int32_t dequantized[16];
-    int32_t residual[16];
-    Av1DequantParams params = { 0 };
-    size_t pixel_x = x4 << 2U;
-    size_t pixel_y = y4 << 2U;
     size_t row;
     size_t column;
-    AvifdecStatus decoder_status;
     AvifencStatus status;
 
-    if (state == 0 || writer == 0 || source == 0 || reconstruction == 0 ||
-        block == 0 || plane >= 3U || source_stride < source_width ||
-        reconstruction_stride < pixel_x + 4U || write_tx_type < 0 ||
-        write_tx_type > 1) {
-        return AVIFENC_INVALID_ARGUMENT;
-    }
     for (row = 0U; row < 4U; ++row) {
         for (column = 0U; column < 4U; ++column) {
             size_t x = pixel_x + column;
             size_t y = pixel_y + row;
-            uint16_t predicted = reconstruction[
-                y * reconstruction_stride + x];
+            uint16_t predicted = prediction[y * prediction_stride + x];
             uint16_t sample = x < source_width && y < source_height
                 ? source[y * source_stride + x] : predicted;
 
@@ -505,11 +599,22 @@ AvifencStatus avifenc_av1_transform_encode_4x4(
     }
     status = avifenc_av1_forward_dct_4x4(input, 4U, transformed);
     if (status != AVIFENC_OK) return status;
-    status = avifenc_av1_quantize_4x4(transformed, quantizer, block);
-    if (status != AVIFENC_OK) return status;
-    status = transform_write_coefficients(
-        state, writer, plane, x4, y4, write_tx_type, block);
-    if (status != AVIFENC_OK) return status;
+    return avifenc_av1_quantize_4x4(transformed, quantizer, block);
+}
+
+static AvifencStatus transform_reconstruct_4x4(
+    unsigned int plane,
+    size_t pixel_x,
+    size_t pixel_y,
+    uint16_t *reconstruction,
+    size_t reconstruction_stride,
+    uint8_t quantizer,
+    const AvifencAv1TransformBlock *block) {
+    int32_t dequantized[16];
+    int32_t residual[16];
+    Av1DequantParams params = { 0 };
+    AvifdecStatus decoder_status;
+
     params.bit_depth = 8U;
     params.q_index = quantizer;
     params.plane = (uint8_t)plane;
@@ -529,4 +634,101 @@ AvifencStatus avifenc_av1_transform_encode_4x4(
     }
     return decoder_status == AVIFDEC_OK ? AVIFENC_OK
                                         : AVIFENC_LIMIT_EXCEEDED;
+}
+
+AvifencStatus avifenc_av1_transform_encode_4x4(
+    AvifencAv1TransformState *state,
+    AvifencAv1SymbolWriter *writer,
+    unsigned int plane,
+    size_t x4,
+    size_t y4,
+    const uint8_t *source,
+    size_t source_stride,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint16_t *reconstruction,
+    size_t reconstruction_stride,
+    uint8_t quantizer,
+    int write_tx_type,
+    AvifencAv1TransformBlock *block) {
+    size_t pixel_x = x4 << 2U;
+    size_t pixel_y = y4 << 2U;
+    AvifencStatus status;
+
+    if (state == 0 || writer == 0 || source == 0 || reconstruction == 0 ||
+        block == 0 || plane >= 3U || source_stride < source_width ||
+        reconstruction_stride < pixel_x + 4U || write_tx_type < 0 ||
+        write_tx_type > 1) {
+        return AVIFENC_INVALID_ARGUMENT;
+    }
+    status = transform_prepare_4x4(
+        source, source_stride, source_width, source_height,
+        reconstruction, reconstruction_stride, pixel_x, pixel_y,
+        quantizer, block);
+    if (status != AVIFENC_OK) return status;
+    status = transform_write_coefficients(
+        state, writer, plane, x4, y4, write_tx_type, block);
+    if (status != AVIFENC_OK) return status;
+    return transform_reconstruct_4x4(
+        plane, pixel_x, pixel_y, reconstruction, reconstruction_stride,
+        quantizer, block);
+}
+
+AvifencStatus avifenc_av1_transform_trial_4x4(
+    const AvifencAv1TransformState *state,
+    unsigned int plane,
+    size_t x4,
+    size_t y4,
+    const uint8_t *source,
+    size_t source_stride,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint16_t *reconstruction,
+    size_t reconstruction_stride,
+    uint8_t quantizer,
+    int write_tx_type,
+    AvifencAv1TransformBlock *block,
+    uint64_t *distortion,
+    uint64_t *rate_cost) {
+    size_t pixel_x = x4 << 2U;
+    size_t pixel_y = y4 << 2U;
+    size_t row;
+    size_t column;
+    AvifencStatus status;
+
+    if (state == 0 || source == 0 || reconstruction == 0 || block == 0 ||
+        distortion == 0 || rate_cost == 0 || plane >= 3U ||
+        x4 >= state->contexts.plane[plane].width4 ||
+        y4 >= state->contexts.plane[plane].height4 ||
+        source_stride < source_width ||
+        reconstruction_stride < pixel_x + 4U || write_tx_type < 0 ||
+        write_tx_type > 1) {
+        return AVIFENC_INVALID_ARGUMENT;
+    }
+    status = transform_prepare_4x4(
+        source, source_stride, source_width, source_height,
+        reconstruction, reconstruction_stride, pixel_x, pixel_y,
+        quantizer, block);
+    if (status != AVIFENC_OK) return status;
+    *rate_cost = transform_estimate_cost(
+        state, plane, x4, y4, write_tx_type, block);
+    status = transform_reconstruct_4x4(
+        plane, pixel_x, pixel_y, reconstruction, reconstruction_stride,
+        quantizer, block);
+    if (status != AVIFENC_OK) return status;
+    *distortion = 0U;
+    for (row = 0U; row < 4U && pixel_y + row < source_height; ++row) {
+        for (column = 0U;
+             column < 4U && pixel_x + column < source_width; ++column) {
+            int32_t difference =
+                (int32_t)source[(pixel_y + row) * source_stride +
+                                pixel_x + column] -
+                (int32_t)reconstruction[
+                    (pixel_y + row) * reconstruction_stride +
+                    pixel_x + column];
+
+            *distortion += (uint64_t)(difference * difference);
+        }
+    }
+    return AVIFENC_OK;
 }

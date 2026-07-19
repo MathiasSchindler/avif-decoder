@@ -80,12 +80,18 @@ The encoder accepts one tightly packed 8-bit 4:2:0 planar frame. Both luma
 dimensions must be even; the file stores Y first, then U, then V:
 
 ```sh
-build/x86_64/avifenc --quantizer 128 640 480 frame.yuv frame.avif
+build/x86_64/avifenc --quantizer 128 --speed 0 \
+	640 480 frame.yuv frame.avif
 ```
 
 The quantizer range is 1 through 255 and defaults to 128. Input from standard
 input and output to standard output are selected with `-`. The encoder rejects
 truncated input and trailing bytes.
+
+Speed 0, the default, evaluates DC, vertical, horizontal, smooth, and Paeth
+luma prediction. Speed 1 evaluates DC, vertical, and horizontal. Speed 2 uses
+the fixed-DC baseline. All levels retain DC chroma prediction and 4x4 blocks
+and transforms; speed changes search work, not the supported file format.
 
 ## Output formats
 

@@ -9,6 +9,7 @@ typedef struct {
     uint32_t width;
     uint32_t height;
     uint16_t quantizer;
+    uint8_t speed;
 } AvifencAv1TileSource;
 
 typedef struct {

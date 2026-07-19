@@ -11,7 +11,7 @@ output=$($binary --version)
 test "$output" = 'avifenc 0.1.0'
 output=$($binary --help)
 case "$output" in
-    *'usage: avifenc [--quantizer 1..255] WIDTH HEIGHT INPUT.yuv OUTPUT.avif'*) ;;
+    *'usage: avifenc [--quantizer 1..255] [--speed 0..2] WIDTH HEIGHT INPUT.yuv OUTPUT.avif'*) ;;
     *) echo 'encoder help is missing the command contract' >&2; exit 1 ;;
 esac
 
@@ -136,6 +136,19 @@ test "$exit_code" -eq 2
 case "$output" in
     *'unsupported feature: quantizer'*) ;;
     *) echo 'zero quantizer returned the wrong error' >&2; exit 1 ;;
+esac
+
+if output=$($binary --speed 3 2 2 "$tmp_dir/flat-2x2.yuv" \
+        "$tmp_dir/speed.avif" 2>&1); then
+    echo 'invalid encoder speed was accepted' >&2
+    exit 1
+else
+    exit_code=$?
+fi
+test "$exit_code" -eq 2
+case "$output" in
+    *'invalid argument: options'*) ;;
+    *) echo 'invalid speed returned the wrong error' >&2; exit 1 ;;
 esac
 
 if $binary >/dev/null 2>&1; then

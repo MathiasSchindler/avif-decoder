@@ -26,9 +26,13 @@ The sister encoder API is declared in
 
 The encoder produces one reduced-still AV1 key frame in a single-item AVIF.
 It supports even dimensions up to `AVIFENC_MAX_DIMENSION`, quantizers 1 through
-255, one tile, DC intra prediction, and 4x4 transforms. The core performs no
-allocation or file I/O, accepts unaligned workspace, and reports the exact
-encoded length through `output_written`.
+255, speed levels 0 through `AVIFENC_MAX_SPEED`, one tile, bounded luma intra
+mode search, DC chroma prediction, 4x4 blocks, and 4x4 transforms. Speed 0
+searches five luma predictors, speed 1 searches three, and speed 2 retains the
+fixed-DC baseline. Search trials do not mutate committed CDF or neighbor state.
+The core performs no allocation or file I/O, accepts unaligned workspace, and
+reports the exact encoded length through `output_written`. Workspace and output
+capacity requirements are independent of source pixel values and speed level.
 
 ## Still images
 

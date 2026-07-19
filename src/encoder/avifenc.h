@@ -10,6 +10,8 @@
 
 #define AVIFENC_MAX_DIMENSION 65536U
 #define AVIFENC_DEFAULT_QUANTIZER 128U
+#define AVIFENC_DEFAULT_SPEED 0U
+#define AVIFENC_MAX_SPEED 2U
 
 typedef enum {
     AVIFENC_OK = 0,
@@ -62,6 +64,8 @@ typedef struct {
 
 typedef struct {
     uint16_t quantizer;
+    /* 0 searches five luma modes, 1 searches three, and 2 uses DC only. */
+    uint8_t speed;
 } AvifencOptions;
 
 typedef struct {

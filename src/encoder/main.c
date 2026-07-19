@@ -72,7 +72,8 @@ static int write_text(int fd, const char *text) {
 static void write_usage(int fd) {
     (void)write_text(
         fd,
-        "usage: avifenc [--quantizer 1..255] WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
+        "usage: avifenc [--quantizer 1..255] [--speed 0..2] "
+        "WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
         "       avifenc --help\n"
         "       avifenc --version\n");
 }
@@ -103,6 +104,7 @@ int main(int argc, char **argv) {
     size_t input_size;
     size_t output_written = 0U;
     uint32_t quantizer = AVIFENC_DEFAULT_QUANTIZER;
+    uint32_t speed = AVIFENC_DEFAULT_SPEED;
     int input_fd = -1;
     int output_fd = -1;
     int argument = 1;
@@ -118,11 +120,21 @@ int main(int argc, char **argv) {
         (void)write_text(1, "\n");
         return 0;
     }
-    if (argument + 1 < argc && text_equal(argv[argument], "--quantizer")) {
-        if (!text_to_u32(argv[argument + 1], &quantizer) ||
-            quantizer > UINT16_MAX) {
-            (void)write_text(2, "avifenc: invalid quantizer\n");
-            return 2;
+    while (argument + 1 < argc) {
+        if (text_equal(argv[argument], "--quantizer")) {
+            if (!text_to_u32(argv[argument + 1], &quantizer) ||
+                quantizer > UINT16_MAX) {
+                (void)write_text(2, "avifenc: invalid quantizer\n");
+                return 2;
+            }
+        } else if (text_equal(argv[argument], "--speed")) {
+            if (!text_to_u32(argv[argument + 1], &speed) ||
+                speed > UINT8_MAX) {
+                (void)write_text(2, "avifenc: invalid speed\n");
+                return 2;
+            }
+        } else {
+            break;
         }
         argument += 2;
     }
@@ -144,6 +156,7 @@ int main(int argc, char **argv) {
     image.color.matrix_coefficients = 1U;
     avifenc_options_default(&options);
     options.quantizer = (uint16_t)quantizer;
+    options.speed = (uint8_t)speed;
     status = avifenc_query(&image, &options, &requirements, &error);
     if (status != AVIFENC_OK) {
         (void)write_error(status, &error);

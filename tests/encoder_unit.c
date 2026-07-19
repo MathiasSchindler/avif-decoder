@@ -772,6 +772,45 @@ static int test_av1_forward_transform(void) {
       return 0;
 }
 
+static int test_av1_transform_trial(void) {
+      static const uint8_t source[16] = {
+            16U, 32U, 48U, 64U,
+            24U, 40U, 56U, 72U,
+            80U, 96U, 112U, 128U,
+            88U, 104U, 120U, 136U
+      };
+      uint16_t reconstruction[16];
+      uint8_t workspace[16];
+      uint8_t workspace_snapshot[16];
+      AvifencAv1TransformState state;
+      AvifencAv1TransformState state_snapshot;
+      AvifencAv1TransformBlock block;
+      uint64_t distortion;
+      uint64_t rate_cost;
+      size_t required;
+
+      CHECK(avifenc_av1_transform_context_size(1U, 1U, &required) ==
+            AVIFENC_OK);
+      CHECK(required <= sizeof(workspace));
+      avifdec_memory_fill(reconstruction, 128U, sizeof(reconstruction));
+      CHECK(avifenc_av1_transform_state_init(
+                  &state, 128U, 1U, 1U, workspace, sizeof(workspace)) ==
+            AVIFENC_OK);
+      avifdec_memory_copy(&state_snapshot, &state, sizeof(state));
+      avifdec_memory_copy(
+            workspace_snapshot, workspace, sizeof(workspace));
+      CHECK(avifenc_av1_transform_trial_4x4(
+                  &state, 0U, 0U, 0U, source, 4U, 4U, 4U,
+                  reconstruction, 4U, 128U, 1, &block,
+                  &distortion, &rate_cost) == AVIFENC_OK);
+      CHECK(distortion != 0U && rate_cost != 0U && block.eob != 0U);
+      CHECK(avifdec_memory_compare(
+                  &state, &state_snapshot, sizeof(state)) == 0);
+      CHECK(avifdec_memory_compare(
+                  workspace, workspace_snapshot, sizeof(workspace)) == 0);
+      return 0;
+}
+
 static void test_av1_tile_source_pattern(uint8_t *plane,
                                          size_t stride,
                                          uint32_t width,
@@ -825,7 +864,7 @@ static int test_av1_tile_writer(void) {
       uint8_t short_tile[8192U];
       uint8_t av1[9216U];
       uint8_t tile_workspace[2064U];
-      AvifencAv1TileSource source = { { 0 }, { 0 }, 0U, 0U, 128U };
+      AvifencAv1TileSource source = { { 0 }, { 0 }, 0U, 0U, 128U, 0U };
       AvifencAv1TileReconstruction reconstruction = {
             { reconstructed_y, reconstructed_u, reconstructed_v },
             { 72U, 36U, 36U }, { 72U, 36U, 36U }, { 72U, 36U, 36U }
@@ -1265,6 +1304,7 @@ static int test_public_contract(void) {
 
     avifenc_options_default(&options);
     CHECK(options.quantizer == AVIFENC_DEFAULT_QUANTIZER);
+      CHECK(options.speed == AVIFENC_DEFAULT_SPEED);
     avifenc_options_default(0);
     CHECK(text_equal(avifenc_version_string(), "0.1.0"));
     CHECK(text_equal(avifenc_status_string(AVIFENC_OK), "ok"));
@@ -1321,6 +1361,13 @@ static int test_query_validation(void) {
           AVIFENC_INVALID_ARGUMENT);
     CHECK(error.context == AVIFENC_CONTEXT_QUANTIZER &&
           error.required_size == 255U && error.provided_size == 256U);
+    avifenc_options_default(&options);
+    options.speed = AVIFENC_MAX_SPEED + 1U;
+    CHECK(avifenc_query(&image, &options, &requirements, &error) ==
+          AVIFENC_INVALID_ARGUMENT);
+    CHECK(error.context == AVIFENC_CONTEXT_OPTIONS &&
+          error.required_size == AVIFENC_MAX_SPEED &&
+          error.provided_size == AVIFENC_MAX_SPEED + 1U);
     avifenc_options_default(&options);
 
     for (plane = 0U; plane < 3U; ++plane) {
@@ -1443,6 +1490,277 @@ static int test_encode_boundaries(void) {
     return 0;
 }
 
+static uint64_t quality_checksum(const uint8_t *data, size_t size) {
+      uint64_t checksum = 1469598103934665603ULL;
+      size_t index;
+
+      for (index = 0U; index < size; ++index) {
+            checksum ^= data[index];
+            checksum *= 1099511628211ULL;
+      }
+      return checksum;
+}
+
+static uint64_t quality_plane_sse(const uint8_t *source,
+                                                  size_t source_stride,
+                                                  const uint16_t *decoded,
+                                                  size_t decoded_stride,
+                                                  uint32_t width,
+                                                  uint32_t height) {
+      uint64_t distortion = 0U;
+      uint32_t row;
+      uint32_t column;
+
+      for (row = 0U; row < height; ++row) {
+            for (column = 0U; column < width; ++column) {
+                  int32_t difference =
+                        (int32_t)source[(size_t)row * source_stride + column] -
+                        (int32_t)decoded[(size_t)row * decoded_stride + column];
+
+                  distortion += (uint64_t)(difference * difference);
+            }
+      }
+      return distortion;
+}
+
+static int test_quality_controls(void) {
+      static const uint16_t quantizers[3] = { 32U, 96U, 192U };
+            static const uint64_t expected_checksums[3][3] = {
+                        { 0x9720129fa9f99171ULL, 0xdc9d73212425b345ULL,
+                              0xcbc4773b81eea441ULL },
+                        { 0x1672a8e91bb4fe87ULL, 0xce6d6df005f34496ULL,
+                              0x9f72a02fb2cdaedaULL },
+                        { 0xb18ff0d3c399c54cULL, 0x6db4ee309f3360cbULL,
+                              0x1bb2af4c4bd2dd7fULL }
+      };
+      static const size_t minimum_sizes[3] = { 1360U, 1048U, 616U };
+      static const size_t maximum_sizes[3] = { 1394U, 1082U, 650U };
+      static const uint64_t minimum_sse[3] = { 220000U, 230000U, 400000U };
+      static const uint64_t maximum_sse[3] = { 250000U, 265000U, 450000U };
+      static uint8_t source_y[32U * 32U];
+      static uint8_t source_u[16U * 16U];
+      static uint8_t source_v[16U * 16U];
+      static uint8_t flat_y[32U * 32U];
+      static uint8_t flat_u[16U * 16U];
+      static uint8_t flat_v[16U * 16U];
+      static uint8_t workspace[100000U];
+      static uint8_t output[30000U];
+      static uint8_t repeated[30000U];
+      static uint8_t baseline[30000U];
+      static uint8_t decode_workspace[800000U];
+      static uint16_t decoded_y[32U * 32U];
+      static uint16_t decoded_u[16U * 16U];
+      static uint16_t decoded_v[16U * 16U];
+      AvifencImage image = { 0 };
+      AvifencImage flat = { 0 };
+      AvifencOptions options;
+      AvifencRequirements requirements;
+      AvifencRequirements baseline_requirements;
+      AvifencRequirements flat_requirements;
+      AvifencError error;
+      AvifdecImage decoded = {
+            { decoded_y, decoded_u, decoded_v }, { 32U, 16U, 16U },
+            { 0U, 0U, 0U }, { 0U, 0U, 0U }, 0U, 0U, 0U, 0U,
+            0, 0U, 0U, 0U, 0U, 0U, 0U
+      };
+      AvifdecError decode_error;
+      uint64_t previous_sse = 0U;
+      size_t previous_size = SIZE_MAX;
+      uint32_t row;
+      uint32_t column;
+      unsigned int index;
+
+      for (row = 0U; row < 32U; ++row) {
+            for (column = 0U; column < 32U; ++column) {
+                  source_y[(size_t)row * 32U + column] = (uint8_t)(
+                        column * 7U + row * 5U + ((column ^ row) & 7U) * 11U);
+            }
+      }
+      for (row = 0U; row < 16U; ++row) {
+            for (column = 0U; column < 16U; ++column) {
+                  source_u[(size_t)row * 16U + column] =
+                        (uint8_t)(32U + ((column + row) & 1U) * 96U);
+                  source_v[(size_t)row * 16U + column] =
+                        (uint8_t)(224U - ((column + row) & 1U) * 96U);
+            }
+      }
+      avifdec_memory_fill(flat_y, 128U, sizeof(flat_y));
+      avifdec_memory_fill(flat_u, 128U, sizeof(flat_u));
+      avifdec_memory_fill(flat_v, 128U, sizeof(flat_v));
+      image.planes[0] = source_y;
+      image.planes[1] = source_u;
+      image.planes[2] = source_v;
+      image.strides[0] = 32U;
+      image.strides[1] = 16U;
+      image.strides[2] = 16U;
+      image.width = 32U;
+      image.height = 32U;
+      image.color.color_primaries = 1U;
+      image.color.transfer_characteristics = 1U;
+      image.color.matrix_coefficients = 1U;
+      flat = image;
+      flat.planes[0] = flat_y;
+      flat.planes[1] = flat_u;
+      flat.planes[2] = flat_v;
+
+      for (index = 0U; index < 3U; ++index) {
+            size_t output_written;
+            size_t repeated_written;
+            size_t baseline_written;
+            uint64_t full_sse;
+            uint64_t middle_sse;
+            uint64_t baseline_sse;
+
+            avifenc_options_default(&options);
+            options.quantizer = quantizers[index];
+            CHECK(avifenc_query(&image, &options, &requirements, &error) ==
+                    AVIFENC_OK);
+            CHECK(avifenc_query(&flat, &options, &flat_requirements, &error) ==
+                    AVIFENC_OK);
+            CHECK(requirements.workspace_required ==
+                          flat_requirements.workspace_required &&
+                    requirements.output_capacity_required ==
+                          flat_requirements.output_capacity_required &&
+                    requirements.workspace_required <= sizeof(workspace) &&
+                    requirements.output_capacity_required <= sizeof(output));
+            options.speed = AVIFENC_MAX_SPEED;
+            CHECK(avifenc_query(
+                          &image, &options, &baseline_requirements, &error) ==
+                    AVIFENC_OK);
+            CHECK(requirements.workspace_required ==
+                          baseline_requirements.workspace_required &&
+                    requirements.output_capacity_required ==
+                          baseline_requirements.output_capacity_required);
+
+            options.speed = AVIFENC_DEFAULT_SPEED;
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          output, sizeof(output), &output_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          repeated, sizeof(repeated), &repeated_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(output_written == repeated_written &&
+                    avifdec_memory_compare(
+                          output, repeated, output_written) == 0 &&
+                    quality_checksum(output, output_written) ==
+                          expected_checksums[index][0]);
+            CHECK(output_written >= minimum_sizes[index] &&
+                    output_written <= maximum_sizes[index]);
+            CHECK(avifdec_decode(
+                          output, output_written, 0, decode_workspace,
+                          sizeof(decode_workspace), &decoded, 0, &decode_error) ==
+                    AVIFDEC_OK);
+            full_sse = quality_plane_sse(
+                  source_y, 32U, decoded_y, 32U, 32U, 32U) +
+                  quality_plane_sse(
+                        source_u, 16U, decoded_u, 16U, 16U, 16U) +
+                  quality_plane_sse(
+                        source_v, 16U, decoded_v, 16U, 16U, 16U);
+            CHECK(full_sse >= minimum_sse[index] &&
+                    full_sse <= maximum_sse[index]);
+
+            options.speed = 1U;
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          repeated, sizeof(repeated), &repeated_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          baseline, sizeof(baseline), &baseline_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(repeated_written == baseline_written &&
+                    avifdec_memory_compare(
+                          repeated, baseline, repeated_written) == 0 &&
+                    quality_checksum(repeated, repeated_written) ==
+                          expected_checksums[index][1]);
+            CHECK(avifdec_decode(
+                          repeated, repeated_written, 0, decode_workspace,
+                          sizeof(decode_workspace), &decoded, 0, &decode_error) ==
+                    AVIFDEC_OK);
+            middle_sse = quality_plane_sse(
+                  source_y, 32U, decoded_y, 32U, 32U, 32U) +
+                  quality_plane_sse(
+                        source_u, 16U, decoded_u, 16U, 16U, 16U) +
+                  quality_plane_sse(
+                        source_v, 16U, decoded_v, 16U, 16U, 16U);
+
+            options.speed = AVIFENC_MAX_SPEED;
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          baseline, sizeof(baseline), &baseline_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          repeated, sizeof(repeated), &repeated_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(baseline_written == repeated_written &&
+                    avifdec_memory_compare(
+                          baseline, repeated, baseline_written) == 0 &&
+                    quality_checksum(baseline, baseline_written) ==
+                          expected_checksums[index][2]);
+            CHECK(avifdec_decode(
+                          baseline, baseline_written, 0, decode_workspace,
+                          sizeof(decode_workspace), &decoded, 0, &decode_error) ==
+                    AVIFDEC_OK);
+            baseline_sse = quality_plane_sse(
+                  source_y, 32U, decoded_y, 32U, 32U, 32U) +
+                  quality_plane_sse(
+                        source_u, 16U, decoded_u, 16U, 16U, 16U) +
+                  quality_plane_sse(
+                        source_v, 16U, decoded_v, 16U, 16U, 16U);
+            CHECK(full_sse <= middle_sse && middle_sse < baseline_sse);
+            if (index != 0U) {
+                  CHECK(full_sse > previous_sse && output_written < previous_size);
+            }
+            previous_sse = full_sse;
+            previous_size = output_written;
+      }
+      for (index = 0U; index < 2U; ++index) {
+            size_t searched_written;
+            size_t baseline_written;
+            uint64_t searched_sse;
+            uint64_t baseline_sse;
+
+            for (row = 0U; row < 32U; ++row) {
+                  for (column = 0U; column < 32U; ++column) {
+                        source_y[(size_t)row * 32U + column] =
+                              (uint8_t)((index == 0U ? column : row) * 8U);
+                  }
+            }
+            avifdec_memory_fill(source_u, 128U, sizeof(source_u));
+            avifdec_memory_fill(source_v, 128U, sizeof(source_v));
+            avifenc_options_default(&options);
+            options.quantizer = 96U;
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          output, sizeof(output), &searched_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(avifdec_decode(
+                          output, searched_written, 0, decode_workspace,
+                          sizeof(decode_workspace), &decoded, 0, &decode_error) ==
+                    AVIFDEC_OK);
+            searched_sse = quality_plane_sse(
+                  source_y, 32U, decoded_y, 32U, 32U, 32U);
+
+            options.speed = AVIFENC_MAX_SPEED;
+            CHECK(avifenc_encode(
+                          &image, &options, workspace, sizeof(workspace),
+                          baseline, sizeof(baseline), &baseline_written, &error) ==
+                    AVIFENC_OK);
+            CHECK(avifdec_decode(
+                          baseline, baseline_written, 0, decode_workspace,
+                          sizeof(decode_workspace), &decoded, 0, &decode_error) ==
+                    AVIFDEC_OK);
+            baseline_sse = quality_plane_sse(
+                  source_y, 32U, decoded_y, 32U, 32U, 32U);
+            CHECK(searched_sse * 2U < baseline_sse &&
+                    searched_written < baseline_written);
+      }
+      return 0;
+}
+
 int main(int argc, char **argv) {
     int result;
 
@@ -1468,6 +1786,8 @@ int main(int argc, char **argv) {
       if (result != 0) return result;
       result = test_av1_forward_transform();
       if (result != 0) return result;
+      result = test_av1_transform_trial();
+      if (result != 0) return result;
       result = test_av1_tile_writer();
       if (result != 0) return result;
       result = test_av1_avif_integration();
@@ -1478,5 +1798,7 @@ int main(int argc, char **argv) {
     if (result != 0) return result;
     result = test_query_validation();
     if (result != 0) return result;
-    return test_encode_boundaries();
+      result = test_encode_boundaries();
+      if (result != 0) return result;
+      return test_quality_controls();
 }

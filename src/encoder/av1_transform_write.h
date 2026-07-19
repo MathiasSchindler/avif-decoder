@@ -46,5 +46,21 @@ AvifencStatus avifenc_av1_transform_encode_4x4(
     uint8_t quantizer,
     int write_tx_type,
     AvifencAv1TransformBlock *block);
+AvifencStatus avifenc_av1_transform_trial_4x4(
+    const AvifencAv1TransformState *state,
+    unsigned int plane,
+    size_t x4,
+    size_t y4,
+    const uint8_t *source,
+    size_t source_stride,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint16_t *reconstruction,
+    size_t reconstruction_stride,
+    uint8_t quantizer,
+    int write_tx_type,
+    AvifencAv1TransformBlock *block,
+    uint64_t *distortion,
+    uint64_t *rate_cost);
 
 #endif

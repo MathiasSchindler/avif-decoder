@@ -81,7 +81,10 @@ const char *avifenc_error_context_string(AvifencErrorContext context) {
 }
 
 void avifenc_options_default(AvifencOptions *options) {
-    if (options != 0) options->quantizer = AVIFENC_DEFAULT_QUANTIZER;
+    if (options != 0) {
+        options->quantizer = AVIFENC_DEFAULT_QUANTIZER;
+        options->speed = AVIFENC_DEFAULT_SPEED;
+    }
 }
 
 static AvifencStatus avifenc_validate_plane(const uint8_t *plane,
@@ -132,6 +135,7 @@ static AvifencStatus avifenc_assembly_layout(
     assembly->tile_source.width = image->width;
     assembly->tile_source.height = image->height;
     assembly->tile_source.quantizer = options->quantizer;
+    assembly->tile_source.speed = options->speed;
     status = avifenc_av1_tile_query(
         &assembly->tile_source, &assembly->tile_requirements);
     if (status != AVIFENC_OK) return status;
@@ -254,6 +258,11 @@ AvifencStatus avifenc_query(const AvifencImage *image,
     if (options->quantizer == 0U) {
         return avifenc_fail(error, AVIFENC_UNSUPPORTED,
                             AVIFENC_CONTEXT_QUANTIZER, 1U, 0U);
+    }
+    if (options->speed > AVIFENC_MAX_SPEED) {
+        return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
+                            AVIFENC_CONTEXT_OPTIONS,
+                            AVIFENC_MAX_SPEED, options->speed);
     }
     if (image->color.full_range > 1U ||
         image->color.chroma_sample_position > 3U ||
