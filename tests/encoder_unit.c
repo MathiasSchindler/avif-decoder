@@ -864,7 +864,9 @@ static int test_av1_tile_writer(void) {
       uint8_t short_tile[8192U];
       uint8_t av1[9216U];
       uint8_t tile_workspace[2064U];
-      AvifencAv1TileSource source = { { 0 }, { 0 }, 0U, 0U, 128U, 0U };
+      AvifencAv1TileSource source = {
+            { 0 }, { 0 }, 0U, 0U, 128U, 0U, 0
+      };
       AvifencAv1TileReconstruction reconstruction = {
             { reconstructed_y, reconstructed_u, reconstructed_v },
             { 72U, 36U, 36U }, { 72U, 36U, 36U }, { 72U, 36U, 36U }
@@ -1416,6 +1418,7 @@ static int test_encode_boundaries(void) {
     static unsigned char workspace[20000];
     static unsigned char decode_workspace[800000];
     static unsigned char output[10000];
+      static unsigned char measured_output[10000];
     static uint16_t decoded_y[4];
     static uint16_t decoded_u[1];
     static uint16_t decoded_v[1];
@@ -1429,8 +1432,10 @@ static int test_encode_boundaries(void) {
         0, 0U, 0U, 0U, 0U, 0U, 0U
     };
     AvifencError error;
+      AvifencStatistics statistics;
     AvifdecError decode_error;
     size_t output_written = 99U;
+      size_t measured_written = 0U;
 
     avifenc_options_default(&options);
     CHECK(avifenc_query(&image, &options, &requirements, &error) ==
@@ -1471,6 +1476,23 @@ static int test_encode_boundaries(void) {
                          requirements.workspace_required,
                          output, sizeof(output), &output_written, &error) ==
           AVIFENC_OK);
+    avifdec_memory_fill(&statistics, 0xffU, sizeof(statistics));
+    CHECK(avifenc_encode_ex(
+              &image, &options, workspace, requirements.workspace_required,
+                    measured_output, sizeof(measured_output), &measured_written,
+                    &statistics, &error) ==
+          AVIFENC_OK);
+      CHECK(measured_written == output_written &&
+              avifdec_memory_compare(
+                    measured_output, output, output_written) == 0);
+    CHECK(statistics.tile_count == 1U &&
+          statistics.partition_node_count == 8U &&
+          statistics.block_count == 4U &&
+          statistics.prediction_trial_count == 20U &&
+          statistics.transform_trial_count == 20U &&
+          statistics.transform_count == 6U &&
+          statistics.entropy_symbol_count != 0U &&
+          statistics.filter_unit_count == 0U);
     CHECK(output_written != 0U &&
           output_written <= requirements.output_capacity_required);
     avifdec_memory_fill(&info, 0U, sizeof(info));

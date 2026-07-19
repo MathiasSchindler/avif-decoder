@@ -249,6 +249,9 @@ static AvifencStatus tile_select_luma_mode(
             state, 0U, column << 2U, row << 2U,
             (uint8_t)(row != 0U), (uint8_t)(column != 0U), mode);
 
+        if (state->source->statistics != 0) {
+            ++state->source->statistics->prediction_trial_count;
+        }
         if (status != AVIFENC_OK) return status;
         avifdec_memory_copy(
             state->transform.tx_type_set2,
@@ -262,6 +265,9 @@ static AvifencStatus tile_select_luma_mode(
             state->reconstruction->strides[0],
             (uint8_t)state->quantizer, 1, &block,
             &distortion, &rate_cost);
+        if (state->source->statistics != 0) {
+            ++state->source->statistics->transform_trial_count;
+        }
         if (status != AVIFENC_OK) return status;
         rate_cost += tile_symbol_cost(mode_cdf, mode);
         if ((row & 1U) != 0U && (column & 1U) != 0U) {
@@ -291,6 +297,9 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
         state, row, column, y_mode_cdf, &y_mode);
 
     if (status != AVIFENC_OK) return status;
+    if (state->source->statistics != 0) {
+        ++state->source->statistics->block_count;
+    }
     state->block_widths[index] = 1U;
     state->block_heights[index] = 1U;
     if (row != 0U) {
@@ -335,6 +344,9 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
         state->reconstruction->strides[0], (uint8_t)state->quantizer,
         1, &transform_block);
     if (status != AVIFENC_OK) return status;
+    if (state->source->statistics != 0) {
+        ++state->source->statistics->transform_count;
+    }
     if ((row & 1U) != 0U && (column & 1U) != 0U) {
         unsigned int plane;
 
@@ -348,6 +360,9 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
                 state->reconstruction->strides[plane],
                 (uint8_t)state->quantizer, 0, &transform_block);
             if (status != AVIFENC_OK) return status;
+            if (state->source->statistics != 0) {
+                ++state->source->statistics->transform_count;
+            }
         }
     }
     return status;
@@ -371,6 +386,9 @@ static AvifencStatus tile_write_partition(AvifencAv1TileState *state,
     AvifencStatus status;
 
     if (row >= state->mi_rows || column >= state->mi_columns) return AVIFENC_OK;
+    if (state->source->statistics != 0) {
+        ++state->source->statistics->partition_node_count;
+    }
     if (block_mi == 1U) return tile_write_block(state, row, column);
     half = block_mi >> 1U;
     has_rows = row + half < state->mi_rows;
@@ -470,6 +488,7 @@ AvifencStatus avifenc_av1_tile_write(
         return workspace_size < requirements.workspace_required
             ? AVIFENC_OUT_OF_MEMORY : AVIFENC_INVALID_ARGUMENT;
     }
+            if (source->statistics != 0) ++source->statistics->tile_count;
     for (plane = 0U; plane < 3U; ++plane) {
         if (reconstruction->planes[plane] == 0 ||
             reconstruction->strides[plane] <

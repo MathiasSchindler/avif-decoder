@@ -25,9 +25,21 @@ project itself builds. It includes:
   quality/search regressions, and strict plus sanitized image-input units;
 - deterministic raw YUV, PNG, and baseline JPEG CLI fixtures, including
   oversized image fitting and freestanding binary dependency checks.
+- the eight-case encoder scorecard, which byte-compares output checksums,
+  capacities, YUV quality metrics, structural edge error, and deterministic
+  work counts against the checked-in cross-platform baseline, while also
+  requiring exact encoder/decoder reconstruction checksums.
 
 `make test-encoder` runs only the encoder portion when a shorter iteration is
 useful. It is already included by `make test`.
+
+`make encoder-scorecard` runs only the stable regression gate.
+`make encoder-benchmark` prints a human timing table, and
+`make encoder-benchmark-json` emits machine-readable JSON Lines. Timing is
+informational and excluded from `make test`; use `BENCHMARK_ITERATIONS=N` for
+repeated measurements. Corpus definitions, metric semantics, reference-host
+budgets, and baseline update rules are documented in
+[`encoder/benchmark.md`](encoder/benchmark.md).
 
 ## `make test-all` — full reference suite
 

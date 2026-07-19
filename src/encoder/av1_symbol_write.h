@@ -14,6 +14,8 @@ typedef struct {
     uint8_t disable_cdf_update;
     uint8_t sizing_only;
     uint8_t finalized;
+    uint64_t symbol_count;
+    uint64_t literal_bit_count;
 } AvifencAv1SymbolWriter;
 
 void avifenc_av1_symbol_writer_init(AvifencAv1SymbolWriter *writer,

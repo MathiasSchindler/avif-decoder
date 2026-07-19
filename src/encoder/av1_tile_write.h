@@ -10,6 +10,7 @@ typedef struct {
     uint32_t height;
     uint16_t quantizer;
     uint8_t speed;
+    AvifencStatistics *statistics;
 } AvifencAv1TileSource;
 
 typedef struct {

@@ -111,6 +111,23 @@ static AvifencStatus avifenc_validate_plane(const uint8_t *plane,
     return AVIFENC_OK;
 }
 
+static uint64_t avifenc_reconstruction_checksum(const uint16_t *plane,
+                                                size_t stride,
+                                                uint32_t width,
+                                                uint32_t height) {
+    uint64_t checksum = 1469598103934665603ULL;
+    uint32_t row;
+    uint32_t column;
+
+    for (row = 0U; row < height; ++row) {
+        for (column = 0U; column < width; ++column) {
+            checksum ^= plane[(size_t)row * stride + column];
+            checksum *= 1099511628211ULL;
+        }
+    }
+    return checksum;
+}
+
 static AvifencStatus avifenc_assembly_layout(
     const AvifencImage *image,
     const AvifencOptions *options,
@@ -308,14 +325,15 @@ AvifencStatus avifenc_query(const AvifencImage *image,
     return AVIFENC_OK;
 }
 
-AvifencStatus avifenc_encode(const AvifencImage *image,
-                             const AvifencOptions *options,
-                             void *workspace,
-                             size_t workspace_size,
-                             void *output,
-                             size_t output_capacity,
-                             size_t *output_written,
-                             AvifencError *error) {
+AvifencStatus avifenc_encode_ex(const AvifencImage *image,
+                                const AvifencOptions *options,
+                                void *workspace,
+                                size_t workspace_size,
+                                void *output,
+                                size_t output_capacity,
+                                size_t *output_written,
+                                AvifencStatistics *statistics,
+                                AvifencError *error) {
     AvifencRequirements requirements;
     AvifencAssembly assembly;
     AvifencAv1SymbolWriter symbol_writer;
@@ -328,6 +346,9 @@ AvifencStatus avifenc_encode(const AvifencImage *image,
     AvifencStatus status;
 
     avifenc_error_reset(error);
+    if (statistics != 0) {
+        avifdec_memory_fill(statistics, 0U, sizeof(*statistics));
+    }
     if (output_written == 0) {
         return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
                             AVIFENC_CONTEXT_OUTPUT, 1U, 0U);
@@ -369,6 +390,7 @@ AvifencStatus avifenc_encode(const AvifencImage *image,
     avifenc_av1_symbol_writer_init(
         &symbol_writer, assembly.tile_payload,
         assembly.tile_payload_capacity, 1);
+    assembly.tile_source.statistics = statistics;
     status = avifenc_av1_tile_write(
         &symbol_writer, &assembly.tile_source, &assembly.reconstruction,
         assembly.tile_workspace,
@@ -377,6 +399,20 @@ AvifencStatus avifenc_encode(const AvifencImage *image,
         return avifenc_fail(error, status, AVIFENC_CONTEXT_IMPLEMENTATION,
                             assembly.tile_payload_capacity,
                             avifenc_av1_symbol_writer_size(&symbol_writer));
+    }
+    if (statistics != 0) {
+        unsigned int plane;
+
+        statistics->entropy_symbol_count = symbol_writer.symbol_count;
+        statistics->literal_bit_count = symbol_writer.literal_bit_count;
+        for (plane = 0U; plane < 3U; ++plane) {
+            statistics->reconstruction_checksum[plane] =
+                avifenc_reconstruction_checksum(
+                    assembly.reconstruction.planes[plane],
+                    assembly.reconstruction.strides[plane],
+                    plane == 0U ? image->width : image->width / 2U,
+                    plane == 0U ? image->height : image->height / 2U);
+        }
     }
     tile_payload_size = avifenc_av1_symbol_writer_size(&symbol_writer);
     av1_config.width = image->width;
@@ -409,4 +445,17 @@ AvifencStatus avifenc_encode(const AvifencImage *image,
     }
     *output_written = avifenc_byte_writer_size(&byte_writer);
     return AVIFENC_OK;
+}
+
+AvifencStatus avifenc_encode(const AvifencImage *image,
+                             const AvifencOptions *options,
+                             void *workspace,
+                             size_t workspace_size,
+                             void *output,
+                             size_t output_capacity,
+                             size_t *output_written,
+                             AvifencError *error) {
+    return avifenc_encode_ex(
+        image, options, workspace, workspace_size, output, output_capacity,
+        output_written, 0, error);
 }

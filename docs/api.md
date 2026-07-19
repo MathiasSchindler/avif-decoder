@@ -55,6 +55,16 @@ workspace, requires capacities at least as large as the query result, sets
 failure. The core performs no allocation or file I/O. Repeated calls with the
 same image bytes, metadata, and options are byte-identical.
 
+`avifenc_encode_ex()` has the same encoding contract and optionally fills
+`AvifencStatistics` with deterministic counts for tiles, partition nodes,
+blocks, prediction and transform trials, committed transforms, entropy
+symbols, literal bits, filter units, and per-plane reconstruction checksums.
+The checksums cover visible sample values and are independent of host byte
+order. Statistics are cleared on entry and are valid after success. They
+contain no timers or platform state, so callers can compare coding work across
+runs and architectures. Passing null disables reporting;
+`avifenc_encode()` is the source-compatible wrapper.
+
 Encoder failures distinguish invalid arguments, checked arithmetic overflow,
 implementation limits, insufficient workspace, insufficient output,
 and valid but unsupported requests. `AvifencError` identifies the failing

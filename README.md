@@ -119,6 +119,8 @@ codec, image, or network dependencies. `make test-all` additionally requires
 - [Testing](docs/testing.md) — the `test` / `test-all` split and requirements.
 - [Fuzzing](docs/fuzzing.md) — coverage-guided robustness workflow.
 - [Profiling](docs/profiling.md) — performance measurement.
+- [Encoder scorecard](docs/encoder/benchmark.md) — deterministic quality/work
+  baselines and reproducible encoder timing.
 - [Browser experiment](docs/wasm.md) — the WebAssembly viewer.
 
 ## Public API
@@ -135,8 +137,9 @@ version-string functions.
 `make wasm`, `make fuzz`, `make fuzz-seeds`, `make fuzz-smoke`,
 `make fuzz-campaign`, `make fuzz-differential`, `make encoder-fuzz`,
 `make encoder-fuzz-seeds`, `make encoder-fuzz-smoke`,
-`make encoder-fuzz-campaign`, and `make clean` are the complete public
-Makefile interface.
+`make encoder-fuzz-campaign`, `make encoder-scorecard`,
+`make encoder-benchmark`, `make encoder-benchmark-json`, and `make clean` are
+the complete public Makefile interface.
 
 ## License and authorship
 

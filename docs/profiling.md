@@ -1,5 +1,9 @@
 # Profiling and optimization
 
+Encoder work uses the deterministic scorecard and hosted timing runner
+documented in [`encoder/benchmark.md`](encoder/benchmark.md). This document
+records decoder-specific profiling.
+
 This document records profiling of the x86-64 Linux decoder and the changes made from those results. Measurements were taken on the normal freestanding static PIE build with GCC 15.2.0. The primary workload was `images/tribu-large.avif`.
 
 ## Reproducing the main measurement

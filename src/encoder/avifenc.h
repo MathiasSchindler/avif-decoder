@@ -73,6 +73,20 @@ typedef struct {
     size_t output_capacity_required;
 } AvifencRequirements;
 
+typedef struct {
+    /* Stable measurements; timing is intentionally outside the core API. */
+    uint64_t tile_count;
+    uint64_t partition_node_count;
+    uint64_t block_count;
+    uint64_t prediction_trial_count;
+    uint64_t transform_trial_count;
+    uint64_t transform_count;
+    uint64_t entropy_symbol_count;
+    uint64_t literal_bit_count;
+    uint64_t filter_unit_count;
+    uint64_t reconstruction_checksum[3];
+} AvifencStatistics;
+
 const char *avifenc_version_string(void);
 const char *avifenc_status_string(AvifencStatus status);
 const char *avifenc_error_context_string(AvifencErrorContext context);
@@ -101,5 +115,19 @@ AvifencStatus avifenc_encode(const AvifencImage *image,
                              size_t output_capacity,
                              size_t *output_written,
                              AvifencError *error);
+
+/*
+ * Encode while reporting deterministic work counts. Statistics are cleared on
+ * entry and are valid after a successful call. Passing null disables reporting.
+ */
+AvifencStatus avifenc_encode_ex(const AvifencImage *image,
+                                const AvifencOptions *options,
+                                void *workspace,
+                                size_t workspace_size,
+                                void *output,
+                                size_t output_capacity,
+                                size_t *output_written,
+                                AvifencStatistics *statistics,
+                                AvifencError *error);
 
 #endif

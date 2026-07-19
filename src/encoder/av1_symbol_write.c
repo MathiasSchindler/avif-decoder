@@ -20,6 +20,8 @@ static void symbol_writer_reset(AvifencAv1SymbolWriter *writer,
     writer->count = -9;
     writer->disable_cdf_update = disable_cdf_update != 0;
     writer->finalized = 0U;
+    writer->symbol_count = 0U;
+    writer->literal_bit_count = 0U;
 }
 
 void avifenc_av1_symbol_writer_init(AvifencAv1SymbolWriter *writer,
@@ -241,6 +243,7 @@ AvifencStatus avifenc_av1_symbol_writer_write(
     if (status == AVIFENC_OK && !writer->disable_cdf_update) {
         av1_cdf_update(cdf, symbols, symbol);
     }
+    if (status == AVIFENC_OK) ++writer->symbol_count;
     return status;
 }
 
@@ -263,6 +266,7 @@ AvifencStatus avifenc_av1_symbol_writer_literal(
 
         if (status != AVIFENC_OK) return status;
     }
+    writer->literal_bit_count += bit_count;
     return AVIFENC_OK;
 }
 

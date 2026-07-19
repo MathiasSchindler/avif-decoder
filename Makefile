@@ -1,4 +1,5 @@
 CC ?= cc
+BENCHMARK_ITERATIONS ?= 1
 
 MACHO_DYLIB_REMOVER := build/host/macho-dylib-remover
 LINK_TOOLS :=
@@ -15,6 +16,8 @@ ENCODER_STRICT_UNIT := $(BUILD_DIR)/encoder-unit
 ENCODER_HOST_UNIT := build/host/encoder-unit
 IMAGE_INPUT_STRICT_UNIT := $(BUILD_DIR)/image-input-unit
 IMAGE_INPUT_HOST_UNIT := build/host/image-input-unit
+ENCODER_BENCHMARK := build/host/encoder-benchmark
+ENCODER_SCORECARD_BASELINE := tests/encoder-scorecard-baseline.jsonl
 OBU_TRACE := $(BUILD_DIR)/obu-trace
 THREAD_UNIT := $(BUILD_DIR)/thread-unit
 FUZZ_BUILD_DIR := build/fuzz
@@ -115,6 +118,8 @@ ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
 	src/av1_intra.c src/av1_predict.c src/av1_recon.c
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
+ENCODER_TEST_HEADERS := $(wildcard src/*.h src/*.inc src/encoder/*.h \
+	src/shared/*.h)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(IMAGE_INPUT_C_SOURCES) $(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
@@ -164,7 +169,8 @@ $(COLD_OBJECTS): CFLAGS += -Os
 
 .PHONY: clean encoder test test-encoder test-all wasm fuzz fuzz-seeds \
 	fuzz-smoke fuzz-campaign fuzz-differential encoder-fuzz \
-	encoder-fuzz-seeds encoder-fuzz-smoke encoder-fuzz-campaign
+	encoder-fuzz-seeds encoder-fuzz-smoke encoder-fuzz-campaign \
+	encoder-benchmark encoder-benchmark-json encoder-scorecard
 
 # Strip symbol/relocation metadata from the release decoder binary only;
 # the custom static-pie startup only needs the dynamic relocation section,
@@ -244,6 +250,25 @@ $(IMAGE_INPUT_HOST_UNIT): tests/image_input_unit.c $(IMAGE_INPUT_C_SOURCES) \
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/image_input_unit.c \
 		$(IMAGE_INPUT_C_SOURCES) src/base.c -o $@
+
+$(ENCODER_BENCHMARK): tests/encoder_benchmark.c \
+		$(ENCODER_TEST_C_SOURCES) $(IMAGE_INPUT_C_SOURCES) \
+		$(ENCODER_TEST_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
+		-Isrc -Isrc/shared tests/encoder_benchmark.c \
+		$(ENCODER_TEST_C_SOURCES) $(IMAGE_INPUT_C_SOURCES) -lm -o $@
+
+encoder-benchmark: $(ENCODER_BENCHMARK)
+	$(ENCODER_BENCHMARK) --human --iterations $(BENCHMARK_ITERATIONS)
+
+encoder-benchmark-json: $(ENCODER_BENCHMARK)
+	$(ENCODER_BENCHMARK) --json --iterations $(BENCHMARK_ITERATIONS)
+
+encoder-scorecard: $(ENCODER_BENCHMARK) tests/encoder-scorecard.sh \
+		$(ENCODER_SCORECARD_BASELINE)
+	sh tests/encoder-scorecard.sh $(ENCODER_BENCHMARK) \
+		$(ENCODER_SCORECARD_BASELINE)
 
 $(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
 	@mkdir -p $(@D)
@@ -355,12 +380,15 @@ test: test-encoder $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) \
 	sh tests/corpus.sh $(TARGET)
 
 test-encoder: $(TARGET) $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) \
-		$(ENCODER_HOST_UNIT) $(IMAGE_INPUT_STRICT_UNIT) $(IMAGE_INPUT_HOST_UNIT)
+		$(ENCODER_HOST_UNIT) $(IMAGE_INPUT_STRICT_UNIT) $(IMAGE_INPUT_HOST_UNIT) \
+		$(ENCODER_BENCHMARK)
 	$(ENCODER_STRICT_UNIT)
 	$(ENCODER_HOST_UNIT)
 	$(IMAGE_INPUT_STRICT_UNIT)
 	$(IMAGE_INPUT_HOST_UNIT)
 	sh tests/encoder.sh $(ENCODER_TARGET) $(TARGET)
+	sh tests/encoder-scorecard.sh $(ENCODER_BENCHMARK) \
+		$(ENCODER_SCORECARD_BASELINE)
 
 # Full suite: the self-contained tests above plus the reference and
 # differential comparisons. These additionally require ffmpeg, ffprobe,

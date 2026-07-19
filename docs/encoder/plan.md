@@ -1,273 +1,318 @@
-# First AVIF encoder plan
+# AVIF encoder roadmap
 
-| Work package | Status |
-| --- | --- |
-| 1. Contract, build target, and test skeleton | Complete |
-| 2. Bounded byte and bit output primitives | Complete |
-| 3. Minimal AVIF container serializer | Complete |
-| 4. Reduced-still AV1 headers and OBU framing | Complete |
-| 5. AV1 symbol writer and CDF evolution | Complete |
-| 6. Input validation, block layout, and intra prediction | Complete |
-| 7. Forward transform, quantization, and reconstruction loop | Complete |
-| 8. Complete tile, frame, and AVIF assembly | Complete |
-| 9. Bounded mode selection and quality controls | Complete |
-| 10. Hardening, interoperability, and release documentation | Complete |
+The dependency-free 0.1 encoder is the baseline for this roadmap. It already
+writes deterministic, interoperable 8-bit 4:2:0 reduced-still AVIF files from
+caller-owned planar input, with a freestanding PNG/JPEG command-line adapter.
+The next phase develops that baseline toward practical AVIF encoder parity in
+ten ordered goals spanning **speed**, **features**, and **encoding quality**.
 
-This plan describes a freestanding, dependency-free sister encoder built in
-`src/encoder/`. Its first release targets one 8-bit 4:2:0 still image using a
-reduced-still-picture AV1 sequence, one key frame, one tile, a fixed quantizer,
-and a deliberately small set of intra modes and transform sizes. Caller-owned
-input, workspace, and output buffers remain the governing memory model.
+| Goal | Primary outcome | Speed | Features | Quality | Status |
+| --- | --- | :---: | :---: | :---: | --- |
+| 1. Measurement and regression budgets | Reproducible decisions | Yes |  | Yes | Complete |
+| 2. Multi-tile encoding and bounded parallelism | Large images without resizing | Yes | Yes |  | Planned |
+| 3. Variable partitions and transforms | Better local adaptation | Yes | Yes | Yes | Planned |
+| 4. Complete intra and chroma prediction | Stronger still-image coding | Yes | Yes | Yes | Planned |
+| 5. Quantization, lossless, and rate control | Useful quality/size controls | Yes | Yes | Yes | Planned |
+| 6. In-loop filters and restoration | Better reconstruction per byte | Yes | Yes | Yes | Planned |
+| 7. Bit-depth and chroma-format parity | Monochrome, 4:2:2, 4:4:4, HDR |  | Yes | Yes | Planned |
+| 8. Alpha and metadata-rich still images | Practical AVIF item parity |  | Yes | Yes | Planned |
+| 9. Grids and layered still images | Scalable derived images | Yes | Yes |  | Planned |
+| 10. Image sequences and inter prediction | Timed AVIF and temporal coding | Yes | Yes | Yes | Planned |
 
-The first-release core API does not include RGB conversion, alpha, grids,
-image sequences, inter prediction, rate control, target-size encoding, film
-grain, super-resolution, or advanced metadata. The freestanding CLI provides a
-separate dependency-free PNG/baseline-JPEG decoder and RGB-to-YUV adapter
-without broadening that planar API. It should produce interoperable AVIF files,
-not compete with mature AV1 encoders on compression efficiency.
+## Non-negotiable constraints
 
-## Reuse policy
+Every goal keeps the properties that define this project:
 
-Reuse existing code directly when the encoder needs exactly the same operation
-and invariants. Checked arithmetic, memory helpers, arena allocation, intra
-prediction, inverse reconstruction, selected AV1 tables, platform I/O, and the
-task executor are likely candidates. Move a concrete primitive into
-`src/shared/` only when both callers can use the same implementation without
-mode flags, callbacks, or semantic compromises.
+- the encoder implementation remains freestanding C11; existing minimal
+  startup and raw-syscall assembly stays confined to the platform substrate;
+- the build remains `nolibc`: no external runtime, codec, image, threading, or
+  standard C library dependency is introduced;
+- source incorporated into the project must remain compatible with the CC0
+  dedication;
+- core APIs perform no allocation and no file I/O;
+- input, workspace, output, executor state, and metadata remain caller-owned;
+- all size arithmetic, writes, and worker-local regions remain explicitly
+  bounded and queryable before encoding;
+- existing planar API calls, quantizer values, speed values, and CLI forms
+  remain valid; extensions are additive;
+- output is deterministic across runs, workspace alignments, worker counts,
+  Linux/x86-64, and macOS/arm64;
+- external implementations may be used by optional reference tests, but never
+  by production builds or self-contained tests.
 
-Keep naturally different operations separate. Byte readers and byte writers,
-range decoders and range encoders, inverse and forward transforms, and AVIF
-parsers and serializers should have focused implementations on their owning
-side. Do not introduce a generalized codec layer merely to route two functions
-through one interface. Every reuse refactor must leave decoder tests and traces
-unchanged before encoder work proceeds.
+The target is useful encoder parity, not one encoder implementation for every
+syntax the decoder can consume. Decoder features that do not improve common
+encoding workflows should not displace work on speed or reconstruction quality.
 
-## Work package 1: Contract, build target, and test skeleton
+## Priority rationale
 
-Define the first public contract in `src/encoder/avifenc.h`: planar Y, U, and V
-input, even dimensions, 8-bit samples, 4:2:0 subsampling, color properties,
-fixed quantizer options, caller-owned workspace, caller-owned output, status,
-and error reporting. Specify output sizing behavior explicitly; the initial API
-may require a conservative output capacity while reporting exact bytes written.
+Feature parity is the direction, but container checkboxes should not be the
+first implementation step. Multi-tile output removes the current large-image
+resizing limitation and creates the safest unit of parallel work. Better block,
+transform, prediction, quantization, and filtering decisions then improve every
+later pixel format and container feature. High bit depth, alpha, grids, and
+sequences build on those coding tools rather than cloning the current minimal
+path several times.
 
-Add an encoder library target, a small `avifenc` CLI target, and a hosted
-sanitizer unit target without changing the decoder's public targets. Establish
-`tests/encoder_unit.c` and an encoder shell suite with a tiny deterministic YUV
-fixture. Reuse the existing freestanding headers and build flags directly, but
-keep encoder public names independent from `Avifdec*` names.
+Each goal is independently releasable. A goal is complete only when its public
+contract, strict and sanitizer coverage, fuzz coverage, external
+interoperability, documentation, and measured speed/quality effects land
+together.
 
-The first tests should exercise invalid dimensions, null planes, short strides,
-invalid quantizers, insufficient workspace, insufficient output, and arithmetic
-overflow before any valid bitstream exists. The package is complete when the
-empty encoder path builds under strict freestanding and hosted sanitizer modes,
-returns deterministic structured errors, and cannot write outside any
-caller-provided region.
+## Goal 1: Measurement and regression budgets
 
-## Work package 2: Bounded byte and bit output primitives
+Establish a stable scorecard before changing coding decisions. Use a compact
+checked-in corpus covering natural photographs, animation-like art, text and
+sharp edges, noise, gradients, chroma detail, odd block edges, and the current
+minimum and maximum practical image sizes. Keep source provenance compatible
+with CC0 and avoid downloaded test data in the self-contained suite.
 
-Implement encoder-local bounded byte and bit writers with sizing-only and
-materializing modes. Required operations include big-endian integers, raw byte
-spans, MSB-first bit fields, byte alignment, unsigned LEB128, AV1 UVLC and NS
-values, patching previously reserved fixed-width fields, and exact overflow
-propagation. Writers must never partially claim success after capacity is
-exhausted.
+Measure the dimensions that later goals must trade deliberately:
 
-Reuse checked size arithmetic and memory helpers from `src/base.*`. Follow the
-simple status propagation and caller-owned-buffer style already used by the
-arena and PNG writer, but do not combine readers and writers behind a common
-interface. A byte writer and a bit writer may remain separate concrete types if
-that keeps their invariants obvious.
+- encode time, megapixels per second, peak workspace, and output capacity;
+- encoded bytes and bits per pixel;
+- exact encoder/decoder reconstruction agreement;
+- luma and chroma SSE/PSNR, plus a small dependency-free structural metric;
+- per-stage work counts for prediction trials, transforms, symbols, filters,
+  and tiles;
+- deterministic output checksums on Linux/x86-64 and macOS/arm64.
 
-Add table-driven unit vectors for every primitive, including boundary values,
-unaligned writes, zero-bit writes, maximum legal widths, output one byte too
-short, and a sizing pass matching a materializing pass. Where practical, read
-the produced fields with the existing byte and AV1 bit readers. The package is
-complete when all later serializers can calculate and emit bounded output
-without direct pointer arithmetic of their own.
+Add a reproducible benchmark command that emits machine-readable records and a
+human summary. Performance numbers are informative by default; stable operation
+counts, output checksums, workspace limits, and quality floors are test gates.
+Wall-clock regression budgets are maintained for named reference machines so
+normal hardware variance does not make `make test` flaky.
 
-## Work package 3: Minimal AVIF container serializer
+This goal is complete when every later proposal can be compared against a
+versioned 0.1 baseline by speed, memory, size, and reconstruction quality, and
+when accidental regressions fail a focused test rather than relying on visual
+inspection.
 
-Implement a focused ISOBMFF writer for one primary `av01` item stored in one
-contiguous `mdat` extent. Emit `ftyp`, `meta`, `hdlr`, `pitm`, `iloc`, `iinf`,
-`infe`, `iprp`, `ipco`, `ipma`, `ispe`, `pixi`, `av1C`, `colr`, and `mdat` with
-the smallest versions and field widths that satisfy the supported dimensions
-and offsets. Reject values that do not fit those selected forms.
+Implemented by `tests/encoder_benchmark.c`, the checked-in JSON Lines baseline,
+the optional `AvifencStatistics` API, and the `encoder-scorecard`,
+`encoder-benchmark`, and `encoder-benchmark-json` Make targets. The scorecard is
+part of `make test-encoder`; timing remains non-gating. Corpus definitions,
+metric semantics, the first named reference-host budget, and baseline review
+rules are recorded in [`benchmark.md`](benchmark.md).
 
-Use the package 2 writers and existing FOURCC constants where they express the
-same values. Keep serialization in `src/encoder/avif_write.*`; do not generalize
-`src/bmff.c`, whose visitor, nesting, and error-offset behavior are specific to
-untrusted input parsing. Reserve and patch box sizes locally rather than adding
-writer behavior to the parser.
+## Goal 2: Multi-tile encoding and bounded parallelism
 
-Unit tests should verify box boundaries, sizes, associations, item extent
-offsets, brands, and color properties. Feed containers carrying a placeholder
-AV1 payload through `avifdec_bmff_inspect()` to validate their structure while
-expecting full image query to reject the payload. The package is complete when
-container bytes are deterministic and the existing BMFF inspector reports the
-intended box tree with no out-of-bounds extent.
+Replace the one-tile assembly assumption with explicit AV1 tile columns, tile
+rows, and tile-group serialization. Preserve one tile as the default for images
+where it is legal, while selecting a deterministic multi-tile layout for larger
+images. The CLI must stop resizing an otherwise supported image merely because
+it exceeds the current one-tile superblock limit.
 
-## Work package 4: Reduced-still AV1 headers and OBU framing
+Introduce an optional caller-owned encoder executor following the decoder's
+`parallel_for` model. Tiles own their entropy state, reconstruction region,
+scratch, and payload span so they can encode independently without locks.
+Query accounts for the requested worker width and exposes the complete
+worker-local workspace before encoding. Serial and parallel calls must produce
+identical bytes, not merely equivalent pixels.
 
-Serialize the low-overhead AV1 sequence header, metadata-free frame header, and
-OBU framing required for one reduced-still-picture key frame. Fix the supported
-profile to Main, bit depth to 8, subsampling to 4:2:0, frame size to the source
-size, operating point to zero, one tile, and all excluded coding tools to
-consistent disabled values. Document every non-obvious fixed syntax choice next
-to its specification name.
+Speed levels continue to describe coding effort, not thread count. Worker count
+is orthogonal and defaults to one. The freestanding CLI may expose `--workers`
+using the existing newos task-pool substrate on supported platforms; the core
+never creates threads itself.
 
-Build these serializers in encoder-owned files using the package 2 bit writer.
-Reuse profile and level validation or constants only where their semantics are
-already independent of parsing. Do not make the existing AV1 bit reader
-bidirectional. Level selection can begin as a conservative checked table for
-the supported dimensions rather than a general sequence-level abstraction.
+This goal is complete when large images encode without implicit resizing,
+multi-tile output decodes exactly through the in-tree decoder, libavif, libaom,
+and FFmpeg, worker counts produce byte-identical files, and representative
+large images show useful multicore scaling without increasing serial output
+size or reducing quality.
 
-Create golden vectors for several small even dimensions and inspect every
-field with existing AV1 parsing code. At this stage the tile payload may be a
-known test stub, so validation should distinguish correct headers from the
-expected entropy failure. The package is complete when the decoder accepts the
-sequence and frame configuration through the point where tile symbols are
-needed and reports the encoded dimensions, profile, bit depth, and subsampling.
+## Goal 3: Variable partitions and transforms
 
-## Work package 5: AV1 symbol writer and CDF evolution
+Replace the fixed descent to 4x4 coding blocks with bounded recursive partition
+search over the useful square and rectangular AV1 partition shapes. Add forward
+transforms, coefficient scans, contexts, and syntax for 8x8, 16x16, and 32x32
+sizes before considering larger or exotic transform shapes. Reuse decoder
+inverse transforms and reconstruction only where their contracts already fit.
 
-Implement the inverse of `Av1SymbolDecoder`: a bounded AV1 range encoder that
-writes symbols against AV1 CDFs, writes literal bits where the tile syntax
-requires them, normalizes its range, handles carry propagation, and finalizes a
-byte-aligned tile payload. Its state and failure behavior should remain local to
-the encoder even though its probability evolution must match the decoder.
+Use deterministic rate-distortion search with exact syntax-cost estimates from
+trial CDF state. Candidate state is isolated from committed state. Avoid an
+exponential search: reject clearly unsuitable partitions from source variance,
+edge activity, and parent results, and place explicit trial budgets behind each
+speed level.
 
-Extract the normative CDF update operation only if encoder and decoder can call
-one concrete function with identical inputs and results. Default CDF tables may
-be reused directly. Do not create a pluggable entropy-coder interface or add an
-encode/decode mode to `Av1SymbolDecoder`; the arithmetic state machines are
-different enough to remain separate.
+- speed 2 keeps a narrow, low-overhead partition and transform path;
+- speed 1 evaluates a bounded practical subset;
+- speed 0 performs the broadest search supported by the workspace contract.
 
-Build symbol round-trip tests that encode deterministic symbol sequences and
-decode them with `av1_symbol_read()`, checking both symbols and final CDF state.
-Cover binary and multi-symbol alphabets, disabled updates, long renormalization
-runs, carry boundaries, a one-byte-short output, and final padding. Compare
-selected vectors with a trusted AV1 implementation during `test-all`. The
-package is complete when entropy output round-trips exactly under sanitizers
-and strict freestanding compilation.
+This goal is complete when all supported edge geometries round-trip exactly,
+larger smooth regions use larger blocks/transforms, detailed regions retain
+smaller units, speed levels have monotonic work budgets, and the corpus improves
+rate-distortion results without an unbounded time or workspace increase.
 
-## Work package 6: Input validation, block layout, and intra prediction
+## Goal 4: Complete intra and chroma prediction
 
-Create the encoder frame state for source planes, reconstructed planes,
-neighbor availability, block metadata, quantizer state, and tile-local CDFs.
-Start with a deterministic superblock and block layout chosen from a small
-supported set, with edge handling for dimensions that are even but not block
-multiples. Emit the corresponding partition and intra-mode syntax through the
-symbol writer.
+Expand prediction from the current small luma set and DC chroma baseline to the
+high-value AV1 intra tools already understood by the decoder:
 
-Call existing standalone intra predictor functions where their inputs already
-match encoder reconstruction state. Keep source sampling, block traversal,
-mode candidates, and syntax emission encoder-local. If adapting a predictor
-would require decoder-state flags or callback wrappers, write the small
-encoder-specific preparation code instead of broadening the predictor API.
+- directional luma and chroma modes with legal angle deltas;
+- all smooth variants and Paeth where applicable;
+- chroma-from-luma with bounded alpha search;
+- filter intra for suitable small luma blocks;
+- palette coding for low-color images and screen content;
+- intra block copy only after overlap, dependency, and search bounds are proven.
 
-Begin with DC prediction as the mandatory path, then add vertical, horizontal,
-Paeth, and selected smooth modes behind deterministic options. Tests should
-compare predicted blocks with decoder unit vectors and verify legal traversal
-at frame edges, unavailable neighbors, and chroma subsampling boundaries. The
-package is complete when a zero-residual synthetic frame can be emitted as a
-complete tile and decoded into the encoder's predicted reconstruction without
-syntax or bounds errors.
+Prediction and transform trials share one rate-distortion decision rather than
+choosing modes from distortion alone. Chroma distortion participates in the
+score with documented weighting, so luma gains cannot hide severe color loss.
+Fast levels use source classification and winning-neighbor hints to prune mode
+and angle trials; they must not silently change the supported bitstream surface.
 
-## Work package 7: Forward transform, quantization, and reconstruction loop
+This goal is complete when each new mode has strict vectors against decoder
+predictors, syntax matches external decoders, screen-content fixtures improve
+materially with palettes, photographic chroma improves with CfL or directional
+prediction, and the default corpus has no quality regression at comparable
+size.
 
-Compute residuals from source and predicted samples, implement the forward
-`DCT_DCT` transforms for the selected square sizes, quantize coefficients using
-the fixed frame quantizer, scan them in AV1 order, and emit coefficient syntax.
-Use explicit bounded intermediate widths and deterministic rounding for every
-supported transform size. Unsupported transform or coefficient configurations
-must fail internally rather than silently changing syntax.
+## Goal 5: Quantization, lossless, and rate control
 
-Forward transforms and quantization belong in encoder files. Reuse checked
-quantization tables where applicable, then call existing dequantization and
-inverse-transform reconstruction code to produce the exact local reconstructed
-samples used by subsequent blocks. Share a transform constant only when its
-numeric representation is truly common; avoid wrapping forward and inverse
-transforms in a generic direction-selected API.
+Turn the fixed base quantizer into a complete but bounded quantization layer.
+The existing `--quantizer 1..255` behavior remains available and stable. Add:
 
-Add impulse, constant, maximum-amplitude, and randomized block tests. Verify
-forward/quantized/inverse behavior against libaom vectors in `test-all`, and
-verify that encoder reconstruction is byte-exact with this decoder's output for
-every self-encoded frame. The package is complete when nonzero residual images
-decode successfully and reconstruction remains identical under strict,
-sanitized, and differently aligned workspace runs.
+- quantizer zero and a genuinely lossless coding path where the selected AV1
+  profile permits it;
+- separate legal DC/AC and plane deltas;
+- quantization matrices and activity-aware selection;
+- bounded delta-Q or segmentation for spatial adaptation;
+- optional target-quality and target-size modes implemented through a finite,
+  deterministic number of encode/analyse passes.
 
-## Work package 8: Complete tile, frame, and AVIF assembly
+Rate control may use caller workspace for summaries but must not allocate frame
+graphs or retain hidden state. Target-size mode reports failure when the target
+cannot be reached within declared limits rather than running an open-ended
+search. Speed levels cap analysis passes and spatial decisions.
 
-Join block traversal, entropy finalization, frame headers, OBU sizing, and AVIF
-container serialization into one deterministic encode operation. Establish a
-clear workspace layout for reconstruction planes, block state, CDFs, transform
-scratch, and temporary AV1 payload. Resolve final payload and `mdat` offsets
-without allocation, unbounded stack objects, or seeking through platform I/O.
+This goal is complete when lossless output is pixel-exact, fixed-quantizer
+results remain deterministic, target-quality behavior is monotonic, target-size
+fixtures meet documented tolerances, and adaptive quantization improves the
+corpus score without unacceptable chroma or edge regressions.
 
-Use the existing arena sizing pattern directly for workspace planning. The
-encoder may perform a sizing pass where deterministic and inexpensive, or hold
-the AV1 payload in caller-owned workspace before writing the final container.
-Do not introduce a generic output graph to unify those choices. Keep one
-straight-line assembly path for the single-item format.
+## Goal 6: In-loop filters and restoration
 
-Add end-to-end fixtures covering flat fields, ramps, sharp edges, chroma
-variation, minimum supported dimensions, odd chroma-plane dimensions implied
-by even luma sizes, and non-block-multiple edges. Encode, query, and decode each
-file with the in-tree decoder, then compare decoded planes with the encoder's
-reconstruction. The package is complete when the CLI produces AVIF files that
-the in-tree decoder and at least one external decoder accept.
+Enable encoder-side decisions for the reconstruction stages currently signaled
+as identity: deblocking first, then CDEF, followed by Wiener and self-guided
+restoration where the measured gain justifies their cost. Super-resolution is
+considered only after ordinary filtering is stable; it must win a measured
+rate-distortion comparison rather than being enabled for syntax parity.
 
-## Work package 9: Bounded mode selection and quality controls
+Every candidate filter is evaluated against the same reconstructed pixels that
+subsequent coding decisions and the decoder will observe. Reuse decoder filter
+kernels when encode and decode need the identical operation, while keeping
+parameter search encoder-local. Store only bounded row, stripe, or restoration
+unit summaries; do not multiply full-frame workspace for every candidate.
 
-Replace fixed choices with a small deterministic search across the supported
-block sizes, intra predictors, and transform sizes. Score candidates using
-distortion plus a bit-cost estimate derived from the current CDF state, while
-keeping the public control to one fixed quantizer and an optional speed level.
-Do not add target bitrate, multipass analysis, psychovisual tuning, or inter
-prediction in this release.
+Speed 2 may retain identity filters. Speed 1 uses cheap deblocking/CDEF
+selection. Speed 0 may search restoration units under explicit candidate and
+workspace limits.
 
-Reuse predictor and reconstruction primitives directly, but keep candidate
-generation, trial coefficient storage, cost calculation, and winner selection
-inside the encoder. Prefer a few explicit search paths over a generalized mode
-framework. Candidate trials must not accidentally mutate the committed CDF or
-neighbor state; snapshot only the concrete state that actually changes.
+This goal is complete when filtered reconstruction remains byte-exact with all
+reference decoders, ringing/blocking metrics improve on targeted fixtures,
+whole-corpus rate-distortion does not regress, and each enabled stage has a
+measured benefit larger than its encode-time and signaling cost.
 
-Create deterministic quality tests over a small image set. Assert stable output
-checksums, exact encoder/decoder reconstruction agreement, monotonic broad
-quality behavior across selected quantizers, and bounded workspace independent
-of image content. Record encoded size and error metrics as non-flaky regression
-data with justified tolerances. The package is complete when search improves
-representative output over the fixed baseline without changing the supported
-format surface or compromising deterministic output.
+## Goal 7: Bit-depth and chroma-format parity
 
-## Work package 10: Hardening, interoperability, and release documentation
+Generalize the core image description and coding pipeline from 8-bit 4:2:0 to
+the decoder's common still-image format surface:
 
-Integrate encoder coverage into the self-contained test suite: strict
-freestanding units, hosted ASan/UBSan units, deterministic end-to-end fixtures,
-short-buffer checks at varied alignments, and encode-then-decode comparisons.
-Add a fuzz harness over dimensions, options, bounded source planes, workspace
-sizes, and output capacities while keeping generated allocations within test
-limits. Retain minimized regressions beside decoder regressions.
+- 8-, 10-, and 12-bit samples;
+- monochrome, 4:2:0, 4:2:2, and 4:4:4;
+- Main, High, and Professional profile selection derived from the image;
+- full- and limited-range signaling with explicit chroma sample position;
+- 16-bit PNG input and output-preserving CLI conversion paths where applicable.
 
-Extend `test-all` with decoding through libavif, libaom, and ffmpeg where
-available. Validate container metadata with `ffprobe` and compare decoded YUV
-against the in-tree reconstruction, allowing no difference for the encoded
-bitstream. Test Linux/x86-64 and macOS/arm64 binaries for nolibc assumptions,
-determinism, and identical output. External tools remain optional and never
-become build dependencies.
+Keep the existing `AvifencImage` source-compatible. Add an extended image/API
+entry point rather than changing the meaning or layout of established fields.
+Internal sample widths, transform intermediates, quantization, clipping, and
+workspace calculations must be explicit for every bit depth. The CLI must not
+silently reduce precision or subsampling unless the user requests conversion.
 
-Document the encoder API, CLI, exact feature limits, workspace/output sizing,
-color assumptions, and expected quality tradeoffs. Update architecture,
-testing, and top-level build documentation only after behavior is stable. The
-package is complete when all self-contained tests pass, external decoders accept
-the corpus, fuzz smoke tests are clean, and unsupported requests fail with
-documented structured errors.
+This goal is complete when the format matrix passes strict, sanitizer, fuzz,
+and external decoder tests; reconstruction is exact at every depth and
+subsampling; profile and `pixi`/`av1C` metadata are correct; and high-bit-depth
+quality tests show no precision lost inside the encoder pipeline.
 
-## Definition of the first release
+## Goal 8: Alpha and metadata-rich still images
 
-The first encoder release is reached only when all ten work packages are
-complete. Its files must decode successfully with this project and external
-implementations, its internal reconstruction must match decoded YUV exactly,
-and all memory requirements must be explicit and caller-owned. Compression
-efficiency may be modest; correctness, bounded operation, deterministic output,
-and a narrow maintainable implementation are the release criteria.
+Extend AVIF assembly from one color item to practical still-image item graphs:
+
+- auxiliary alpha items with straight and premultiplied relationships;
+- independent alpha quantizer and lossless-alpha options;
+- ICC and NCLX color information without hidden color transformation;
+- EXIF and XMP payload items supplied as immutable caller byte views;
+- pixel aspect ratio, clean aperture, rotation, and mirroring properties;
+- CLL/MDCV and opaque tone-map or gain-map metadata preservation.
+
+Metadata remains caller-owned and is copied only into the bounded output. Item
+IDs, property associations, extents, and ordering are deterministic. Query
+includes every auxiliary payload and rejects cyclic, contradictory, oversized,
+or unsupported graphs before writing. The CLI preserves supported source
+metadata only when it can do so without an external parser or color library.
+
+This goal is complete when alpha and metadata round-trip through the in-tree
+decoder and libavif, premultiplication semantics are exact, malformed metadata
+cannot alter bounds, and adding metadata does not change encoded color pixels.
+
+## Goal 9: Grids and layered still images
+
+Add AVIF image grids for dimensions or workflows better represented by
+multiple independently coded cells. Reuse the multi-tile executor and item
+assembly from goals 2 and 8, but keep AV1 tiles and AVIF grid cells as distinct
+abstractions. Grid edge cells, chroma alignment, alpha grids, property
+inheritance, and cell extents must match the decoder's checked model.
+
+After grids are stable, add a small layered/progressive still-image surface
+only if benchmarked use cases justify it. Layer selection and operating-point
+metadata must be explicit; do not emit layers merely because the decoder can
+parse `a1op`, `lsel`, or `a1lx`. Independent cells/layers may encode in
+parallel, but deterministic item and payload ordering is fixed before workers
+run.
+
+This goal is complete when grid dimensions no longer require a monolithic
+workspace, serial and parallel files are identical, transformed/alpha grids
+decode exactly through internal and external implementations, and any layered
+mode demonstrates a useful progressive-size or latency tradeoff.
+
+## Goal 10: Image sequences and inter prediction
+
+Build timed AVIF in stages rather than introducing motion estimation and track
+serialization simultaneously:
+
+1. write `avis` tracks containing deterministic all-intra frames, durations,
+   timescale, sync samples, repetition, and optional synchronized alpha;
+2. add retained reference frames and legal inter-frame headers;
+3. add bounded integer-pel motion estimation, then selected subpel,
+   compound, warped, inter-intra, and skip tools only when measurements justify
+   each search surface;
+4. add deterministic GOP/keyframe decisions and random-access validation.
+
+The sequence API exposes all frame input, timing, reference, workspace, and
+output requirements up front or through an explicit caller-owned streaming
+state. It must not hide allocation, file seeking, or an unbounded lookahead.
+Parallel work remains inside one frame unless dependencies prove a safe wider
+region. Speed levels cap motion ranges, reference counts, partition candidates,
+and lookahead.
+
+This goal is complete when all-intra and inter sequences seek and replay exactly
+through the in-tree decoder and external implementations, timing and repetition
+metadata round-trip, random access starts from the documented sync frame,
+temporal coding materially beats all-intra size at comparable quality, and
+memory remains bounded by the declared reference and lookahead limits.
+
+## Parity boundary after goal 10
+
+Completing these goals provides broad parity for common still images, grids,
+alpha, metadata, pixel formats, and timed sequences. It does not automatically
+commit the encoder to tile-list OBUs, large-scale-tile mode, arbitrary sample
+transforms, film-grain estimation, tone-map generation, every inter tool, or
+every layered-image combination. Those become separate proposals supported by
+a concrete use case, a bounded design, and measured value.
+
+The roadmap should be reordered only when evidence from Goal 1 changes the
+cost/benefit picture or a real interoperability need makes a later feature
+urgent. The freestanding, dependency-free, caller-owned memory model is never a
+tradeable optimization.
