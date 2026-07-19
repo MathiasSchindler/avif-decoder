@@ -1012,6 +1012,10 @@ static int test_av1_tile_writer(void) {
             AVIFENC_INVALID_ARGUMENT);
       source.width = 2U;
       source.height = 2U;
+      source.quantizer = 0U;
+      CHECK(avifenc_av1_tile_query(&source, &requirements) ==
+            AVIFENC_UNSUPPORTED);
+      source.quantizer = 128U;
       CHECK(avifenc_av1_tile_query(0, &requirements) ==
             AVIFENC_INVALID_ARGUMENT);
       CHECK(avifenc_av1_tile_query(&source, 0) == AVIFENC_INVALID_ARGUMENT);

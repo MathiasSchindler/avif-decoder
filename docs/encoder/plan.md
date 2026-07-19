@@ -8,7 +8,7 @@
 | 4. Reduced-still AV1 headers and OBU framing | Complete |
 | 5. AV1 symbol writer and CDF evolution | Complete |
 | 6. Input validation, block layout, and intra prediction | Complete |
-| 7. Forward transform, quantization, and reconstruction loop | Planned |
+| 7. Forward transform, quantization, and reconstruction loop | Complete |
 | 8. Complete tile, frame, and AVIF assembly | Planned |
 | 9. Bounded mode selection and quality controls | Planned |
 | 10. Hardening, interoperability, and release documentation | Planned |
