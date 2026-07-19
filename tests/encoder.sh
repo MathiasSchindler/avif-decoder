@@ -14,6 +14,10 @@ case "$output" in
     *'usage: avifenc [--quantizer 1..255] [--speed 0..2] WIDTH HEIGHT INPUT.yuv OUTPUT.avif'*) ;;
     *) echo 'encoder help is missing the command contract' >&2; exit 1 ;;
 esac
+case "$output" in
+    *'INPUT.png|jpg|jpeg OUTPUT.avif'*) ;;
+    *) echo 'encoder help is missing the image input contract' >&2; exit 1 ;;
+esac
 
 write_fixture() {
     fixture=$1
@@ -75,6 +79,17 @@ for fixture in flat:2:2 ramp:10:6 sharp:10:6 chroma:10:6; do
     avif="$tmp_dir/$pattern-${width}x${height}.avif"
     write_fixture "$yuv" "$width" "$height" "$pattern"
     $binary "$width" "$height" "$yuv" "$avif"
+    test -s "$avif"
+    $decoder "$avif" >/dev/null
+    if command -v ffmpeg >/dev/null 2>&1; then
+        ffmpeg -hide_banner -loglevel error -i "$avif" -f null -
+    fi
+done
+
+for source in images/image-check/tribu.png images/chalk.jpg; do
+    name=${source##*/}
+    avif="$tmp_dir/$name.avif"
+    $binary --quantizer 255 --speed 2 "$source" "$avif"
     test -s "$avif"
     $decoder "$avif" >/dev/null
     if command -v ffmpeg >/dev/null 2>&1; then

@@ -40,7 +40,7 @@ macOS/arm64:  build/arm64/avifdec
 ```
 
 The freestanding encoder writes one 8-bit 4:2:0 reduced-still AVIF from planar
-YUV input. Build its public API and CLI with:
+YUV, PNG, or JPEG input. Build its public API and CLI with:
 
 ```sh
 make encoder
@@ -54,6 +54,24 @@ plane followed by half-width, half-height U and V planes:
 build/arm64/avifenc --quantizer 128 --speed 0 \
   640 480 frame.yuv frame.avif
 ```
+
+PNG and JPEG dimensions are read from the input file:
+
+```sh
+build/arm64/avifenc --quantizer 128 --speed 0 \
+  image.jpg image.avif
+```
+
+Image loading remains dependency-free and allocation-bounded: the CLI uses
+the same freestanding platform and caller-sized workspace substrate as the
+rest of the project. PNG input supports non-interlaced 8-bit grayscale,
+grayscale-alpha, indexed, RGB, and RGBA images. JPEG input supports 8-bit
+baseline Huffman grayscale and YCbCr/RGB images with common 4:4:4, 4:2:2, and
+4:2:0 sampling. Progressive JPEG and interlaced PNG are rejected. RGB is
+converted to limited-range BT.709 YUV 4:2:0. Because the encoder contract
+requires even dimensions, an odd final row or column is repeated once. Images
+that exceed the current one-tile encoder limit are aspect-preservingly
+downscaled with nearest-neighbor sampling, and the CLI reports that adjustment.
 
 Quantizers 1 through 255 and speed levels 0 through 2 are supported. Speed 0
 searches DC, vertical, horizontal, smooth, and Paeth luma prediction; speed 1

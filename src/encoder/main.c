@@ -1,8 +1,13 @@
 #include "encoder/avifenc.h"
+#include "encoder/image_input.h"
 #include "base.h"
 #include "platform.h"
 #include <stddef.h>
 #include <stdint.h>
+
+#define AVIFENC_CLI_MAX_INPUT_SIZE (1024U * 1024U * 1024U)
+#define AVIFENC_CLI_MAX_TILE_COLUMNS 64U
+#define AVIFENC_CLI_MAX_TILE_SUPERBLOCKS 2304U
 
 static size_t text_length(const char *text) {
     size_t length = 0U;
@@ -65,6 +70,206 @@ static int read_bytes(int fd, void *data, size_t size) {
     return 0;
 }
 
+static int load_file(const char *path,
+                     unsigned char **data_out,
+                     size_t *size_out) {
+    long long end;
+    unsigned char *data;
+    int fd = platform_open_read(path);
+
+    if (fd < 0) return -1;
+    end = platform_seek(fd, 0, PLATFORM_SEEK_END);
+    if (end <= 0 ||
+        (unsigned long long)end > (unsigned long long)SIZE_MAX ||
+        (unsigned long long)end > AVIFENC_CLI_MAX_INPUT_SIZE ||
+        platform_seek(fd, 0, PLATFORM_SEEK_SET) != 0) {
+        (void)platform_close(fd);
+        return -1;
+    }
+    data = (unsigned char *)platform_allocate_pages((size_t)end);
+    if (data == 0) {
+        (void)platform_close(fd);
+        return -1;
+    }
+    if (read_bytes(fd, data, (size_t)end) != 0) {
+        (void)platform_close(fd);
+        (void)platform_free_pages(data, (size_t)end);
+        return -1;
+    }
+    if (platform_close(fd) != 0) {
+        (void)platform_free_pages(data, (size_t)end);
+        return -1;
+    }
+    *data_out = data;
+    *size_out = (size_t)end;
+    return 0;
+}
+
+static uint8_t color_clamp(int32_t value) {
+    if (value < 0) return 0U;
+    if (value > 255) return 255U;
+    return (uint8_t)value;
+}
+
+static int32_t color_divide_256(int32_t value) {
+    return value >= 0
+        ? (value + 128) / 256
+        : -((-value + 128) / 256);
+}
+
+static uint8_t color_luma(uint8_t red, uint8_t green, uint8_t blue) {
+    return color_clamp(
+        16 + (47 * (int32_t)red + 157 * (int32_t)green +
+              16 * (int32_t)blue + 128) / 256);
+}
+
+static uint8_t color_blue_difference(uint8_t red,
+                                     uint8_t green,
+                                     uint8_t blue) {
+    return color_clamp(
+        128 + color_divide_256(
+            -26 * (int32_t)red - 87 * (int32_t)green +
+            112 * (int32_t)blue));
+}
+
+static uint8_t color_red_difference(uint8_t red,
+                                    uint8_t green,
+                                    uint8_t blue) {
+    return color_clamp(
+        128 + color_divide_256(
+            112 * (int32_t)red - 102 * (int32_t)green -
+            10 * (int32_t)blue));
+}
+
+static int image_dimensions_supported(uint32_t width, uint32_t height) {
+    uint32_t superblock_columns = (width + 63U) / 64U;
+    uint32_t superblock_rows = (height + 63U) / 64U;
+
+    return width != 0U && height != 0U &&
+        (width & 1U) == 0U && (height & 1U) == 0U &&
+        superblock_columns <= AVIFENC_CLI_MAX_TILE_COLUMNS &&
+        (uint64_t)superblock_columns * superblock_rows <=
+            AVIFENC_CLI_MAX_TILE_SUPERBLOCKS;
+}
+
+static void image_fit_dimensions(uint32_t source_width,
+                                 uint32_t source_height,
+                                 uint32_t *width_out,
+                                 uint32_t *height_out) {
+    uint32_t width = (source_width + 1U) & ~1U;
+    uint32_t height = (source_height + 1U) & ~1U;
+
+    if (!image_dimensions_supported(width, height)) {
+        uint32_t low = 1U;
+        uint32_t high = 65536U;
+        uint32_t best_width = 2U;
+        uint32_t best_height = 2U;
+
+        while (low <= high) {
+            uint32_t scale = low + (high - low) / 2U;
+            uint32_t candidate_width = (uint32_t)(
+                ((uint64_t)source_width * scale) / 65536U) & ~1U;
+            uint32_t candidate_height = (uint32_t)(
+                ((uint64_t)source_height * scale) / 65536U) & ~1U;
+
+            if (candidate_width < 2U) candidate_width = 2U;
+            if (candidate_height < 2U) candidate_height = 2U;
+            if (image_dimensions_supported(
+                    candidate_width, candidate_height)) {
+                best_width = candidate_width;
+                best_height = candidate_height;
+                low = scale + 1U;
+            } else {
+                if (scale == 0U) break;
+                high = scale - 1U;
+            }
+        }
+        width = best_width;
+        height = best_height;
+    }
+    *width_out = width;
+    *height_out = height;
+}
+
+static uint32_t image_source_coordinate(uint32_t output_coordinate,
+                                        uint32_t output_size,
+                                        uint32_t source_size) {
+    if (output_size == source_size || output_size == source_size + 1U) {
+        return output_coordinate < source_size
+            ? output_coordinate : source_size - 1U;
+    }
+    return (uint32_t)(
+        ((uint64_t)(output_coordinate * 2U + 1U) * source_size) /
+        ((uint64_t)output_size * 2U));
+}
+
+static void rgb_to_yuv420(const uint8_t *rgb,
+                          const ImageInputInfo *source,
+                          AvifencImage *image,
+                          unsigned char *yuv,
+                          size_t luma_size,
+                          size_t chroma_size) {
+    unsigned char *luma = yuv;
+    unsigned char *blue_difference = yuv + luma_size;
+    unsigned char *red_difference = blue_difference + chroma_size;
+    uint32_t output_y;
+
+    for (output_y = 0U; output_y < image->height; ++output_y) {
+        uint32_t source_y = image_source_coordinate(
+            output_y, image->height, source->height);
+        uint32_t output_x;
+
+        for (output_x = 0U; output_x < image->width; ++output_x) {
+            uint32_t source_x = image_source_coordinate(
+                output_x, image->width, source->width);
+            const uint8_t *pixel = rgb + (size_t)source_y *
+                source->rgb_stride + (size_t)source_x * 3U;
+
+            luma[(size_t)output_y * image->width + output_x] =
+                color_luma(pixel[0], pixel[1], pixel[2]);
+        }
+    }
+    for (output_y = 0U; output_y < image->height / 2U; ++output_y) {
+        uint32_t output_x;
+
+        for (output_x = 0U; output_x < image->width / 2U; ++output_x) {
+            uint32_t red = 0U;
+            uint32_t green = 0U;
+            uint32_t blue = 0U;
+            unsigned int offset_y;
+
+            for (offset_y = 0U; offset_y < 2U; ++offset_y) {
+                uint32_t source_y = image_source_coordinate(
+                    output_y * 2U + offset_y,
+                    image->height, source->height);
+                unsigned int offset_x;
+
+                for (offset_x = 0U; offset_x < 2U; ++offset_x) {
+                    uint32_t source_x = image_source_coordinate(
+                        output_x * 2U + offset_x,
+                        image->width, source->width);
+                    const uint8_t *pixel;
+
+                    pixel = rgb + (size_t)source_y * source->rgb_stride +
+                        (size_t)source_x * 3U;
+                    red += pixel[0];
+                    green += pixel[1];
+                    blue += pixel[2];
+                }
+            }
+            red = (red + 2U) / 4U;
+            green = (green + 2U) / 4U;
+            blue = (blue + 2U) / 4U;
+            blue_difference[(size_t)output_y * (image->width / 2U) +
+                            output_x] = color_blue_difference(
+                                (uint8_t)red, (uint8_t)green, (uint8_t)blue);
+            red_difference[(size_t)output_y * (image->width / 2U) +
+                           output_x] = color_red_difference(
+                               (uint8_t)red, (uint8_t)green, (uint8_t)blue);
+        }
+    }
+}
+
 static int write_text(int fd, const char *text) {
     return write_bytes(fd, text, text_length(text));
 }
@@ -74,6 +279,8 @@ static void write_usage(int fd) {
         fd,
         "usage: avifenc [--quantizer 1..255] [--speed 0..2] "
         "WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
+        "       avifenc [--quantizer 1..255] [--speed 0..2] "
+        "INPUT.png|jpg|jpeg OUTPUT.avif\n"
         "       avifenc --help\n"
         "       avifenc --version\n");
 }
@@ -97,17 +304,25 @@ int main(int argc, char **argv) {
     AvifencError error;
     AvifencStatus status;
     unsigned char *input = 0;
+    unsigned char *source_file = 0;
+    unsigned char *rgb = 0;
+    void *image_workspace = 0;
     void *workspace = 0;
     unsigned char *output = 0;
     size_t luma_size;
     size_t chroma_size;
-    size_t input_size;
+    size_t input_size = 0U;
+    size_t source_file_size = 0U;
+    size_t rgb_size = 0U;
+    size_t image_workspace_size = 0U;
     size_t output_written = 0U;
     uint32_t quantizer = AVIFENC_DEFAULT_QUANTIZER;
     uint32_t speed = AVIFENC_DEFAULT_SPEED;
     int input_fd = -1;
     int output_fd = -1;
+    const char *output_path;
     int argument = 1;
+    int image_file_input = 0;
     int result = 3;
 
     if (argc == 2 && text_equal(argv[1], "--help")) {
@@ -138,9 +353,69 @@ int main(int argc, char **argv) {
         }
         argument += 2;
     }
-    if (argc - argument != 4 ||
-        !text_to_u32(argv[argument], &image.width) ||
-        !text_to_u32(argv[argument + 1], &image.height)) {
+    if (argc - argument == 4 &&
+        text_to_u32(argv[argument], &image.width) &&
+        text_to_u32(argv[argument + 1], &image.height)) {
+        output_path = argv[argument + 3];
+    } else if (argc - argument == 2) {
+        ImageInputInfo source_info;
+        ImageInputStatus image_status;
+
+        image_file_input = 1;
+        output_path = argv[argument + 1];
+        if (load_file(argv[argument], &source_file, &source_file_size) != 0) {
+            (void)write_text(2, "avifenc: failed to read image input\n");
+            result = 4;
+            goto cleanup;
+        }
+        image_status = image_input_query(
+            source_file, source_file_size, &source_info);
+        if (image_status != IMAGE_INPUT_OK) {
+            (void)write_text(2, "avifenc: image input: ");
+            (void)write_text(2, image_input_status_string(image_status));
+            (void)write_text(2, "\n");
+            result = 4;
+            goto cleanup;
+        }
+        if (source_info.width > AVIFENC_MAX_DIMENSION ||
+            source_info.height > AVIFENC_MAX_DIMENSION ||
+            (source_info.width == AVIFENC_MAX_DIMENSION &&
+             (source_info.width & 1U) != 0U) ||
+            (source_info.height == AVIFENC_MAX_DIMENSION &&
+             (source_info.height & 1U) != 0U)) {
+            (void)write_text(2, "avifenc: image dimensions exceed limit\n");
+            result = 2;
+            goto cleanup;
+        }
+        image_fit_dimensions(
+            source_info.width, source_info.height,
+            &image.width, &image.height);
+        if (image.width + 1U < source_info.width ||
+            image.height + 1U < source_info.height) {
+            (void)write_text(
+                2,
+                "avifenc: image exceeds one-tile limit; downscaling\n");
+        }
+        rgb_size = source_info.output_size;
+        image_workspace_size = source_info.workspace_size;
+        rgb = (unsigned char *)platform_allocate_pages(rgb_size);
+        image_workspace = platform_allocate_pages(image_workspace_size);
+        if (rgb == 0 || image_workspace == 0) {
+            (void)write_text(2, "avifenc: out of memory: image decode\n");
+            goto cleanup;
+        }
+        image_status = image_input_decode(
+            source_file, source_file_size,
+            image_workspace, image_workspace_size,
+            rgb, rgb_size, &source_info);
+        if (image_status != IMAGE_INPUT_OK) {
+            (void)write_text(2, "avifenc: image input: ");
+            (void)write_text(2, image_input_status_string(image_status));
+            (void)write_text(2, "\n");
+            result = 4;
+            goto cleanup;
+        }
+    } else {
         write_usage(2);
         return 2;
     }
@@ -179,23 +454,36 @@ int main(int argc, char **argv) {
         (void)write_text(2, "avifenc: out of memory: input\n");
         return 3;
     }
-    input_fd = platform_open_read(argv[argument + 2]);
-    if (input_fd < 0 || read_bytes(input_fd, input, input_size) != 0) {
-        (void)write_text(2, "avifenc: failed to read complete YUV input\n");
-        result = 4;
-        goto cleanup;
-    }
-    {
-        unsigned char trailing;
-        long extra = platform_read(input_fd, &trailing, 1U);
+    if (image_file_input) {
+        ImageInputInfo source_info;
+        ImageInputStatus image_status = image_input_query(
+            source_file, source_file_size, &source_info);
 
-        if (extra != 0) {
-            (void)write_text(2, "avifenc: YUV input has trailing data\n");
+        if (image_status != IMAGE_INPUT_OK) {
             result = 4;
             goto cleanup;
         }
+        rgb_to_yuv420(
+            rgb, &source_info, &image, input, luma_size, chroma_size);
+    } else {
+        input_fd = platform_open_read(argv[argument + 2]);
+        if (input_fd < 0 || read_bytes(input_fd, input, input_size) != 0) {
+            (void)write_text(2, "avifenc: failed to read complete YUV input\n");
+            result = 4;
+            goto cleanup;
+        }
+        {
+            unsigned char trailing;
+            long extra = platform_read(input_fd, &trailing, 1U);
+
+            if (extra != 0) {
+                (void)write_text(2, "avifenc: YUV input has trailing data\n");
+                result = 4;
+                goto cleanup;
+            }
+        }
     }
-    if (platform_close(input_fd) != 0) {
+    if (!image_file_input && platform_close(input_fd) != 0) {
         input_fd = -1;
         (void)write_text(2, "avifenc: failed to close YUV input\n");
         result = 4;
@@ -220,7 +508,7 @@ int main(int argc, char **argv) {
         (void)write_error(status, &error);
         goto cleanup;
     }
-    output_fd = platform_open_write(argv[argument + 3], 0644U);
+    output_fd = platform_open_write(output_path, 0644U);
     if (output_fd < 0 || write_bytes(output_fd, output, output_written) != 0) {
         (void)write_text(2, "avifenc: failed to write AVIF output\n");
         result = 4;
@@ -246,6 +534,13 @@ cleanup:
         (void)platform_free_pages(
             workspace, requirements.workspace_required);
     }
-    (void)platform_free_pages(input, input_size);
+    if (image_workspace != 0) {
+        (void)platform_free_pages(image_workspace, image_workspace_size);
+    }
+    if (rgb != 0) (void)platform_free_pages(rgb, rgb_size);
+    if (source_file != 0) {
+        (void)platform_free_pages(source_file, source_file_size);
+    }
+    if (input != 0) (void)platform_free_pages(input, input_size);
     return result;
 }

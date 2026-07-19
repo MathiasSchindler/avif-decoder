@@ -13,6 +13,8 @@ STRICT_UNIT := $(BUILD_DIR)/unit
 HOST_UNIT := build/host/unit
 ENCODER_STRICT_UNIT := $(BUILD_DIR)/encoder-unit
 ENCODER_HOST_UNIT := build/host/encoder-unit
+IMAGE_INPUT_STRICT_UNIT := $(BUILD_DIR)/image-input-unit
+IMAGE_INPUT_HOST_UNIT := build/host/image-input-unit
 OBU_TRACE := $(BUILD_DIR)/obu-trace
 THREAD_UNIT := $(BUILD_DIR)/thread-unit
 FUZZ_BUILD_DIR := build/fuzz
@@ -106,12 +108,13 @@ ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 	src/encoder/avif_write.c src/encoder/av1_write.c \
 	src/encoder/av1_symbol_write.c src/encoder/av1_tile_write.c \
 	src/encoder/av1_transform_write.c
+IMAGE_INPUT_C_SOURCES := src/encoder/image_input.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
 	src/av1_intra.c src/av1_predict.c src/av1_recon.c
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
-	$(PLATFORM_DIR)/io.c
+	$(IMAGE_INPUT_C_SOURCES) $(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
 C_SOURCES := src/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
@@ -138,6 +141,10 @@ COLD_OBJECTS := \
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
 ENCODER_STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/encoder_unit.o \
 	$(ENCODER_MODULE_OBJECTS) $(CORE_OBJECTS) $(ARCH_OBJECTS)
+IMAGE_INPUT_STRICT_UNIT_OBJECTS := \
+	$(BUILD_DIR)/tests/image_input_unit.o \
+	$(addprefix $(BUILD_DIR)/,$(IMAGE_INPUT_C_SOURCES:.c=.o)) \
+	$(BUILD_DIR)/src/base.o $(ARCH_OBJECTS)
 OBU_TRACE_OBJECTS := $(BUILD_DIR)/tests/obu_trace.o $(CORE_OBJECTS) \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
@@ -146,6 +153,7 @@ THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
 DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
 	$(ENCODER_STRICT_UNIT_OBJECTS:.o=.d) $(OBU_TRACE_OBJECTS:.o=.d) \
+	$(IMAGE_INPUT_STRICT_UNIT_OBJECTS:.o=.d) \
 	$(THREAD_UNIT_OBJECTS:.o=.d) $(ENCODER_OBJECTS:.o=.d)
 
 $(COLD_OBJECTS): CFLAGS += -Os
@@ -181,6 +189,11 @@ $(STRICT_UNIT): $(STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
 $(ENCODER_STRICT_UNIT): $(ENCODER_STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
 	@mkdir -p $(@D)
 	$(CC) $(ENCODER_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+$(IMAGE_INPUT_STRICT_UNIT): $(IMAGE_INPUT_STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
+	@mkdir -p $(@D)
+	$(CC) $(IMAGE_INPUT_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
 $(OBU_TRACE): $(OBU_TRACE_OBJECTS) $(LINK_TOOLS)
@@ -222,6 +235,12 @@ $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
 		$(ENCODER_TEST_C_SOURCES) -o $@
+
+$(IMAGE_INPUT_HOST_UNIT): tests/image_input_unit.c $(IMAGE_INPUT_C_SOURCES) \
+		src/encoder/image_input.h src/base.c src/base.h
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/image_input_unit.c \
+		$(IMAGE_INPUT_C_SOURCES) src/base.c -o $@
 
 $(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
 	@mkdir -p $(@D)
@@ -307,9 +326,12 @@ test: $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) $(THREAD_UNIT)
 	sh tests/features.sh $(TARGET)
 	sh tests/corpus.sh $(TARGET)
 
-test-encoder: $(TARGET) $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) $(ENCODER_HOST_UNIT)
+test-encoder: $(TARGET) $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) \
+		$(ENCODER_HOST_UNIT) $(IMAGE_INPUT_STRICT_UNIT) $(IMAGE_INPUT_HOST_UNIT)
 	$(ENCODER_STRICT_UNIT)
 	$(ENCODER_HOST_UNIT)
+	$(IMAGE_INPUT_STRICT_UNIT)
+	$(IMAGE_INPUT_HOST_UNIT)
 	sh tests/encoder.sh $(ENCODER_TARGET) $(TARGET)
 
 # Full suite: the self-contained tests above plus the reference and
