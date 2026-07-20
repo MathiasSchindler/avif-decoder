@@ -2,10 +2,13 @@
 
 ## Project Status and Scope
 
-This repository is a research and experimental AVIF/AV1 decoder. It processes
-complex, potentially untrusted image and container data using a freestanding C
-implementation of ISOBMFF, AV1 decoding, image reconstruction, color conversion,
-and output encoding.
+This repository is a research and experimental AVIF codec project. It contains
+a broad AVIF/AV1 decoder and a narrower reduced-still encoder. The decoder
+processes complex, potentially untrusted image and container data using a
+freestanding C implementation of ISOBMFF, AV1 decoding, image reconstruction,
+color conversion, and output encoding. The encoder processes caller-provided
+planar images plus PNG or baseline-JPEG CLI input and emits ISOBMFF/AV1 data
+through project-owned serialization and entropy-coding code.
 
 The vast majority of the code in this repository has been produced with help
 from large language models. There is no explicit or implicit statement that the
@@ -17,9 +20,10 @@ particular, do not rely on it to safely process untrusted or attacker-controlled
 input, and do not use it as a security boundary. Dependency-free and
 freestanding operation do not imply security or correctness.
 
-Malformed AVIF, ISOBMFF, AV1, metadata, or image data may expose parser errors,
-resource-exhaustion issues, memory-safety bugs, incorrect validation, or other
-unexpected behavior. The project has not received a production security audit.
+Malformed AVIF, ISOBMFF, AV1, metadata, PNG, JPEG, or planar image data may
+expose parser or serializer errors, resource-exhaustion issues, memory-safety
+bugs, incorrect validation, malformed encoder output, or other unexpected
+behavior. The project has not received a production security audit.
 Count-bearing container loops are bounded by configured limits or by the
 minimum bytes remaining for each entry. Reader failure terminates the active
 loop immediately rather than continuing with zero-valued reads.
@@ -36,6 +40,13 @@ inter-frame references are impossible and exact pass-through filter planes can
 alias. Frames permitting intra block copy retain full motion-bearing block
 cells. Applications must still allocate the complete queried requirement and
 must not reuse a plan across different inputs or executor widths.
+
+Encoder queries return conservative caller-owned workspace and output
+capacities. Quantization matrices, adaptive-quantization segment maps,
+rate-control trial output, tile-local state, and reconstruction storage all
+live in that workspace. Applications must use requirements queried for the
+same image, options, and executor width, cap target sizes and worker counts,
+and treat encoded output as untrusted until independently validated.
 
 Adaptive compressed PNG output requires the separate
 `avifdec_png_workspace_requirement()` allocation. It is bounded by a fixed
@@ -55,6 +66,7 @@ Useful reports include:
 - excessive CPU, memory, stack, or output consumption
 - validation bypasses or incorrect acceptance of invalid input
 - unsafe behavior in AVIF, ISOBMFF, AV1, metadata, color, or output handling
+- malformed, nondeterministic, or decoder-inconsistent encoder output
 - build or release issues that could misrepresent generated artifacts
 
 Please include a reproducer, affected commit, observed behavior, and relevant

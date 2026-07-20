@@ -1,8 +1,13 @@
-# Defensive decoder robustness testing
+# Defensive codec robustness testing
 
-This project uses coverage-guided randomized input testing solely to strengthen its own AVIF, ISOBMFF, and AV1 decoder before release. The campaign targets memory safety, arithmetic correctness, parser-state consistency, resource limits, workspace sizing, and deterministic serial/parallel behavior. It is not intended for testing third-party systems or developing offensive capability.
+This project uses coverage-guided randomized input testing solely to strengthen
+its own AVIF codec implementation. Separate decoder and encoder campaigns
+target memory safety, arithmetic correctness, parser and writer state,
+resource limits, workspace sizing, reconstruction agreement, and deterministic
+serial/parallel behavior. They are not intended for testing third-party
+systems or developing offensive capability.
 
-## Local campaign
+## Decoder campaign
 
 The local harness requires Clang with libFuzzer support. Build it with:
 

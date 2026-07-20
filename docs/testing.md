@@ -34,7 +34,7 @@ project itself builds. It includes:
   requiring exact encoder/decoder reconstruction checksums.
 
   `make encoder-fuzz-smoke` runs 1,000 sanitizer-backed encoder mutations. The
-  external encoder interoperability script covers six fixtures and 24 exact
+  external encoder interoperability script covers eight fixtures and 32 exact
   decode comparisons through FFmpeg, libaom, and the available libavif aom and
   dav1d backends, including fully visible horizontal and vertical rectangles.
 
@@ -88,7 +88,7 @@ of the suite runs.
 ## Notes
 
 The trusted test programs are development-time or test-time tools only. They are
-never linked into `avifdec`.
+never linked into the production `avifdec` or `avifenc` executables.
 
 For decoder and encoder coverage-guided robustness testing, see
 [`fuzzing.md`](fuzzing.md). For

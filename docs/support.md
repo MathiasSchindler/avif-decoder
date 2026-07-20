@@ -1,7 +1,8 @@
 # Format support
 
 This document lists the AVIF container, AV1 bitstream, and image-sequence
-features the decoder handles, plus known limitations.
+features the decoder handles, the reduced-still surface the encoder emits, and
+known limitations of both codec directions.
 
 ## AVIF container support
 
@@ -72,8 +73,11 @@ vertical partition decisions through 32x32 coding blocks. DCT transforms cover
 shapes needed by YUV420 rectangular blocks. Its bounded rate-distortion search
 covers all luma and chroma intra directions, legal angle deltas, smooth modes,
 Paeth, CfL, filter intra, and exact luma and paired chroma palettes. Intrabc is
-not emitted.
-Quantizers 1 through 255 and speeds 0 through 2 are supported.
+not emitted. Quantizers 0 through 255 and speeds 0 through 2 are supported.
+Quantizer 0 uses the exact lossless 4x4 WHT path. Lossy coding supports
+separate Y/U/V DC and AC deltas, fixed or activity-selected quantization
+matrices, three-segment activity AQ, and deterministic finite target-quality
+and target-size searches.
 
 Each dimension is at most 65,536. Images exceeding AV1's per-tile width or area
 limits are split into bounded tile columns and rows. The encoder API does not
@@ -91,9 +95,8 @@ Linux uses native worker threads and macOS currently falls back to serial.
 
 - Supplied freestanding executables target Linux/x86-64 and macOS/arm64.
 - Encoding is limited to one 8-bit 4:2:0 reduced-still key frame. Alpha,
-  sequences, grids, inter prediction, lossless mode, rate control, target-size
-  encoding, film grain, super-resolution, and advanced metadata are not
-  supported.
+  sequences, grids, inter prediction, film grain, super-resolution, in-loop
+  filtering, restoration, and advanced metadata are not supported.
 - Encoder image input rejects progressive JPEG and interlaced PNG.
 - Tile-list OBUs and large-scale-tile mode are unsupported.
 - Tone-map/gain-map metadata is retained but not applied.

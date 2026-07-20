@@ -1,14 +1,16 @@
 # avif-decoder
 
-`avif-decoder` is a dependency-free AVIF still-image and image-sequence decoder
-written in freestanding C. The command-line executable uses native system calls
-directly and does not link a C library, codec library, or image library. Linux
+`avif-decoder` is a dependency-free AVIF codec project written in freestanding
+C. It provides a broad still-image and image-sequence decoder plus a narrower
+reduced-still encoder. The command-line executables use native system calls
+directly and do not link a C library, codec library, or image library. Linux
 builds are static PIE executables without an interpreter; macOS builds use the
 system dyld as their process launcher but have no dynamic-library load commands.
 
-Its core API operates on immutable input memory and caller-owned workspace and
-output buffers, performs no allocation and no file I/O, and reports explicit
-limits and structured errors for untrusted input.
+The decoder and encoder core APIs operate on caller-owned input, workspace, and
+output buffers, perform no allocation and no file I/O, and report explicit
+limits and structured errors. The decoder accepts immutable encoded input; the
+encoder accepts immutable planar source images.
 
 ## Features
 
@@ -19,7 +21,9 @@ limits and structured errors for untrusted input.
 - Native planar YUV, packed RGB/RGBA, and allocation-free streaming PNG output.
 - Optional caller-driven parallelism through a structured `parallel_for`
   executor, with a built-in clone/futex worker pool on Linux/x86-64.
-- Allocation- and I/O-free reentrant core suitable for untrusted input.
+- A deterministic 8-bit YUV420 reduced-still encoder with lossless and lossy
+  quantization, bounded rate control, and caller-driven tile parallelism.
+- Allocation- and I/O-free reentrant decoder and encoder cores.
 
 See [`docs/support.md`](docs/support.md) for the full feature matrix.
 
@@ -101,6 +105,7 @@ binaries keep their symbols for diagnostics.
 build/x86_64/avifdec image.avif                 # inspect and validate
 build/x86_64/avifdec --png image.avif image.png # decode to PNG
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
+build/x86_64/avifenc --quantizer 96 image.png image.avif
 ```
 
 See [`docs/usage.md`](docs/usage.md) for the full command line, output formats,
@@ -124,9 +129,9 @@ codec, image, or network dependencies. `make test-all` additionally requires
 - [Architecture](docs/architecture.md) — design goals, source tree, memory and
   parallelism model.
 - [Command-line usage](docs/usage.md) — CLI options and output formats.
-- [Public API](docs/api.md) — the `src/avifdec.h` library interface.
-- [Format support](docs/support.md) — AVIF, AV1, and sequence feature matrix and
-  known limitations.
+- [Public API](docs/api.md) — the decoder and encoder library interfaces.
+- [Format support](docs/support.md) — decoded and encoded AVIF/AV1 feature
+  matrices and known limitations.
 - [Testing](docs/testing.md) — the `test` / `test-all` split and requirements.
 - [Fuzzing](docs/fuzzing.md) — coverage-guided robustness workflow.
 - [Profiling](docs/profiling.md) — performance measurement.
@@ -139,7 +144,7 @@ codec, image, or network dependencies. `make test-all` additionally requires
 The decoder API is declared in [`src/avifdec.h`](src/avifdec.h), and the
 encoder API in [`src/encoder/avifenc.h`](src/encoder/avifenc.h). Both are
 documented in [`docs/api.md`](docs/api.md). Decoder version 1.3.0 and encoder
-version 0.1.0 are reported through their respective version constants and
+version 0.2.0 are reported through their respective version constants and
 version-string functions.
 
 ## Makefile interface

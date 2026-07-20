@@ -1,8 +1,9 @@
 # Command-line usage
 
-The examples below use the Linux output path (`build/x86_64/avifdec`). On
-macOS, substitute `build/arm64/avifdec`. See the [README](../README.md) for how
-to build the executable.
+The examples below use the Linux codec paths (`build/x86_64/avifdec` and
+`build/x86_64/avifenc`). On macOS, substitute `build/arm64/avifdec` and
+`build/arm64/avifenc`. See the [README](../README.md) for how to build the
+executables.
 
 ## Inspecting
 
