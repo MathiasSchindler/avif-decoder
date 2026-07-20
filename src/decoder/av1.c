@@ -883,6 +883,7 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
             }
         }
     }
+    state->deblocked_planes = state->frame_planes;
     for (plane = 0U; plane < (sequence->monochrome ? 1U : 3U); ++plane) {
         unsigned int sub_x = plane == 0U ? 0U : sequence->subsampling_x;
         unsigned int sub_y = plane == 0U ? 0U : sequence->subsampling_y;
@@ -901,14 +902,6 @@ static AvifdecStatus av1_trace_prepare(Av1TraceState *state,
                                    &upscaled_samples)) {
             return AVIFDEC_OVERFLOW;
         }
-        state->deblocked_planes.data[plane] =
-            (uint16_t *)avifdec_arena_allocate(
-                &state->arena, coded_samples * sizeof(uint16_t),
-                _Alignof(uint16_t));
-        state->deblocked_planes.stride[plane] =
-            state->frame_planes.width[plane];
-        state->deblocked_planes.width[plane] = state->frame_planes.width[plane];
-        state->deblocked_planes.height[plane] = state->frame_planes.height[plane];
         if (alias_cdef) {
             state->cdef_planes = state->deblocked_planes;
         } else {
@@ -1323,10 +1316,12 @@ static AvifdecStatus av1_trace_finish_frame(Av1TraceState *state,
     unsigned int plane;
     AvifdecStatus status;
 
-    status = av1_trace_copy_visible_planes(
-        &state->deblocked_planes, &state->frame_planes, sequence,
-        frame->mi_cols * 4U, frame->mi_rows * 4U, state->executor);
-    if (status != AVIFDEC_OK) return status;
+    /*
+     * Tile reconstruction and its optional checksum are complete before this
+     * call. No later stage consumes the unfiltered reconstruction, so loop
+     * filtering can safely reuse it in place.
+     */
+    state->deblocked_planes = state->frame_planes;
     avifdec_memory_fill(&loop_filter, 0U, sizeof(loop_filter));
     loop_filter.frame_width = frame->frame_width;
     loop_filter.frame_height = frame->frame_height;
@@ -2037,7 +2032,7 @@ static AvifdecStatus av1_workspace_requirement(
             plane_workspace,
             info->workspace_plane_buffer_count != 0U
                 ? info->workspace_plane_buffer_count
-                : (info->reduced_still_picture_header ? 6U : 14U),
+                : (info->reduced_still_picture_header ? 5U : 13U),
             &plane_workspace) ||
         av1_tile_workspace_requirement(
             width, height, info->monochrome,
@@ -2755,7 +2750,7 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     info->render_height = frame.render_height;
     info->reduced_still_picture_header = sequence.reduced_still_picture_header;
     info->workspace_plane_buffer_count =
-        sequence.reduced_still_picture_header ? 6U : 14U;
+        sequence.reduced_still_picture_header ? 5U : 13U;
     if (sequence.reduced_still_picture_header) {
         if (av1_cdef_is_identity(&sequence, &frame)) {
             --info->workspace_plane_buffer_count;

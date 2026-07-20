@@ -618,6 +618,73 @@ All raw output was byte-identical. Treat these numbers only as this same-build
 A/B; comparisons across machines, compilers, codec versions, or historical
 tables are not valid.
 
+## Full-decoder optimization pass
+
+Profile-guided work after the portable CDEF pass retained four changes:
+
+- Super-resolution now proves when all eight horizontal taps are interior and
+  performs direct loads in that case; edge pixels retain the original clamped
+  path.
+- Quantizer-matrix dequantization now selects the matrix/non-matrix loop once,
+  validates the active matrix range once, hoists its offset, and separates the
+  DC coefficient from invariant AC loops. Direct kernel comparisons supported
+  retaining the loop split and invariant hoisting.
+- The macOS ARM64 residual-add dispatch now covers unflipped 8-, 10-, and
+  12-bit blocks whose width is a multiple of four. Four-sample and eight-sample
+  vector paths use saturating addition before exact bit-depth clipping; flipped
+  or otherwise unsupported cases remain scalar. Direct scalar/vector kernel
+  comparisons supported retaining the narrow vector paths.
+- The deblocked planes alias the reconstruction planes rather than consuming a
+  separate full plane set. This saves 7,372,800, 33,816,576, 25,165,824, and
+  90,316,800 workspace bytes across the four benchmark images. Peak RSS fell
+  by 32.13 MiB at 11.2 MP and 86.16 MiB at 30.1 MP.
+
+The plane alias is valid at the exact frame-stage boundary: all tile
+reconstruction and its optional reconstruction checksum finish before loop
+filtering starts, and no later stage consumes the unfiltered reconstruction.
+Loop filtering may therefore update that storage in place. Executor work is
+synchronous: although the plane descriptors are aliased during workspace
+preparation, nothing uses the deblocked view until tile dispatch and ordered
+result/checksum commit have completed. The loop-filter executor retains its
+vertical/horizontal phase barrier and disjoint row/column units, while CDEF and
+later stages consume only the completed deblocked result. Identity stages
+continue to alias and active stages retain their separate destinations, so the
+change introduces neither a cross-stage lifetime dependency nor concurrent
+read/write aliasing.
+
+The focused super-resolution, dequantization, and residual-add harnesses were
+temporary implementation-time checks and were cleaned up. Their exact iteration
+methodology was not retained, so they provide qualitative implementation
+guidance rather than durable percentage evidence.
+
+The integrated one-worker A/B used raw output to `/dev/null`, one warm-up, and
+9 seeded interleaved rounds per corpus image and for the active-super-resolution
+fixture. The post-CDEF baseline executable SHA-256 was
+`266f3c31a6d9319113d591c340d9cf28e1add0a2767f0b8b8c80cb1f2cfad0a8`;
+the integrated executable SHA-256 was
+`72b2b3a8f5b58e42fa6aa6fd24c359e532e16cb1e38d69cb75df0fa6bf972168`.
+
+| Workload | Post-CDEF median | Integrated median | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP lossy 4:2:0 | 110.283 ms | 109.107 ms | -1.07% |
+| 11.2 MP lossy 4:2:0 | 515.016 ms | 500.474 ms | -2.82% |
+| 4.2 MP lossless 4:4:4 | 738.249 ms | 720.921 ms | -2.35% |
+| 30.1 MP lossy 4:2:0 | 1,739.383 ms | 1,664.922 ms | -4.28% |
+| Active super-resolution fixture | 278.481 ms | 259.739 ms | -6.73% |
+
+The geometric-mean reduction across the four-image corpus was 2.64%. Raw output
+was byte-identical between executables for every corpus image and the active
+super-resolution fixture. The integrated and fixture results are not a
+decomposition, and no unmeasured gain is inferred from the qualitative focused
+checks.
+
+The concluding profile-guided audit still places CDEF, inverse transform, and
+loop filtering among the important lossy hotspots; entropy decoding dominates
+the lossless case. Coefficient zero-skip and invariant-hoisting experiments
+measured neutral and were rejected. Counters also found zero inter blocks in the
+still-image corpus, so time was not misattributed to inter prediction; inter
+optimization requires a representative inter-frame workload.
+
 ## Validation
 
 Run the complete suite without overriding `CFLAGS` on the `make test` command line:

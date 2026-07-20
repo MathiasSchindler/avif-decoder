@@ -536,11 +536,12 @@ void av1_dsp_inverse_dct16(const int32_t *input, int32_t *output) {
 }
 
 #if defined(AVIFDEC_AARCH64_NEON)
-void av1_dsp_add_residual_8bpc_neon(uint16_t *destination,
-                                    size_t stride,
-                                    size_t width,
-                                    size_t height,
-                                    const int32_t *residual);
+void av1_dsp_add_residual_neon(uint16_t *destination,
+                               size_t stride,
+                               size_t width,
+                               size_t height,
+                               const int32_t *residual,
+                               int32_t maximum);
 #endif
 
 void av1_dsp_add_residual_c(uint16_t *destination,
@@ -560,9 +561,10 @@ void av1_dsp_add_residual_c(uint16_t *destination,
         for (column = 0U; column < width; ++column) {
             size_t output_column =
                 flip_lr != 0U ? width - column - 1U : column;
-            int32_t value =
+            /* Residuals span int32_t, so widen before the clamped addition. */
+            int64_t value =
                 destination[output_row * stride + output_column] +
-                residual[row * width + column];
+                (int64_t)residual[row * width + column];
             if (value < 0) value = 0;
             if (value > maximum) value = maximum;
             destination[output_row * stride + output_column] =
@@ -580,10 +582,12 @@ void av1_dsp_add_residual(uint16_t *destination,
                           uint8_t flip_lr,
                           uint8_t flip_ud) {
 #if defined(AVIFDEC_AARCH64_NEON)
-    if (bit_depth == 8U && flip_lr == 0U && flip_ud == 0U &&
-        width >= 8U && (width & 7U) == 0U) {
-        av1_dsp_add_residual_8bpc_neon(
-            destination, stride, width, height, residual);
+    if ((bit_depth == 8U || bit_depth == 10U || bit_depth == 12U) &&
+        flip_lr == 0U && flip_ud == 0U &&
+        width >= 4U && (width & 3U) == 0U) {
+        av1_dsp_add_residual_neon(
+            destination, stride, width, height, residual,
+            ((int32_t)1 << bit_depth) - 1);
         return;
     }
 #endif

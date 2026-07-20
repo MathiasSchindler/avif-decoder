@@ -2521,7 +2521,7 @@ static int test_av1_regular_header(void) {
         0xbbU, 0x7dU, 0x65U, 0x18U
     };
     static unsigned char selected_layer[sizeof(layered)];
-    static unsigned char workspace[400000U];
+    static unsigned char workspace[700000U];
     AvifdecSpan span = { regular, sizeof(regular), 2000U };
     AvifdecLimits limits;
     AvifdecEntropyTrace trace;
@@ -2536,15 +2536,21 @@ static int test_av1_regular_header(void) {
     info.channel_count = 3U;
     CHECK(avifdec_av1_query(&span, 1U, 0, &info, &error) == AVIFDEC_OK);
     CHECK(info.reduced_still_picture_header == 0U);
+    CHECK(info.workspace_plane_buffer_count == 13U &&
+          info.workspace_required <= sizeof(workspace));
     CHECK(info.frame_type == 0U && info.render_width == 2U && info.render_height == 2U);
     CHECK(info.tile_columns == 1U && info.tile_rows == 1U && info.obu_count == 3U);
     CHECK(avifdec_av1_trace(&span, 1U, 0, &info, workspace,
-                            sizeof(workspace), &trace, &error) == AVIFDEC_OK);
+                            info.workspace_required,
+                            &trace, &error) == AVIFDEC_OK);
     CHECK(trace.tile_count == 1U && trace.partition_nodes == 4U &&
           trace.block_count == 1U && trace.transform_count == 6U &&
           trace.nonzero_transform_count == 3U &&
           trace.coefficient_count == 33U &&
           trace.checksum == 0x07108a861b12bc01ULL);
+    CHECK(trace.deblocked_checksum != trace.cdef_checksum &&
+          trace.cdef_checksum == trace.superres_checksum &&
+          trace.superres_checksum == trace.restoration_checksum);
     span.data = layered;
     span.size = sizeof(layered);
     avifdec_memory_fill(&limits, 0U, sizeof(limits));
@@ -2981,6 +2987,7 @@ static int test_av1_dequantization(void) {
     };
     int32_t quantized[1024];
     int32_t dequantized[1024];
+    int32_t reference[16];
     uint8_t qmatrix[AV1_QM_TOTAL_SIZE];
     Av1DequantParams params;
     unsigned int level;
@@ -3030,6 +3037,54 @@ static int test_av1_dequantization(void) {
     CHECK(av1_recon_dequantize(quantized, 15U, AV1_TX_4X4,
                                AV1_TX_DCT_DCT, &params,
                                dequantized, 16U) == AVIFDEC_INVALID_ARGUMENT);
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_DCT_DCT, &params,
+                               dequantized, 15U) == AVIFDEC_INVALID_ARGUMENT);
+
+    params.bit_depth = 10U;
+    params.q_index = 73U;
+    params.qm_level = 0U;
+    for (level = 0U; level < 16U; ++level) {
+        quantized[level] = (int32_t)level - 8;
+    }
+    params.using_qmatrix = 0U;
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_DCT_DCT, &params,
+                               reference, 16U) == AVIFDEC_OK);
+    avifdec_memory_fill(qmatrix, 32U, sizeof(qmatrix));
+    params.using_qmatrix = 1U;
+    params.qmatrix = qmatrix;
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_DCT_DCT, &params,
+                               dequantized, 16U) == AVIFDEC_OK);
+    CHECK(avifdec_memory_compare(
+              reference, dequantized, sizeof(reference)) == 0);
+
+    CHECK(av1_recon_qmatrix_decode(
+              6U, 0U, qmatrix, sizeof(qmatrix)) == AVIFDEC_OK);
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_DCT_DCT, &params,
+                               dequantized, 16U) == AVIFDEC_OK);
+    for (level = 0U; level < 16U; ++level) {
+        uint32_t step;
+
+        CHECK(av1_recon_quant_step(
+                  &params, AV1_TX_4X4, AV1_TX_DCT_DCT,
+                  level, &step) == AVIFDEC_OK);
+        CHECK(dequantized[level] == quantized[level] * (int32_t)step);
+    }
+    params.qmatrix = 0;
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_DCT_DCT, &params,
+                               dequantized, 16U) == AVIFDEC_INVALID_DATA);
+    params.qm_level = 15U;
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_DCT_DCT, &params,
+                               dequantized, 16U) == AVIFDEC_OK);
+    params.qm_level = 0U;
+    CHECK(av1_recon_dequantize(quantized, 16U, AV1_TX_4X4,
+                               AV1_TX_IDTX, &params,
+                               dequantized, 16U) == AVIFDEC_OK);
     return 0;
 }
 
@@ -3180,7 +3235,7 @@ static int test_av1_inverse_transforms(void) {
 }
 
 static int test_av1_dsp_add_residual(void) {
-    static const size_t widths[] = { 4U, 8U, 16U, 32U, 64U };
+    static const size_t widths[] = { 4U, 8U, 12U, 16U, 32U, 64U };
     uint16_t expected[67U * 8U];
     uint16_t actual[67U * 8U];
     int32_t residual[64U * 8U];
@@ -3212,11 +3267,19 @@ static int test_av1_dsp_add_residual(void) {
                             (int32_t)((index * 8191U + width * 257U) & 8191U) -
                             4096;
                     }
-                    residual[0] = -65536;
-                    residual[width * 8U - 1U] = 65536;
+                    residual[0] = INT32_MIN;
+                    residual[1] = INT32_MAX;
+                    residual[width * 8U - 2U] = INT32_MAX;
+                    residual[width * 8U - 1U] = INT32_MIN;
                     av1_dsp_add_residual_c(
                         expected, 67U, width, 8U, residual,
                         bit_depth, (uint8_t)flip_lr, (uint8_t)flip_ud);
+                    CHECK(expected[
+                              (flip_ud != 0U ? 7U : 0U) * 67U +
+                              (flip_lr != 0U ? width - 1U : 0U)] == 0U);
+                    CHECK(expected[
+                              (flip_ud != 0U ? 7U : 0U) * 67U +
+                              (flip_lr != 0U ? width - 2U : 1U)] == maximum);
                     av1_dsp_add_residual(
                         actual, 67U, width, 8U, residual,
                         bit_depth, (uint8_t)flip_lr, (uint8_t)flip_ud);
@@ -3894,14 +3957,17 @@ static int test_av1_superres(void) {
     unsigned int index;
     unsigned int depth_index;
 
-    avifdec_memory_fill(input, 0U, sizeof(input));
-    input[3] = 255U;
-    CHECK(av1_superres_upscale_plane(output, 11U, 11U, input, 8U,
-                                     8U, 8U, 1U, 8U) == AVIFDEC_OK);
-    for (index = 0U; index < 11U; ++index) CHECK(output[index] == expected[index]);
     for (depth_index = 0U; depth_index < 3U; ++depth_index) {
         uint8_t bit_depth = (uint8_t)(8U + depth_index * 2U);
         uint16_t value = (uint16_t)(173U << (bit_depth - 8U));
+
+        avifdec_memory_fill(input, 0U, sizeof(input));
+        input[3] = 255U;
+        CHECK(av1_superres_upscale_plane(output, 11U, 11U, input, 8U,
+                                         8U, 8U, 1U, bit_depth) == AVIFDEC_OK);
+        for (index = 0U; index < 11U; ++index) {
+            CHECK(output[index] == expected[index]);
+        }
         for (index = 0U; index < 16U; ++index) input[index] = value;
         CHECK(av1_superres_upscale_plane(output, 11U, 11U, input, 8U,
                                          8U, 8U, 2U, bit_depth) == AVIFDEC_OK);
@@ -4722,11 +4788,21 @@ static int test_av1_loop_restoration(void) {
         CHECK(avifdec_query(file, sizeof(file), 0, 0, 0U, &info, &error) ==
             AVIFDEC_OK);
         CHECK(info.reduced_still_picture_header == 1U &&
-            info.workspace_plane_buffer_count == 2U &&
-            info.workspace_required == 272018U &&
+            info.workspace_plane_buffer_count == 1U &&
+            info.workspace_required == 247442U &&
             info.workspace_required <= sizeof(workspace));
-        CHECK(avifdec_trace(file, sizeof(file), 0, workspace, sizeof(workspace),
-                    &trace, &error) == AVIFDEC_OK);
+        CHECK(avifdec_trace(
+                  file, sizeof(file), 0, workspace,
+                  info.workspace_required - 1U,
+                  &trace, &error) == AVIFDEC_OUT_OF_MEMORY);
+        CHECK(avifdec_trace(
+                  file, sizeof(file), 0, workspace,
+                  info.workspace_required,
+                  &trace, &error) == AVIFDEC_OK);
+        CHECK(trace.reconstruction_checksum == trace.deblocked_checksum &&
+              trace.deblocked_checksum == trace.cdef_checksum &&
+              trace.cdef_checksum == trace.superres_checksum &&
+              trace.superres_checksum == trace.restoration_checksum);
         CHECK(avifdec_query_ex(
             file, sizeof(file), 0, &executor, 0, 0U,
             &parallel_info, &error) == AVIFDEC_OK);
@@ -4757,10 +4833,10 @@ static int test_av1_loop_restoration(void) {
         untraced_image.strides[0] = untraced_image.strides[1] =
             untraced_image.strides[2] = 1U;
         CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
-                    sizeof(workspace), &traced_image, &trace, &error) ==
+                    info.workspace_required, &traced_image, &trace, &error) ==
             AVIFDEC_OK);
         CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
-                    sizeof(workspace), &untraced_image, 0, &error) ==
+                    info.workspace_required, &untraced_image, 0, &error) ==
             AVIFDEC_OK);
         CHECK(avifdec_decode(file, sizeof(file), 0, workspace,
                     info.workspace_required, &untraced_image, 0, &error) ==

@@ -207,8 +207,11 @@ the local `images/pastell.jpg` with the settings recorded in
 [`profiling.md`](profiling.md). These figures are only a same-build A/B; do not
 compare them across machines, compiler/decoder versions, or earlier tables.
 
-## Peak resident memory
+## Historical peak resident memory (pre-plane-alias)
 
+These measurements belong to the original and optimization-rerun snapshots
+above. They predate the reconstruction/deblocking plane alias in the later
+same-build full-decoder pass and do not describe that integrated executable.
 Peak RSS was measured with `/usr/bin/time -l` after one warm run.
 
 | Image | Repository CLI | libavif + dav1d | libavif + libaom | FFmpeg + dav1d |
@@ -216,19 +219,54 @@ Peak RSS was measured with `/usr/bin/time -l` after one warm run.
 | 11.2 MP, 8-bit 4:2:0 lossy | 151.7 MiB | 24.3 MiB | 152.9 MiB | 53.8 MiB |
 | 30.1 MP, 10-bit 4:2:0 lossy | 403.5 MiB | 105.7 MiB | 442.0 MiB | 204.9 MiB |
 
-The repository decoder is close to libaom in peak memory on these workloads,
-but uses substantially more memory than dav1d.
+In the original snapshot, the repository decoder was close to libaom in peak
+memory on these workloads, but used substantially more memory than dav1d.
 
-The optimization rerun produced effectively unchanged peak-RSS results:
+The pre-plane-alias optimization rerun produced effectively unchanged
+peak-RSS results:
 
 | Image | Repository CLI | libavif + dav1d | libavif + libaom | FFmpeg + dav1d |
 | --- | ---: | ---: | ---: | ---: |
 | 11.2 MP, 8-bit 4:2:0 lossy | 151.6 MiB | 24.3 MiB | 152.9 MiB | 53.7 MiB |
 | 30.1 MP, 10-bit 4:2:0 lossy | 403.5 MiB | 105.8 MiB | 442.0 MiB | 204.9 MiB |
 
-The measured speed gains therefore came without a material still-image RSS
-change. Native worker widths above one can improve wall time further, but are
-excluded here to preserve the original one-worker comparison.
+Within those two historical snapshots, the measured speed gains came without a
+material still-image RSS change. For current integrated memory results, see the
+same-build full-decoder pass below, which records the workspace and RSS savings
+from plane aliasing. Native worker widths above one are excluded here to
+preserve the original one-worker comparison.
+
+## Full-decoder optimization pass
+
+A subsequent same-build A/B used the post-CDEF executable above as its baseline.
+The baseline SHA-256 was
+`266f3c31a6d9319113d591c340d9cf28e1add0a2767f0b8b8c80cb1f2cfad0a8`;
+the integrated executable SHA-256 was
+`72b2b3a8f5b58e42fa6aa6fd24c359e532e16cb1e38d69cb75df0fa6bf972168`.
+Both used one worker, wrote raw output to `/dev/null`, and received one warm-up.
+A seeded schedule interleaved the executables for 9 rounds on every corpus
+image.
+
+| Workload | Post-CDEF median | Integrated median | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP, 8-bit 4:2:0 lossy | 110.283 ms | 109.107 ms | -1.07% |
+| 11.2 MP, 8-bit 4:2:0 lossy | 515.016 ms | 500.474 ms | -2.82% |
+| 4.2 MP, 8-bit 4:4:4 lossless | 738.249 ms | 720.921 ms | -2.35% |
+| 30.1 MP, 10-bit 4:2:0 lossy | 1,739.383 ms | 1,664.922 ms | -4.28% |
+
+The geometric-mean time reduction was 2.64%. Raw output from the two
+executables was byte-identical for every image. The retained pass uses direct
+loads for interior super-resolution taps, hoists quantizer-matrix dequantization
+invariants, extends the ARM64 residual kernel to unflipped 4-wide 8/10/12-bit
+blocks, and aliases the reconstruction and deblocking planes after
+reconstruction is complete. Implementation-time direct kernel comparisons
+qualitatively supported the first three changes, but their temporary focused
+harnesses were removed and are not durable benchmark evidence.
+
+Eliminating the separate deblocking plane reduced queried workspace by one
+allocated plane set: 7,372,800, 33,816,576, 25,165,824, and 90,316,800 bytes in
+corpus order. On the 11.2 MP and 30.1 MP cases, current same-build peak RSS fell
+by 32.13 MiB and 86.16 MiB, respectively.
 
 ## Interpretation
 

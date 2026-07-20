@@ -88,15 +88,35 @@ static AvifdecStatus av1_superres_upscale_rows(
             int64_t sum = 0;
             unsigned int tap;
 
-            for (tap = 0U; tap < 8U; ++tap) {
-                int64_t sample_x = source_pixel + (int64_t)tap - 3;
-                if (sample_x < 0) sample_x = 0;
-                if ((uint64_t)sample_x >= context->padded_input_width) {
-                    sample_x = context->padded_input_width - 1U;
+            if (source_pixel >= 3 &&
+                (uint64_t)(source_pixel + 4) <
+                    context->padded_input_width) {
+                const uint16_t *samples =
+                    context->input + row * context->input_stride +
+                    (size_t)source_pixel - 3U;
+                const int16_t *filter = av1_superres_filter[subpel];
+
+                sum = (int64_t)samples[0] * filter[0] +
+                      (int64_t)samples[1] * filter[1] +
+                      (int64_t)samples[2] * filter[2] +
+                      (int64_t)samples[3] * filter[3] +
+                      (int64_t)samples[4] * filter[4] +
+                      (int64_t)samples[5] * filter[5] +
+                      (int64_t)samples[6] * filter[6] +
+                      (int64_t)samples[7] * filter[7];
+            } else {
+                for (tap = 0U; tap < 8U; ++tap) {
+                    int64_t sample_x =
+                        source_pixel + (int64_t)tap - 3;
+                    if (sample_x < 0) sample_x = 0;
+                    if ((uint64_t)sample_x >=
+                        context->padded_input_width) {
+                        sample_x = context->padded_input_width - 1U;
+                    }
+                    sum += context->input[row * context->input_stride +
+                                          (size_t)sample_x] *
+                           av1_superres_filter[subpel][tap];
                 }
-                sum += context->input[row * context->input_stride +
-                                      (size_t)sample_x] *
-                       av1_superres_filter[subpel][tap];
             }
             sum = av1_superres_arshift((int)(sum + 64), 7U);
             if (sum < 0) sum = 0;

@@ -194,7 +194,13 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
     size_t height;
     size_t count;
     size_t index;
+    size_t qmatrix_offset;
     unsigned int denominator;
+    unsigned int denom_shift;
+    uint32_t q_dc;
+    uint32_t q_ac;
+    const uint8_t *qmatrix;
+    int use_qmatrix;
 
     if (quantized == 0 || params == 0 || dequantized == 0 ||
         tx_size >= AV1_TX_SIZES_ALL || tx_type >= AV1_TX_TYPES ||
@@ -211,35 +217,61 @@ AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
         return AVIFDEC_INVALID_ARGUMENT;
     }
     denominator = av1_recon_dq_denom(tx_size);
-    {
-    const unsigned int denom_shift =
+    denom_shift =
         denominator == 4U ? 2U : denominator == 2U ? 1U : 0U;
-    const uint32_t q_dc = av1_recon_dc_quant(
+    q_dc = av1_recon_dc_quant(
         params->bit_depth, params->q_index + av1_recon_dc_delta(params));
-    const uint32_t q_ac = av1_recon_ac_quant(
+    q_ac = av1_recon_ac_quant(
         params->bit_depth, params->q_index + av1_recon_ac_delta(params));
-    for (index = 0U; index < count; ++index) {
-        uint32_t q = index == 0U ? q_dc : q_ac;
+    use_qmatrix = params->using_qmatrix != 0U && tx_type < AV1_TX_IDTX &&
+        params->qm_level < 15U;
+    if (use_qmatrix != 0) {
+        int64_t product;
+        uint64_t magnitude;
+        int64_t value;
         uint32_t q2;
+
+        qmatrix_offset = (size_t)av1_qm_offset[tx_size];
+        if (params->qmatrix == 0 || qmatrix_offset >= AV1_QM_TOTAL_SIZE ||
+            count > AV1_QM_TOTAL_SIZE - qmatrix_offset) {
+            return AVIFDEC_INVALID_DATA;
+        }
+        qmatrix = params->qmatrix + qmatrix_offset;
+        q2 = (q_dc * qmatrix[0] + 16U) >> 5U;
+        product = (int64_t)quantized[0] * q2;
+        magnitude = product < 0 ? (uint64_t)(-product) : (uint64_t)product;
+        magnitude = (magnitude & 0xffffffU) >> denom_shift;
+        value = product < 0 ? -(int64_t)magnitude : (int64_t)magnitude;
+        dequantized[0] = av1_recon_clip_dequant(value, params->bit_depth);
+        for (index = 1U; index < count; ++index) {
+            q2 = (q_ac * qmatrix[index] + 16U) >> 5U;
+            product = (int64_t)quantized[index] * q2;
+            magnitude =
+                product < 0 ? (uint64_t)(-product) : (uint64_t)product;
+            magnitude = (magnitude & 0xffffffU) >> denom_shift;
+            value = product < 0 ? -(int64_t)magnitude : (int64_t)magnitude;
+            dequantized[index] =
+                av1_recon_clip_dequant(value, params->bit_depth);
+        }
+    } else {
         int64_t product;
         uint64_t magnitude;
         int64_t value;
 
-        q2 = q;
-        if (params->using_qmatrix != 0U && tx_type < AV1_TX_IDTX &&
-            params->qm_level < 15U) {
-            size_t qm_index = (size_t)av1_qm_offset[tx_size] + index;
-            if (qm_index >= AV1_QM_TOTAL_SIZE || params->qmatrix == 0) {
-                return AVIFDEC_INVALID_DATA;
-            }
-            q2 = (q * params->qmatrix[qm_index] + 16U) >> 5;
-        }
-        product = (int64_t)quantized[index] * q2;
+        product = (int64_t)quantized[0] * q_dc;
         magnitude = product < 0 ? (uint64_t)(-product) : (uint64_t)product;
         magnitude = (magnitude & 0xffffffU) >> denom_shift;
         value = product < 0 ? -(int64_t)magnitude : (int64_t)magnitude;
-        dequantized[index] = av1_recon_clip_dequant(value, params->bit_depth);
-    }
+        dequantized[0] = av1_recon_clip_dequant(value, params->bit_depth);
+        for (index = 1U; index < count; ++index) {
+            product = (int64_t)quantized[index] * q_ac;
+            magnitude =
+                product < 0 ? (uint64_t)(-product) : (uint64_t)product;
+            magnitude = (magnitude & 0xffffffU) >> denom_shift;
+            value = product < 0 ? -(int64_t)magnitude : (int64_t)magnitude;
+            dequantized[index] =
+                av1_recon_clip_dequant(value, params->bit_depth);
+        }
     }
     return AVIFDEC_OK;
 }
