@@ -1,4 +1,4 @@
-#include "encoder/image_input.h"
+#include "encoder/cli/image_input.h"
 
 #include "base.h"
 

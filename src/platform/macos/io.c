@@ -1,4 +1,4 @@
-#include "platform.h"
+#include "platform/platform.h"
 #include "common.h"
 
 long platform_write(int fd, const void *buffer, size_t count) {

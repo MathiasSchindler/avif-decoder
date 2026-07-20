@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "encoder/avifenc.h"
-#include "encoder/image_input.h"
+#include "encoder/cli/image_input.h"
 #include "avifdec.h"
 
 #include <math.h>

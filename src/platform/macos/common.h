@@ -1,7 +1,7 @@
 #ifndef AVIFDEC_PLATFORM_MACOS_COMMON_H
 #define AVIFDEC_PLATFORM_MACOS_COMMON_H
 
-#include "platform.h"
+#include "platform/platform.h"
 #include "../../arch/aarch64/macos/syscall.h"
 
 #define DARWIN_O_RDONLY 0

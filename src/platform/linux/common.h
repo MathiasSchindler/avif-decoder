@@ -1,7 +1,7 @@
 #ifndef AVIFDEC_PLATFORM_LINUX_COMMON_H
 #define AVIFDEC_PLATFORM_LINUX_COMMON_H
 
-#include "platform.h"
+#include "platform/platform.h"
 
 #if defined(__x86_64__)
 #include "../../arch/x86_64/linux/syscall.h"

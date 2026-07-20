@@ -1,7 +1,7 @@
 #include "encoder/avifenc.h"
-#include "encoder/image_input.h"
+#include "encoder/cli/image_input.h"
 #include "base.h"
-#include "platform.h"
+#include "platform/platform.h"
 #include "task_pool.h"
 #include <stddef.h>
 #include <stdint.h>

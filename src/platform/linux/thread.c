@@ -1,4 +1,4 @@
-#include "platform.h"
+#include "platform/platform.h"
 #include "common.h"
 
 /* Reduced from newos's Linux clone/futex worker substrate. */

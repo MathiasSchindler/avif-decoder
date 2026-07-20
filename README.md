@@ -20,7 +20,7 @@ encoder accepts immutable planar source images.
   display-only film grain.
 - Native planar YUV, packed RGB/RGBA, and allocation-free streaming PNG output.
 - Optional caller-driven parallelism through a structured `parallel_for`
-  executor, with a built-in clone/futex worker pool on Linux/x86-64.
+  executor, with built-in native worker pools on Linux/x86-64 and macOS/arm64.
 - A deterministic 8-bit YUV420 reduced-still encoder with lossless and lossy
   quantization, bounded rate control, and caller-driven tile parallelism.
 - Allocation- and I/O-free reentrant decoder and encoder cores.
@@ -90,10 +90,9 @@ and transform rate-distortion costs are selected together, with doubled chroma
 distortion weight. The encoder supports bounded square/horizontal/vertical
 partition decisions through 32x32, square transforms from 4x4 through 32x32,
 and the six corresponding 2:1 rectangular transform shapes. `--workers`
-selects bounded tile parallelism independently of speed; Linux uses the native
-task pool and macOS currently falls back to serial. It
-is intended as a bounded interoperable baseline rather than a
-compression-efficiency replacement for libaom.
+selects bounded tile parallelism independently of speed; both supported native
+targets use the platform task pool. It is intended as a bounded interoperable
+baseline rather than a compression-efficiency replacement for libaom.
 
 The macOS build requires the Xcode command-line tools and targets macOS 11 or
 newer. The release executable is stripped at link time; the unit and trace
@@ -146,6 +145,9 @@ encoder API in [`src/encoder/avifenc.h`](src/encoder/avifenc.h). Both are
 documented in [`docs/api.md`](docs/api.md). Decoder version 1.3.0 and encoder
 version 0.2.0 are reported through their respective version constants and
 version-string functions.
+
+Decoder internals and its CLI live under `src/decoder`; encoder core and CLI
+code live under `src/encoder`. Shared AV1 primitives are under `src/codec`.
 
 ## Makefile interface
 

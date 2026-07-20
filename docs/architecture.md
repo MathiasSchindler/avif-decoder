@@ -25,59 +25,67 @@ command line, [`api.md`](api.md) for the library interfaces, and
 The code separates portable, freestanding codec cores from thin
 **CLI/runtime/platform** layers:
 
-- The **core** (`CORE_C_SOURCES` in the `Makefile`) is the only code compiled
-  into the library surface, the tests, the fuzzer, and the WebAssembly build.
-  It is allocation-free and I/O-free.
-- The **runtime and platform** layer (`src/main.c`, `src/task_pool.c`,
-  `src/platform/<os>/io.c`, `src/platform/<os>/thread.c`, and the
-  `src/arch/<arch>/<os>` startup/syscall stubs) turns the core into a
-  standalone executable and provides the optional parallel task pool.
-- The **encoder core** (`ENCODER_MODULE_C_SOURCES`) accepts planar YUV420 and
-  owns byte/range writing, AV1 transform and tile coding, and AVIF assembly.
-  `src/encoder/main.c` adds raw file I/O plus project-owned PNG/JPEG decoding
-  and RGB-to-YUV conversion. None of those CLI adapters broaden the planar
-  public encoder contract.
+- The public decoder contract is `src/avifdec.h`. Decoder internals are under
+  `src/decoder`; only `src/decoder/main.c` is the decoder CLI.
+- Shared AV1 entropy, coefficient, prediction, reconstruction, and DSP
+  primitives used by both codec directions are under `src/codec`.
+- The encoder core and public `src/encoder/avifenc.h` are under `src/encoder`.
+  `src/encoder/main.c` is the CLI adapter, and
+  `src/encoder/cli/image_input.c` supplies its PNG/JPEG input conversion.
+- Root-level `src/base.c` and `src/base.h` own common checked arithmetic,
+  readers, memory helpers, and the caller-backed arena. Root-level
+  `src/task_pool.c` and `src/task_pool.h` adapt the public executors to native
+  workers.
+- `src/platform/platform.h` is the I/O, page-memory, and worker abstraction;
+  `src/platform/<os>` implements it. `src/arch/<arch>/<os>` owns process
+  startup, raw syscall declarations/stubs, and architecture assembly.
+- `src/shared` contains only the freestanding standard-header shims selected
+  by `-nostdinc`.
+
+The decoder and encoder core source sets in the `Makefile` are allocation-free
+and I/O-free. CLI adapters add native file I/O and the optional task pool
+without broadening either public core contract.
 
 ## Source tree
 
 ```text
 src/
-  avifdec.h              Public library API (the only public header)
-  base.c                 Freestanding helpers: checked arithmetic, memory, arena
-  bmff.c                 ISOBMFF box parsing
-  avif.c                 AVIF still-image item model and properties
-  avif_sequence.c        AVIF 'avis' image-sequence track model
-  avif_sato.c            Sample-transform ('sato') expression evaluation
-  avif_rgb.c             Planar YUV to packed RGB/RGBA conversion
-  png.c                  Allocation-free streaming PNG encoder
-  av1*.c                 AV1 decoder (see below)
-  main.c                 Command-line front end
-  task_pool.c            clone/futex worker pool (Linux)
-  arch/<arch>/<os>/      crt0 startup and raw syscall stubs
-  platform/<os>/         io.c (native I/O) and thread.c (thread primitives)
-  shared/                Freestanding stdint/stddef/stdbool and platform shims
+  avifdec.h              Public decoder API
+  base.c, base.h         Checked arithmetic, readers, memory, caller arena
+  task_pool.c, .h        Common native-worker scheduler and executor adapter
+  decoder/
+    bmff.c, avif*.c      AVIF container, sequence, transforms, presentation
+    av1*.c               Decoder-specific AV1 parsing and reconstruction flow
+    png.c                Allocation-free streaming PNG output
+    main.c               Freestanding avifdec command-line front end
+  codec/                 AV1 primitives shared by decoder and encoder
   encoder/
     avifenc.h             Public allocation-free encoder API
     avifenc.c             Validation, sizing, workspace, and assembly
     avif_write.c          Single-item AVIF serializer
-    av1_*_write.c         Reduced-still AV1 headers, symbols, tile, transform
-    image_input.c         Allocation-free PNG/baseline-JPEG CLI decoder
+    av1_*.c               Reduced-still AV1 coding and transforms
     main.c                Freestanding avifenc command-line front end
-  av1_*_tables.inc       Generated AV1 constant tables (see below)
+    cli/image_input.c     Allocation-free PNG/baseline-JPEG CLI input
+  shared/                Freestanding standard-header shims
+  platform/
+    platform.h           Native I/O, page-memory, and worker abstraction
+    <os>/                 OS-specific I/O and thread implementations
+  arch/<arch>/<os>/      crt0, syscall declarations/stubs, architecture code
 tests/                   Unit binaries, shell test suites, fuzz harness/seeds
 tools/                   Table generators and the macOS dylib remover
 wasm/                    WebAssembly wrapper and browser viewer assets
 docs/                    This documentation
 ```
 
-The AV1 decoder is split by stage: bitstream/OBU framing
+Within `src/decoder`, AV1 work is split by stage: bitstream/OBU framing
 (`av1_bitstream.c`), high-level frame flow (`av1.c`), references and frame
-context (`av1_reference.c`), tiles and entropy (`av1_tile*.c`, `av1_symbol.c`,
-`av1_coeff.c`), prediction (`av1_intra.c`, `av1_inter*.c`, `av1_predict.c`,
-`av1_warp.c`, `av1_partition.c`, `av1_block.c`, `av1_recon.c`), post-filters
-(`av1_filter.c`, `av1_cdef.c`, `av1_superres.c`, `av1_restoration_filter.c`),
-film grain (`av1_film_grain.c`), profiles/levels (`av1_profile.c`), and
-metadata (`av1_metadata.c`).
+context (`av1_reference.c`), tile parsing (`av1_tile*.c`), inter prediction and
+warping (`av1_inter*.c`, `av1_warp.c`), partition/block flow
+(`av1_partition.c`, `av1_block.c`), post-filters (`av1_filter.c`,
+`av1_cdef.c`, `av1_superres.c`, `av1_restoration_filter.c`), film grain
+(`av1_film_grain.c`), profiles/levels (`av1_profile.c`), and metadata
+(`av1_metadata.c`). Entropy/CDF, coefficients, intra prediction, DSP, and
+reconstruction primitives shared with the encoder live in `src/codec`.
 
 ## Workspace and memory model
 
@@ -110,11 +118,12 @@ workers use pthread and ulock primitives from the already-linked `libSystem`.
 
 ## Generated tables
 
-Several AV1 constant tables (`src/av1_*_tables.inc`,
-`src/av1_film_grain_gaussian.inc`) are generated from the AV1 specification by
-the Perl scripts under `tools/`. The build reproduces them from the maintainer
-`docs/av1.html` file and byte-compares the result against the checked-in copies
-when that file is present. See [`testing.md`](testing.md).
+AV1 coefficient, palette, and quantization tables under `src/codec`, plus the
+warp and film-grain tables under `src/decoder`, are generated from the AV1
+specification by the Perl scripts under `tools/`. The build reproduces them
+from the maintainer `docs/av1.html` file and byte-compares the result against
+the checked-in copies when that file is present. See
+[`testing.md`](testing.md).
 
 ## Platform support
 

@@ -31,15 +31,15 @@ WASM_LOADER := $(WASM_BUILD_DIR)/avif-decoder.js
 WASM_BINARY := $(WASM_BUILD_DIR)/avif-decoder.wasm
 WASM_ASSETS := index.html app.js decoder-worker.js styles.css
 .DEFAULT_GOAL := $(TARGET)
-COEFF_TABLES := src/av1_coeff_tables.inc
+COEFF_TABLES := src/codec/av1_coeff_tables.inc
 COEFF_TABLES_CHECK := build/generated-check/av1_coeff_tables.inc
-PALETTE_TABLES := src/av1_palette_tables.inc
+PALETTE_TABLES := src/codec/av1_palette_tables.inc
 PALETTE_TABLES_CHECK := build/generated-check/av1_palette_tables.inc
-QUANT_TABLES := src/av1_quant_tables.inc
+QUANT_TABLES := src/codec/av1_quant_tables.inc
 QUANT_TABLES_CHECK := build/generated-check/av1_quant_tables.inc
-WARP_TABLES := src/av1_warp_tables.inc
+WARP_TABLES := src/decoder/av1_warp_tables.inc
 WARP_TABLES_CHECK := build/generated-check/av1_warp_tables.inc
-FILM_GRAIN_TABLE := src/av1_film_grain_gaussian.inc
+FILM_GRAIN_TABLE := src/decoder/av1_film_grain_gaussian.inc
 FILM_GRAIN_TABLE_CHECK := build/generated-check/av1_film_grain_gaussian.inc
 GENERATED_CHECK := build/generated-check/.verified
 AV1_SPEC := docs/av1.html
@@ -87,50 +87,67 @@ CFLAGS := \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-ffunction-sections -fdata-sections -fPIE -MMD -MP -nostdinc \
 	-DNEWOS_DISABLE_STACK_GUARD_INIT \
-	-Isrc -Isrc/shared -I$(PLATFORM_DIR) -I$(ARCH_DIR)
+	-Isrc -Isrc/shared -Isrc/decoder -Isrc/codec \
+	-I$(PLATFORM_DIR) -I$(ARCH_DIR)
 HOST_TEST_CFLAGS := \
 	-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g \
 	-fsanitize=address,undefined -fno-omit-frame-pointer \
-	-Isrc -Isrc/shared
+	-Isrc -Isrc/shared -Isrc/decoder -Isrc/codec
 FUZZ_CFLAGS := \
 	-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g \
 	-fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined,integer \
 	-fno-sanitize=unsigned-integer-overflow,implicit-integer-sign-change \
 	-fno-sanitize=implicit-integer-truncation,unsigned-shift-base \
-	-Isrc -Isrc/shared
-CORE_C_SOURCES := \
-	src/base.c src/shared/av1_cdf.c src/bmff.c src/avif.c src/avif_sequence.c src/avif_rgb.c \
-	src/avif_sato.c src/png.c \
-	src/av1_dsp.c \
-	src/av1.c src/av1_bitstream.c src/av1_metadata.c src/av1_profile.c \
-	src/av1_reference.c \
-	src/av1_film_grain.c \
-	src/av1_inter.c src/av1_inter_predict.c src/av1_warp.c \
-	src/av1_symbol.c src/av1_partition.c src/av1_coeff.c \
-	src/av1_recon.c src/av1_intra.c src/av1_predict.c \
-	src/av1_tile.c src/av1_tile_cdf.c src/av1_tile_restoration.c \
-	src/av1_tile_palette.c src/av1_block.c \
-	src/av1_filter.c src/av1_cdef.c src/av1_superres.c \
-	src/av1_restoration_filter.c
+	-Isrc -Isrc/shared -Isrc/decoder -Isrc/codec
+CODEC_C_SOURCES := \
+	src/codec/av1_cdf.c src/codec/av1_symbol.c src/codec/av1_coeff.c \
+	src/codec/av1_dsp.c src/codec/av1_intra.c src/codec/av1_predict.c \
+	src/codec/av1_recon.c src/codec/av1_tile_cdf.c
+DECODER_C_SOURCES := \
+	src/decoder/bmff.c src/decoder/avif.c \
+	src/decoder/avif_properties_internal.c src/decoder/avif_sequence.c \
+	src/decoder/avif_rgb.c src/decoder/avif_sato.c src/decoder/png.c \
+	src/decoder/av1.c src/decoder/av1_bitstream.c \
+	src/decoder/av1_copy.c src/decoder/av1_metadata.c \
+	src/decoder/av1_parse.c src/decoder/av1_profile.c \
+	src/decoder/av1_reference.c src/decoder/av1_film_grain.c \
+	src/decoder/av1_inter.c src/decoder/av1_inter_predict.c \
+	src/decoder/av1_warp.c src/decoder/av1_partition.c \
+	src/decoder/av1_tile.c src/decoder/av1_tile_inter_mode.c \
+	src/decoder/av1_tile_inter_mv.c src/decoder/av1_tile_restoration.c \
+	src/decoder/av1_tile_palette.c src/decoder/av1_block.c \
+	src/decoder/av1_filter.c src/decoder/av1_cdef.c \
+	src/decoder/av1_superres.c src/decoder/av1_restoration_filter.c
+CORE_C_SOURCES := src/base.c $(CODEC_C_SOURCES) $(DECODER_C_SOURCES)
 ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 	src/encoder/avif_write.c src/encoder/av1_write.c \
 	src/encoder/av1_symbol_write.c src/encoder/av1_tile_write.c \
+	src/encoder/av1_tile_intra.c src/encoder/av1_tile_palette.c \
+	src/encoder/av1_tile_partition.c src/encoder/av1_transform_forward.c \
 	src/encoder/av1_transform_write.c
-IMAGE_INPUT_C_SOURCES := src/encoder/image_input.c
+IMAGE_INPUT_C_SOURCES := src/encoder/cli/image_input.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
-	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
-	src/av1_intra.c src/av1_predict.c src/av1_dsp.c src/av1_recon.c \
-	src/av1_tile_cdf.c
+	src/codec/av1_cdf.c src/codec/av1_symbol.c src/codec/av1_coeff.c \
+	src/codec/av1_intra.c src/codec/av1_predict.c src/codec/av1_dsp.c \
+	src/codec/av1_recon.c src/codec/av1_tile_cdf.c
 WASM_C_SOURCES := $(CORE_C_SOURCES) $(ENCODER_MODULE_C_SOURCES) \
 	$(IMAGE_INPUT_C_SOURCES)
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
-ENCODER_TEST_HEADERS := $(wildcard src/*.h src/*.inc src/encoder/*.h \
-	src/shared/*.h)
+FREESTANDING_HEADERS := $(wildcard src/shared/*.h)
+CORE_HEADERS := src/avifdec.h src/base.h \
+	$(wildcard src/codec/*.h src/codec/*.inc \
+	src/decoder/*.h src/decoder/*.inc)
+ENCODER_HEADERS := $(wildcard src/encoder/*.h src/encoder/cli/*.h)
+IMAGE_INPUT_HEADERS := src/encoder/cli/image_input.h src/base.h
+PLATFORM_HEADERS := src/platform/platform.h src/task_pool.h \
+	$(wildcard $(PLATFORM_DIR)/*.h $(ARCH_DIR)/*.h)
+ENCODER_TEST_HEADERS := $(CORE_HEADERS) $(ENCODER_HEADERS) \
+	$(FREESTANDING_HEADERS)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(IMAGE_INPUT_C_SOURCES) src/task_pool.c $(PLATFORM_DIR)/thread.c \
 	$(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
-C_SOURCES := src/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
+C_SOURCES := src/decoder/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
 SOURCES := $(C_SOURCES) $(ARCH_SOURCES)
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
@@ -144,12 +161,12 @@ ARCH_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ARCH_SOURCES:.S=.o))
 ENCODER_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ENCODER_C_SOURCES:.c=.o)) \
 	$(ARCH_OBJECTS)
 COLD_OBJECTS := \
-	$(BUILD_DIR)/src/av1.o \
-	$(BUILD_DIR)/src/av1_metadata.o \
-	$(BUILD_DIR)/src/avif.o \
-	$(BUILD_DIR)/src/avif_sequence.o \
-	$(BUILD_DIR)/src/bmff.o \
-	$(BUILD_DIR)/src/main.o \
+	$(BUILD_DIR)/src/decoder/av1.o \
+	$(BUILD_DIR)/src/decoder/av1_metadata.o \
+	$(BUILD_DIR)/src/decoder/avif.o \
+	$(BUILD_DIR)/src/decoder/avif_sequence.o \
+	$(BUILD_DIR)/src/decoder/bmff.o \
+	$(BUILD_DIR)/src/decoder/main.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
@@ -185,39 +202,46 @@ $(COLD_OBJECTS): CFLAGS += -Os
 # below (unit, obu-trace, thread-unit) unstripped for debuggability.
 $(TARGET): LDFLAGS += -Wl,-s
 
-$(TARGET): $(OBJECTS) $(LINK_TOOLS)
+$(TARGET): $(OBJECTS) $(CORE_HEADERS) $(PLATFORM_HEADERS) \
+		$(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
-$(ENCODER_TARGET): $(ENCODER_OBJECTS) $(LINK_TOOLS)
+$(ENCODER_TARGET): $(ENCODER_OBJECTS) $(ENCODER_HEADERS) $(CORE_HEADERS) \
+		$(PLATFORM_HEADERS) $(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(ENCODER_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
 encoder: $(ENCODER_TARGET)
 
-$(STRICT_UNIT): $(STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
+$(STRICT_UNIT): $(STRICT_UNIT_OBJECTS) $(CORE_HEADERS) \
+		$(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
-$(ENCODER_STRICT_UNIT): $(ENCODER_STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
+$(ENCODER_STRICT_UNIT): $(ENCODER_STRICT_UNIT_OBJECTS) \
+		$(ENCODER_TEST_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(ENCODER_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
-$(IMAGE_INPUT_STRICT_UNIT): $(IMAGE_INPUT_STRICT_UNIT_OBJECTS) $(LINK_TOOLS)
+$(IMAGE_INPUT_STRICT_UNIT): $(IMAGE_INPUT_STRICT_UNIT_OBJECTS) \
+		$(IMAGE_INPUT_HEADERS) $(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(IMAGE_INPUT_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
-$(OBU_TRACE): $(OBU_TRACE_OBJECTS) $(LINK_TOOLS)
+$(OBU_TRACE): $(OBU_TRACE_OBJECTS) $(CORE_HEADERS) $(PLATFORM_HEADERS) \
+		$(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(OBU_TRACE_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
-$(THREAD_UNIT): $(THREAD_UNIT_OBJECTS) $(LINK_TOOLS)
+$(THREAD_UNIT): $(THREAD_UNIT_OBJECTS) $(PLATFORM_HEADERS) \
+		$(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(THREAD_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
@@ -226,28 +250,12 @@ $(MACHO_DYLIB_REMOVER): tools/macho_dylib_remover.c
 	@mkdir -p $(@D)
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 $< -o $@
 
-$(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) src/base.h src/bmff.h \
-		src/shared/av1_cdf.h \
-		src/av1.h src/av1_bitstream.h src/av1_metadata.h src/av1_profile.h \
-		src/av1_film_grain.h src/av1_film_grain_gaussian.inc \
-		src/av1_inter.h \
-		src/av1_inter_predict.h src/av1_warp.h $(WARP_TABLES) \
-		src/av1_symbol.h src/av1_partition.h src/av1_coeff.h \
-		src/av1_coeff_defaults.inc $(COEFF_TABLES) src/av1_recon.h \
-		$(QUANT_TABLES) src/av1_intra.h src/av1_intra_defaults.inc \
-		src/av1_predict.h src/av1_tile.h src/av1_tile_internal.h \
-		src/av1_filter.h src/avifdec.h src/png.h
+$(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) $(CORE_HEADERS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
 
 $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
-		src/encoder/avifenc.h src/encoder/write.h \
-		src/encoder/avif_write.h src/encoder/av1_write.h \
-		src/encoder/av1_symbol_write.h src/encoder/av1_tile_write.h \
-		src/encoder/av1_transform_write.h \
-		src/shared/av1_cdf.h src/av1_coeff.h src/av1_coeff_defaults.inc \
-		src/av1_coeff_tables.inc src/av1_recon.h \
-		src/base.h src/bmff.h
+		$(ENCODER_TEST_HEADERS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
 		$(ENCODER_TEST_C_SOURCES) -o $@
@@ -259,7 +267,7 @@ $(ENCODER_PARALLEL_UNIT): tests/encoder_parallel.c \
 		$(ENCODER_TEST_C_SOURCES) -pthread -o $@
 
 $(IMAGE_INPUT_HOST_UNIT): tests/image_input_unit.c $(IMAGE_INPUT_C_SOURCES) \
-		src/encoder/image_input.h src/base.c src/base.h
+		$(IMAGE_INPUT_HEADERS) src/base.c Makefile
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/image_input_unit.c \
 		$(IMAGE_INPUT_C_SOURCES) src/base.c -o $@
@@ -269,7 +277,8 @@ $(ENCODER_BENCHMARK): tests/encoder_benchmark.c \
 		$(ENCODER_TEST_HEADERS) Makefile
 	@mkdir -p $(@D)
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
-		-Isrc -Isrc/shared tests/encoder_benchmark.c \
+		-Isrc -Isrc/shared -Isrc/decoder -Isrc/codec \
+		tests/encoder_benchmark.c \
 		$(ENCODER_TEST_C_SOURCES) $(IMAGE_INPUT_C_SOURCES) \
 		-lm -pthread -o $@
 
@@ -284,14 +293,14 @@ encoder-scorecard: $(ENCODER_BENCHMARK) tests/encoder-scorecard.sh \
 	sh tests/encoder-scorecard.sh $(ENCODER_BENCHMARK) \
 		$(ENCODER_SCORECARD_BASELINE)
 
-$(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) src/avifdec.h src/bmff.h
+$(FUZZ_TARGET): tests/fuzz.c $(CORE_C_SOURCES) $(CORE_HEADERS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(FUZZ_CFLAGS) tests/fuzz.c $(CORE_C_SOURCES) -o $@
 
 fuzz: $(FUZZ_TARGET)
 
 $(ENCODER_FUZZ_TARGET): tests/encoder_fuzz.c $(ENCODER_TEST_C_SOURCES) \
-		src/encoder/avifenc.h
+		$(ENCODER_TEST_HEADERS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(FUZZ_CFLAGS) tests/encoder_fuzz.c \
 		$(ENCODER_TEST_C_SOURCES) -o $@
@@ -334,10 +343,10 @@ encoder-fuzz-campaign: $(ENCODER_FUZZ_TARGET) encoder-fuzz-seeds
 		$(ENCODER_FUZZ_CORPUS)
 
 $(WASM_LOADER): wasm/avif_wasm.c $(WASM_C_SOURCES) src/avifdec.h \
-		src/encoder/avifenc.h src/encoder/image_input.h
+		$(ENCODER_TEST_HEADERS) Makefile
 	@mkdir -p $(@D)
 	emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror \
-		-Isrc -Isrc/shared \
+		-Isrc -Isrc/shared -Isrc/decoder -Isrc/codec \
 		wasm/avif_wasm.c $(WASM_C_SOURCES) --no-entry \
 		-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createAvifDecoder \
 		-sENVIRONMENT=web,worker -sFILESYSTEM=0 -sALLOW_MEMORY_GROWTH=1 \

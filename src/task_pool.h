@@ -1,7 +1,7 @@
 #ifndef AVIFDEC_TASK_POOL_H
 #define AVIFDEC_TASK_POOL_H
 
-#include "platform.h"
+#include "platform/platform.h"
 #include <stddef.h>
 
 #define RT_TASK_POOL_MAX_WORKERS 32U

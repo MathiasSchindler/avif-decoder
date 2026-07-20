@@ -13,10 +13,13 @@ compiler=${CC:-cc}
 }
 mkdir -p "$work"
 "$compiler" -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
-    -Isrc -Isrc/shared tests/encoder_transform_reference.c \
+    -Isrc -Isrc/shared -Isrc/decoder -Isrc/codec \
+    tests/encoder_transform_reference.c \
     src/encoder/av1_transform_write.c src/encoder/av1_symbol_write.c \
-    src/av1_recon.c src/av1_coeff.c src/av1_symbol.c \
-    src/shared/av1_cdf.c src/base.c "$libaom" -lm -lpthread \
+    src/encoder/av1_transform_forward.c \
+    src/codec/av1_recon.c src/codec/av1_coeff.c src/codec/av1_symbol.c \
+    src/codec/av1_cdf.c src/codec/av1_dsp.c src/base.c \
+    "$libaom" -lm -lpthread \
     -o "$work/transform-reference"
 "$work/transform-reference"
 echo "encoder transform reference: 1003 libaom vectors exact"

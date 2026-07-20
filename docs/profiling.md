@@ -465,9 +465,9 @@ replaced an unmatched six-byte-per-pixel margin with exact non-reduced motion
 storage and omits inter-prediction scratch for reduced-still frames without
 intra block copy.
 
-The release link now strips non-runtime symbols. `src/av1.c` and `src/avif.c`
-join the existing cold `-Os` set; entropy, coefficient, prediction, transform,
-and filter translation units remain at `-O2`.
+The release link now strips non-runtime symbols. `src/decoder/av1.c` and
+`src/decoder/avif.c` join the existing cold `-Os` set; entropy, coefficient,
+prediction, transform, and filter translation units remain at `-O2`.
 
 | Static PIE measurement | Round-one baseline | Round-two result | Change |
 | --- | ---: | ---: | ---: |

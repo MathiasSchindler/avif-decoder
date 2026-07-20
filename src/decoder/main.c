@@ -1,5 +1,5 @@
 #include "bmff.h"
-#include "platform.h"
+#include "platform/platform.h"
 #include "png.h"
 #include "task_pool.h"
 #include <stddef.h>

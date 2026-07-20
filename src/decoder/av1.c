@@ -1,7 +1,9 @@
 #include "av1.h"
 #include "av1_bitstream.h"
+#include "av1_copy.h"
 #include "av1_filter.h"
 #include "av1_metadata.h"
+#include "av1_parse.h"
 #include "av1_predict.h"
 #include "av1_profile.h"
 #include "av1_tile.h"
@@ -18,69 +20,6 @@
 #define AV1_OBU_REDUNDANT_FRAME_HEADER 7U
 #define AV1_OBU_TILE_LIST 8U
 #define AV1_OBU_PADDING 15U
-
-typedef struct {
-    uint8_t profile;
-    uint8_t still_picture;
-    uint8_t reduced_still_picture_header;
-    uint8_t level;
-    uint8_t tier;
-    uint8_t frame_width_bits;
-    uint8_t frame_height_bits;
-    uint8_t frame_id_numbers_present;
-    uint8_t delta_frame_id_length;
-    uint8_t additional_frame_id_length;
-    uint8_t use_128x128_superblock;
-    uint8_t enable_filter_intra;
-    uint8_t enable_intra_edge_filter;
-    uint8_t enable_interintra_compound;
-    uint8_t enable_masked_compound;
-    uint8_t enable_warped_motion;
-    uint8_t enable_dual_filter;
-    uint8_t enable_order_hint;
-    uint8_t enable_jnt_comp;
-    uint8_t enable_ref_frame_mvs;
-    uint8_t order_hint_bits;
-    uint8_t seq_force_screen_content_tools;
-    uint8_t seq_force_integer_mv;
-    uint8_t enable_superres;
-    uint8_t enable_cdef;
-    uint8_t enable_restoration;
-    uint8_t bit_depth;
-    uint8_t monochrome;
-    uint8_t subsampling_x;
-    uint8_t subsampling_y;
-    uint8_t chroma_sample_position;
-    uint8_t separate_uv_delta_q;
-    uint8_t color_range;
-    uint8_t film_grain_params_present;
-    uint8_t timing_info_present;
-    uint8_t decoder_model_info_present;
-    uint8_t equal_picture_interval;
-    uint8_t buffer_delay_length;
-    uint8_t buffer_removal_time_length;
-    uint8_t frame_presentation_time_length;
-    uint8_t selected_operating_point;
-    uint8_t operating_points_count;
-    uint16_t operating_point_idc[32];
-    uint8_t operating_point_level[32];
-    uint8_t operating_point_tier[32];
-    uint8_t decoder_model_present[32];
-    uint8_t low_delay_mode[32];
-    uint8_t initial_display_delay_present[32];
-    uint8_t initial_display_delay_minus_1[32];
-    uint32_t decoder_buffer_delay[32];
-    uint32_t encoder_buffer_delay[32];
-    uint16_t color_primaries;
-    uint16_t transfer_characteristics;
-    uint16_t matrix_coefficients;
-    uint32_t num_units_in_display_tick;
-    uint32_t time_scale;
-    uint32_t num_ticks_per_picture_minus_1;
-    uint32_t num_units_in_decoding_tick;
-    uint32_t max_width;
-    uint32_t max_height;
-} Av1Sequence;
 
 typedef struct {
     uint32_t frame_width;
@@ -302,222 +241,6 @@ static int av1_stream_range_equal(const Av1Stream *stream,
         }
     }
     return 1;
-}
-
-static AvifdecStatus av1_parse_color_config(Av1Bits *bits, Av1Sequence *sequence) {
-    uint8_t high_bitdepth = (uint8_t)av1_bits_read(bits, 1U);
-    uint8_t color_description_present;
-
-    if (sequence->profile == 2U && high_bitdepth) {
-        sequence->bit_depth = av1_bits_read(bits, 1U) ? 12U : 10U;
-    } else if (sequence->profile <= 2U) {
-        sequence->bit_depth = high_bitdepth ? 10U : 8U;
-    } else {
-        return AVIFDEC_INVALID_DATA;
-    }
-    sequence->monochrome = sequence->profile == 1U ? 0U : (uint8_t)av1_bits_read(bits, 1U);
-    color_description_present = (uint8_t)av1_bits_read(bits, 1U);
-    if (color_description_present) {
-        sequence->color_primaries = (uint16_t)av1_bits_read(bits, 8U);
-        sequence->transfer_characteristics = (uint16_t)av1_bits_read(bits, 8U);
-        sequence->matrix_coefficients = (uint16_t)av1_bits_read(bits, 8U);
-    } else {
-        sequence->color_primaries = 2U;
-        sequence->transfer_characteristics = 2U;
-        sequence->matrix_coefficients = 2U;
-    }
-    if (sequence->monochrome) {
-        sequence->color_range = (uint8_t)av1_bits_read(bits, 1U);
-        sequence->subsampling_x = 1U;
-        sequence->subsampling_y = 1U;
-        sequence->chroma_sample_position = 0U;
-        sequence->separate_uv_delta_q = 0U;
-        return bits->status;
-    }
-    if (sequence->color_primaries == 1U && sequence->transfer_characteristics == 13U &&
-        sequence->matrix_coefficients == 0U) {
-        sequence->color_range = 1U;
-        sequence->subsampling_x = 0U;
-        sequence->subsampling_y = 0U;
-    } else {
-        sequence->color_range = (uint8_t)av1_bits_read(bits, 1U);
-        if (sequence->profile == 0U) {
-            sequence->subsampling_x = 1U;
-            sequence->subsampling_y = 1U;
-        } else if (sequence->profile == 1U) {
-            sequence->subsampling_x = 0U;
-            sequence->subsampling_y = 0U;
-        } else if (sequence->bit_depth == 12U) {
-            sequence->subsampling_x = (uint8_t)av1_bits_read(bits, 1U);
-            sequence->subsampling_y = sequence->subsampling_x
-                                      ? (uint8_t)av1_bits_read(bits, 1U) : 0U;
-        } else {
-            sequence->subsampling_x = 1U;
-            sequence->subsampling_y = 0U;
-        }
-        sequence->chroma_sample_position = sequence->subsampling_x && sequence->subsampling_y
-                                           ? (uint8_t)av1_bits_read(bits, 2U) : 0U;
-    }
-    sequence->separate_uv_delta_q = (uint8_t)av1_bits_read(bits, 1U);
-    return bits->status;
-}
-
-static AvifdecStatus av1_parse_sequence_header(
-    Av1Bits *bits,
-    uint8_t selected_operating_point,
-    Av1Sequence *sequence) {
-    uint8_t decoder_model_info_present = 0U;
-    uint8_t initial_display_delay_present = 0U;
-    uint8_t buffer_delay_length = 0U;
-    uint8_t operating_points_minus_one;
-    uint8_t index;
-
-    avifdec_memory_fill(sequence, 0U, sizeof(*sequence));
-    sequence->selected_operating_point = selected_operating_point;
-    sequence->profile = (uint8_t)av1_bits_read(bits, 3U);
-    sequence->still_picture = (uint8_t)av1_bits_read(bits, 1U);
-    sequence->reduced_still_picture_header = (uint8_t)av1_bits_read(bits, 1U);
-    if (sequence->profile > 2U || (sequence->reduced_still_picture_header && !sequence->still_picture)) {
-        return AVIFDEC_INVALID_DATA;
-    }
-    if (sequence->reduced_still_picture_header) {
-        if (selected_operating_point != 0U) {
-            return AVIFDEC_INVALID_ARGUMENT;
-        }
-        sequence->level = (uint8_t)av1_bits_read(bits, 5U);
-        sequence->operating_point_level[0] = sequence->level;
-        operating_points_minus_one = 0U;
-    } else {
-        sequence->timing_info_present = (uint8_t)av1_bits_read(bits, 1U);
-
-        if (sequence->timing_info_present) {
-            sequence->num_units_in_display_tick = av1_bits_read(bits, 32U);
-            sequence->time_scale = av1_bits_read(bits, 32U);
-            if (sequence->num_units_in_display_tick == 0U ||
-                sequence->time_scale == 0U) {
-                return AVIFDEC_INVALID_DATA;
-            }
-            sequence->equal_picture_interval = (uint8_t)av1_bits_read(bits, 1U);
-            if (sequence->equal_picture_interval) {
-                sequence->num_ticks_per_picture_minus_1 =
-                    av1_bits_uvlc(bits);
-            }
-            decoder_model_info_present = (uint8_t)av1_bits_read(bits, 1U);
-            if (decoder_model_info_present) {
-                sequence->decoder_model_info_present = 1U;
-                buffer_delay_length = (uint8_t)(av1_bits_read(bits, 5U) + 1U);
-                sequence->buffer_delay_length = buffer_delay_length;
-                sequence->num_units_in_decoding_tick =
-                    av1_bits_read(bits, 32U);
-                if (sequence->num_units_in_decoding_tick == 0U) {
-                    return AVIFDEC_INVALID_DATA;
-                }
-                sequence->buffer_removal_time_length = (uint8_t)(av1_bits_read(bits, 5U) + 1U);
-                sequence->frame_presentation_time_length = (uint8_t)(av1_bits_read(bits, 5U) + 1U);
-            }
-        }
-        initial_display_delay_present = (uint8_t)av1_bits_read(bits, 1U);
-        operating_points_minus_one = (uint8_t)av1_bits_read(bits, 5U);
-        sequence->operating_points_count = (uint8_t)(operating_points_minus_one + 1U);
-        for (index = 0U; index <= operating_points_minus_one; ++index) {
-            uint16_t operating_point_idc = (uint16_t)av1_bits_read(bits, 12U);
-            uint8_t level = (uint8_t)av1_bits_read(bits, 5U);
-            uint8_t tier = level > 7U ? (uint8_t)av1_bits_read(bits, 1U) : 0U;
-            uint8_t model_for_op = 0U;
-
-            (void)operating_point_idc;
-            sequence->operating_point_idc[index] = operating_point_idc;
-            sequence->operating_point_level[index] = level;
-            sequence->operating_point_tier[index] = tier;
-            if (decoder_model_info_present) {
-                model_for_op = (uint8_t)av1_bits_read(bits, 1U);
-                sequence->decoder_model_present[index] = model_for_op;
-                if (model_for_op) {
-                    sequence->decoder_buffer_delay[index] =
-                        av1_bits_read(bits, buffer_delay_length);
-                    sequence->encoder_buffer_delay[index] =
-                        av1_bits_read(bits, buffer_delay_length);
-                    sequence->low_delay_mode[index] =
-                        (uint8_t)av1_bits_read(bits, 1U);
-                }
-            }
-            if (initial_display_delay_present && av1_bits_read(bits, 1U)) {
-                sequence->initial_display_delay_present[index] = 1U;
-                sequence->initial_display_delay_minus_1[index] =
-                    (uint8_t)av1_bits_read(bits, 4U);
-            }
-        }
-        if (selected_operating_point > operating_points_minus_one) {
-            return AVIFDEC_INVALID_ARGUMENT;
-        }
-        sequence->level =
-            sequence->operating_point_level[selected_operating_point];
-        sequence->tier =
-            sequence->operating_point_tier[selected_operating_point];
-    }
-    sequence->frame_width_bits = (uint8_t)(av1_bits_read(bits, 4U) + 1U);
-    sequence->frame_height_bits = (uint8_t)(av1_bits_read(bits, 4U) + 1U);
-    sequence->max_width = av1_bits_read(bits, sequence->frame_width_bits) + 1U;
-    sequence->max_height = av1_bits_read(bits, sequence->frame_height_bits) + 1U;
-    if (!sequence->reduced_still_picture_header) {
-        sequence->frame_id_numbers_present = (uint8_t)av1_bits_read(bits, 1U);
-        if (sequence->frame_id_numbers_present) {
-            sequence->delta_frame_id_length = (uint8_t)(av1_bits_read(bits, 4U) + 2U);
-            sequence->additional_frame_id_length = (uint8_t)(av1_bits_read(bits, 3U) + 1U);
-        }
-    }
-    sequence->use_128x128_superblock = (uint8_t)av1_bits_read(bits, 1U);
-    sequence->enable_filter_intra = (uint8_t)av1_bits_read(bits, 1U);
-    sequence->enable_intra_edge_filter = (uint8_t)av1_bits_read(bits, 1U);
-    if (!sequence->reduced_still_picture_header) {
-        uint8_t screen_content_tools;
-
-        sequence->enable_interintra_compound =
-            (uint8_t)av1_bits_read(bits, 1U);
-        sequence->enable_masked_compound =
-            (uint8_t)av1_bits_read(bits, 1U);
-        sequence->enable_warped_motion = (uint8_t)av1_bits_read(bits, 1U);
-        sequence->enable_dual_filter = (uint8_t)av1_bits_read(bits, 1U);
-        sequence->enable_order_hint = (uint8_t)av1_bits_read(bits, 1U);
-        if (sequence->enable_order_hint) {
-            sequence->enable_jnt_comp = (uint8_t)av1_bits_read(bits, 1U);
-            sequence->enable_ref_frame_mvs = (uint8_t)av1_bits_read(bits, 1U);
-        }
-        screen_content_tools = av1_bits_read(bits, 1U) ? 2U
-                               : (uint8_t)av1_bits_read(bits, 1U);
-        sequence->seq_force_screen_content_tools = screen_content_tools;
-        if (screen_content_tools > 0U) {
-            sequence->seq_force_integer_mv = av1_bits_read(bits, 1U) ? 2U
-                                             : (uint8_t)av1_bits_read(bits, 1U);
-        } else {
-            sequence->seq_force_integer_mv = 2U;
-        }
-        if (sequence->enable_order_hint) {
-            sequence->order_hint_bits = (uint8_t)(av1_bits_read(bits, 3U) + 1U);
-        }
-    } else {
-        sequence->seq_force_screen_content_tools = 2U;
-        sequence->seq_force_integer_mv = 2U;
-        sequence->operating_points_count = 1U;
-    }
-    sequence->enable_superres = (uint8_t)av1_bits_read(bits, 1U);
-    sequence->enable_cdef = (uint8_t)av1_bits_read(bits, 1U);
-    sequence->enable_restoration = (uint8_t)av1_bits_read(bits, 1U);
-    if (av1_parse_color_config(bits, sequence) != AVIFDEC_OK) {
-        return bits->status;
-    }
-    if (av1_profile_validate(
-            sequence->profile, sequence->bit_depth,
-            sequence->monochrome, sequence->subsampling_x,
-            sequence->subsampling_y) != AVIFDEC_OK ||
-        av1_level_validate_dimensions(
-            sequence->level, sequence->max_width,
-            sequence->max_height, 0) != AVIFDEC_OK) {
-        return AVIFDEC_INVALID_DATA;
-    }
-    sequence->film_grain_params_present = (uint8_t)av1_bits_read(bits, 1U);
-    if (bits->status != AVIFDEC_OK) return bits->status;
-    return av1_trailing_bits(bits);
 }
 
 static unsigned int av1_tile_log2(uint32_t block_size, uint32_t target) {
@@ -744,58 +467,11 @@ static void av1_store_current_motion(
  * per-plane (or flat-array) copy ranges and dispatches it across
  * state->executor when profitable, falling back to an equivalent serial
  * copy otherwise. Callers validate shapes before building a plan; the
- * dispatched range functions only validate the parallel range itself,
- * matching the defensive checks used by the other executor-aware stages
- * in this file (see av1_cdef_filter_ranges / av1_restoration_filter_ranges
- * in av1_cdef.c / av1_restoration_filter.c). None of these helpers retain
- * the executor or allocate decoder workspace; the plan structures are
- * fixed-size (bounded by the 3 planes a frame can have) and live on the
- * caller's stack for the duration of a single synchronous dispatch.
+ * range functions in av1_copy.c only validate the parallel range itself.
+ * Dispatch remains here with the decoder orchestration. None of these
+ * helpers retain the executor or allocate decoder workspace; plans are
+ * fixed-size and live on the caller's stack during synchronous dispatch.
  */
-typedef struct {
-    uint16_t *dst_data[3];
-    size_t dst_stride[3];
-    const uint16_t *src_data[3];
-    size_t src_stride[3];
-    uint32_t width[3];
-    size_t row_offset[4];
-    unsigned int plane_count;
-} Av1PlaneCopyPlan;
-
-static AvifdecStatus av1_plane_copy_range(
-    size_t begin,
-    size_t end,
-    size_t worker_index,
-    void *arg) {
-    const Av1PlaneCopyPlan *plan = (const Av1PlaneCopyPlan *)arg;
-    unsigned int plane;
-
-    (void)worker_index;
-    if (plan == 0 || begin > end ||
-        end > plan->row_offset[plan->plane_count]) {
-        return AVIFDEC_INVALID_ARGUMENT;
-    }
-    for (plane = 0U; plane < plan->plane_count; ++plane) {
-        size_t plane_begin = plan->row_offset[plane];
-        size_t plane_end = plan->row_offset[plane + 1U];
-        size_t range_begin = begin > plane_begin ? begin : plane_begin;
-        size_t range_end = end < plane_end ? end : plane_end;
-        size_t row;
-
-        for (row = range_begin; row < range_end; ++row) {
-            size_t plane_row = row - plane_begin;
-
-            avifdec_memory_copy(
-                plan->dst_data[plane] +
-                    plane_row * plan->dst_stride[plane],
-                plan->src_data[plane] +
-                    plane_row * plan->src_stride[plane],
-                (size_t)plan->width[plane] * sizeof(uint16_t));
-        }
-    }
-    return AVIFDEC_OK;
-}
-
 static AvifdecStatus av1_plane_copy_dispatch(
     const AvifdecExecutor *executor,
     Av1PlaneCopyPlan *plan) {
@@ -808,28 +484,6 @@ static AvifdecStatus av1_plane_copy_dispatch(
             av1_plane_copy_range, plan);
     }
     return av1_plane_copy_range(0U, total_rows, 0U, plan);
-}
-
-typedef struct {
-    void *dst;
-    const void *src;
-    size_t element_size;
-} Av1FlatCopyPlan;
-
-static AvifdecStatus av1_flat_copy_range(
-    size_t begin,
-    size_t end,
-    size_t worker_index,
-    void *arg) {
-    const Av1FlatCopyPlan *plan = (const Av1FlatCopyPlan *)arg;
-
-    (void)worker_index;
-    if (plan == 0 || begin > end) return AVIFDEC_INVALID_ARGUMENT;
-    avifdec_memory_copy(
-        (unsigned char *)plan->dst + begin * plan->element_size,
-        (const unsigned char *)plan->src + begin * plan->element_size,
-        (end - begin) * plan->element_size);
-    return AVIFDEC_OK;
 }
 
 /* Splits one large flat-array memcpy (e.g. a saved motion field) into
@@ -892,106 +546,6 @@ static AvifdecStatus av1_copy_planes(
         plan.row_offset[plane + 1U] = plan.row_offset[plane] + plane_height;
     }
     return av1_plane_copy_dispatch(executor, &plan);
-}
-
-typedef struct {
-    AvifdecImage *image;
-    const Av1FramePlanes *source;
-    unsigned int plane;
-    uint32_t output_plane_width;
-    uint32_t output_plane_height;
-    uint32_t source_plane_width;
-    uint32_t source_plane_height;
-    uint64_t divisor;
-} Av1ImageScaleContext;
-
-typedef struct {
-    Av1ImageScaleContext planes[3];
-    size_t row_offset[4];
-    unsigned int plane_count;
-} Av1ImageScalePlan;
-
-static void av1_copy_image_scale_row(
-    const Av1ImageScaleContext *ctx,
-    uint32_t row) {
-    uint64_t output_y0 = (uint64_t)row * ctx->source_plane_height;
-    uint64_t output_y1 = (uint64_t)(row + 1U) * ctx->source_plane_height;
-    uint32_t source_y0 = (uint32_t)(output_y0 / ctx->output_plane_height);
-    uint32_t source_y1 =
-        (uint32_t)((output_y1 + ctx->output_plane_height - 1U) /
-                   ctx->output_plane_height);
-    uint32_t column;
-
-    for (column = 0U; column < ctx->output_plane_width; ++column) {
-        uint64_t output_x0 = (uint64_t)column * ctx->source_plane_width;
-        uint64_t output_x1 = (uint64_t)(column + 1U) * ctx->source_plane_width;
-        uint32_t source_x0 =
-            (uint32_t)(output_x0 / ctx->output_plane_width);
-        uint32_t source_x1 =
-            (uint32_t)((output_x1 + ctx->output_plane_width - 1U) /
-                       ctx->output_plane_width);
-        uint64_t sum = 0U;
-        uint32_t source_y;
-
-        for (source_y = source_y0; source_y < source_y1; ++source_y) {
-            uint64_t source_cell_y0 =
-                (uint64_t)source_y * ctx->output_plane_height;
-            uint64_t source_cell_y1 = source_cell_y0 + ctx->output_plane_height;
-            uint64_t overlap_y0 =
-                output_y0 > source_cell_y0 ? output_y0 : source_cell_y0;
-            uint64_t overlap_y1 =
-                output_y1 < source_cell_y1 ? output_y1 : source_cell_y1;
-            uint64_t weight_y = overlap_y1 - overlap_y0;
-            uint32_t source_x;
-
-            for (source_x = source_x0; source_x < source_x1; ++source_x) {
-                uint64_t source_cell_x0 =
-                    (uint64_t)source_x * ctx->output_plane_width;
-                uint64_t source_cell_x1 =
-                    source_cell_x0 + ctx->output_plane_width;
-                uint64_t overlap_x0 =
-                    output_x0 > source_cell_x0 ? output_x0 : source_cell_x0;
-                uint64_t overlap_x1 =
-                    output_x1 < source_cell_x1 ? output_x1 : source_cell_x1;
-                uint64_t weight_x = overlap_x1 - overlap_x0;
-
-                sum += ctx->source->data[ctx->plane][
-                    (size_t)source_y * ctx->source->stride[ctx->plane] +
-                    source_x] * weight_x * weight_y;
-            }
-        }
-        ctx->image->planes[ctx->plane][
-            (size_t)row * ctx->image->strides[ctx->plane] + column] =
-            (uint16_t)((sum + ctx->divisor / 2U) / ctx->divisor);
-    }
-}
-
-static AvifdecStatus av1_copy_image_scale_range(
-    size_t begin,
-    size_t end,
-    size_t worker_index,
-    void *arg) {
-    Av1ImageScalePlan *plan = (Av1ImageScalePlan *)arg;
-    unsigned int plane;
-
-    (void)worker_index;
-    if (plan == 0 || begin > end ||
-        end > plan->row_offset[plan->plane_count]) {
-        return AVIFDEC_INVALID_ARGUMENT;
-    }
-    for (plane = 0U; plane < plan->plane_count; ++plane) {
-        size_t plane_begin = plan->row_offset[plane];
-        size_t plane_end = plan->row_offset[plane + 1U];
-        size_t range_begin = begin > plane_begin ? begin : plane_begin;
-        size_t range_end = end < plane_end ? end : plane_end;
-        size_t row;
-
-        for (row = range_begin; row < range_end; ++row) {
-            av1_copy_image_scale_row(
-                &plan->planes[plane], (uint32_t)(row - plane_begin));
-        }
-    }
-    return AVIFDEC_OK;
 }
 
 static AvifdecStatus av1_copy_image_scale_dispatch(
@@ -3046,16 +2600,6 @@ static AvifdecStatus av1_skip_restoration(Av1Bits *bits,
         }
     }
     return bits->status;
-}
-
-static int av1_layer_in_operating_point(const Av1Sequence *sequence,
-                                        uint8_t temporal_id,
-                                        uint8_t spatial_id) {
-    uint16_t idc = sequence->operating_point_idc[
-        sequence->selected_operating_point];
-
-    return idc == 0U || (((idc >> temporal_id) & 1U) != 0U &&
-                         ((idc >> (spatial_id + 8U)) & 1U) != 0U);
 }
 
 static void av1_parse_superres(Av1Bits *bits,

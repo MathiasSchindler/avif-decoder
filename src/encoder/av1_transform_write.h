@@ -1,6 +1,7 @@
 #ifndef AVIFENC_AV1_TRANSFORM_WRITE_H
 #define AVIFENC_AV1_TRANSFORM_WRITE_H
 
+#include "encoder/av1_transform_forward.h"
 #include "encoder/av1_symbol_write.h"
 #include "av1_coeff.h"
 #include "av1_recon.h"
@@ -18,17 +19,9 @@ typedef struct {
     uint8_t *matrix_workspace;
 } AvifencAv1TransformState;
 
-AvifencStatus avifenc_av1_forward_dct_4x4(const int16_t *input,
-                                           size_t stride,
-                                           int32_t output[16]);
 AvifencStatus avifenc_av1_quantize_4x4(const int32_t input[16],
                                        uint8_t quantizer,
                                        AvifencAv1TransformBlock *block);
-AvifencStatus avifenc_av1_forward_dct(const int16_t *input,
-                                      size_t stride,
-                                      Av1TxSize tx_size,
-                                      int32_t *output,
-                                      size_t output_capacity);
 AvifencStatus avifenc_av1_quantize(const int32_t *input,
                                    Av1TxSize tx_size,
                                    uint8_t quantizer,

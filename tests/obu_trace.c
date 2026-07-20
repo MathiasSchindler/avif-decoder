@@ -1,6 +1,6 @@
 #include "av1.h"
 #include "base.h"
-#include "platform.h"
+#include "platform/platform.h"
 #include <stddef.h>
 #include <stdint.h>
 
