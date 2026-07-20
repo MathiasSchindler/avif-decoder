@@ -108,10 +108,11 @@ YUV420. Odd source dimensions repeat the final row or column to satisfy the
 planar encoder's even-dimension contract. Supported dimensions are preserved;
 raw YUV and image-file inputs are never resized.
 
-Speed 0, the default, evaluates DC, vertical, horizontal, smooth, and Paeth
-luma prediction. Speed 1 evaluates DC, vertical, and horizontal. Speed 2 uses
-the fixed-DC baseline. All levels retain DC chroma prediction and 4x4 blocks
-and transforms; speed changes search work, not the supported file format.
+Speed 0, the default, performs the broadest bounded intra-mode, angle-delta,
+and partition search. Speed 1 narrows the delta and partition budgets. Speed 2
+uses the classification-only 4x4 baseline. Eligible blocks can select all AV1
+luma and chroma intra directions, smooth variants, Paeth, CfL, filter intra,
+and exact palettes; speed changes search work, not the supported file format.
 
 The encoder writes one 8-bit Main-profile reduced-still key frame with a
 deterministic uniform tile layout. `--workers 1..32` is orthogonal to speed and

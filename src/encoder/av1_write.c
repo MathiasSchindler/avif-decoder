@@ -143,7 +143,7 @@ static AvifencStatus av1_write_sequence_header(
 
     /* use_128x128_superblock and the reduced-still sequence tool flags. */
     (void)avifenc_bit_writer_write(writer, 0U, 1U);
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
+    (void)avifenc_bit_writer_write(writer, 1U, 1U);
     (void)avifenc_bit_writer_write(writer, 0U, 1U);
     (void)avifenc_bit_writer_write(writer, 0U, 1U);
     (void)avifenc_bit_writer_write(writer, 0U, 1U);
@@ -183,7 +183,9 @@ static AvifencStatus av1_write_frame_header(AvifencBitWriter *writer,
         2304U, sb_cols * sb_rows);
     unsigned int index;
 
-    /* disable_cdf_update, allow_screen_content_tools, render_size_different. */
+    /* disable_cdf_update and per-frame screen-content tool selection. */
+    (void)avifenc_bit_writer_write(writer, 1U, 1U);
+    (void)avifenc_bit_writer_write(writer, 1U, 1U);
     (void)avifenc_bit_writer_write(writer, 1U, 1U);
     (void)avifenc_bit_writer_write(writer, 0U, 1U);
     (void)avifenc_bit_writer_write(writer, 0U, 1U);

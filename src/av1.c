@@ -2421,6 +2421,8 @@ static AvifdecStatus av1_trace_tile(Av1TraceState *state,
     state->residual.current_frame_width = frame->frame_width;
     state->residual.current_frame_height = frame->frame_height;
     state->residual.current_order_hint = frame->order_hint;
+    state->residual.enable_intra_edge_filter =
+        sequence->enable_intra_edge_filter;
     state->residual.enable_order_hint = sequence->enable_order_hint;
     state->residual.order_hint_bits = sequence->order_hint_bits;
     state->residual.tx_mode = frame->tx_mode;

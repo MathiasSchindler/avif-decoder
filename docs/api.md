@@ -37,13 +37,14 @@ and `chroma_sample_position` is 0 through 3.
 
 Quantizers 1 through 255 and speed levels 0 through `AVIFENC_MAX_SPEED` (2)
 are supported. Quantizer 0, including lossless encoding, returns
-`AVIFENC_UNSUPPORTED`. Speed 0 searches DC, vertical, horizontal, smooth, and
-Paeth luma predictors; speed 1 searches DC, vertical, and horizontal; speed 2
-retains the fixed-DC baseline. Every speed uses DC chroma prediction and may
-emit square blocks and DCT transforms through 32x32. Speeds 0 and 1 additionally
-evaluate activity-qualified horizontal and vertical partitions with the six
-2:1 DCT shapes from 4x8 through 32x16; speed 2 follows a classification-only
-partition path. Lower quantizers generally preserve more detail and increase
+`AVIFENC_UNSUPPORTED`. Eligible blocks search all luma and chroma intra modes,
+including legal directional deltas, smooth variants, Paeth, CfL, filter intra,
+and exact palettes. Speed 0 uses the broadest bounded mode, delta, and partition
+budgets; speed 1 narrows delta and partition trials; speed 2 follows a
+classification-only 4x4 path. Speeds 0 and 1 may emit square blocks and
+transforms through 32x32 plus the six 2:1 shapes from 4x8 through 32x16.
+Prediction and transform rate costs share one decision, with U and V distortion
+weighted twice. Lower quantizers generally preserve more detail and increase
 output size. Speed changes bounded search work, not the format surface or
 memory requirement.
 

@@ -88,6 +88,20 @@ static const uint16_t av1_default_palette_uv_mode[2][3] = {
     { 32461U, 32768U, 0U }, { 21488U, 32768U, 0U }
 };
 
+void av1_palette_cdfs_init(Av1PaletteCdfs *cdfs) {
+    if (cdfs == 0) return;
+    avifdec_memory_copy(cdfs->y_mode, av1_default_palette_y_mode,
+                        sizeof(cdfs->y_mode));
+    avifdec_memory_copy(cdfs->uv_mode, av1_default_palette_uv_mode,
+                        sizeof(cdfs->uv_mode));
+    avifdec_memory_copy(cdfs->y_size, av1_default_palette_y_size,
+                        sizeof(cdfs->y_size));
+    avifdec_memory_copy(cdfs->uv_size, av1_default_palette_uv_size,
+                        sizeof(cdfs->uv_size));
+    avifdec_memory_copy(cdfs->color, av1_default_palette_color,
+                        sizeof(cdfs->color));
+}
+
 static void av1_tile_checksum_bytes(uint64_t *checksum,
                                     const void *data,
                                     size_t size) {

@@ -3307,12 +3307,21 @@ static AvifdecStatus av1_tile_predict_chunk(
             state->dequant_params.bit_depth);
     }
     if (mode >= 1U && mode <= 8U) {
+        uint16_t angle = (uint16_t)(
+            directional_angle[mode] + 3 * angle_delta);
+
+        if (!state->enable_intra_edge_filter) {
+            return av1_predict_directional(
+                destination, stride, width, height,
+                state->dequant_params.bit_depth, angle,
+                &prepared.references);
+        }
         filter_type = av1_tile_intra_filter_type(
             state, block, plane, &availability);
         return av1_predict_directional_edges(
             destination, stride, width, height,
             state->dequant_params.bit_depth,
-            (uint16_t)(directional_angle[mode] + 3 * angle_delta),
+            angle,
             filter_type, &prepared);
     }
     if (mode == 9U) {

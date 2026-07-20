@@ -74,11 +74,14 @@ Supported source dimensions are preserved and split into deterministic AV1
 tiles when one tile would exceed width or area limits.
 
 Quantizers 1 through 255 and speed levels 0 through 2 are supported. Speed 0
-searches DC, vertical, horizontal, smooth, and Paeth luma prediction; speed 1
-searches DC, vertical, and horizontal; speed 2 uses DC only. The current
-encoder uses DC chroma prediction, bounded square/horizontal/vertical partition
-decisions through 32x32, square DCT transforms from 4x4 through 32x32, and the
-six corresponding 2:1 rectangular transform shapes. `--workers`
+performs the broadest bounded mode and legal angle-delta search, speed 1 uses
+narrower angle and partition budgets, and speed 2 keeps the classification-only
+4x4 baseline. Eligible blocks can use all AV1 intra directions, smooth variants,
+Paeth, CfL, filter intra, and exact luma or paired chroma palettes. Prediction
+and transform rate-distortion costs are selected together, with doubled chroma
+distortion weight. The encoder supports bounded square/horizontal/vertical
+partition decisions through 32x32, square transforms from 4x4 through 32x32,
+and the six corresponding 2:1 rectangular transform shapes. `--workers`
 selects bounded tile parallelism independently of speed; Linux uses the native
 task pool and macOS currently falls back to serial. It
 is intended as a bounded interoperable baseline rather than a

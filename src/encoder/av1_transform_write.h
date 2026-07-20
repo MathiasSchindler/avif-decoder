@@ -87,6 +87,7 @@ AvifencStatus avifenc_av1_transform_encode(
     uint16_t *reconstruction,
     size_t reconstruction_stride,
     uint8_t quantizer,
+    Av1TxType tx_type,
     int write_tx_type,
     AvifencAv1TransformBlock *block);
 AvifencStatus avifenc_av1_transform_trial(
@@ -104,6 +105,7 @@ AvifencStatus avifenc_av1_transform_trial(
     uint16_t *reconstruction,
     size_t reconstruction_stride,
     uint8_t quantizer,
+    Av1TxType tx_type,
     int write_tx_type,
     AvifencAv1TransformBlock *block,
     uint64_t *distortion,

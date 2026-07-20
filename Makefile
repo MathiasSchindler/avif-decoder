@@ -117,7 +117,7 @@ ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 IMAGE_INPUT_C_SOURCES := src/encoder/image_input.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
-	src/av1_intra.c src/av1_predict.c src/av1_recon.c
+	src/av1_intra.c src/av1_predict.c src/av1_recon.c src/av1_tile_cdf.c
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_TEST_HEADERS := $(wildcard src/*.h src/*.inc src/encoder/*.h \
 	src/shared/*.h)

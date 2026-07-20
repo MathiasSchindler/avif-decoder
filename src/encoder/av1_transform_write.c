@@ -1000,6 +1000,7 @@ static AvifencStatus transform_write_coefficients_sized(
     size_t block_width,
     size_t block_height,
     Av1TxSize tx_size,
+    Av1TxType tx_type,
     int write_tx_type,
     const AvifencAv1TransformBlock *block) {
     Av1CoeffPlaneContext *context = &state->contexts.plane[plane];
@@ -1013,8 +1014,7 @@ static AvifencStatus transform_write_coefficients_sized(
     AvifencStatus status;
 
     avifdec_memory_fill(levels, 0U, sizeof(levels));
-    if (av1_coeff_coding_info(
-            tx_size, AV1_TX_DCT_DCT, &info) != AVIFDEC_OK) {
+    if (av1_coeff_coding_info(tx_size, tx_type, &info) != AVIFDEC_OK) {
         return AVIFENC_INVALID_ARGUMENT;
     }
     skip_context = av1_coeff_txb_skip_context(
@@ -1041,7 +1041,7 @@ static AvifencStatus transform_write_coefficients_sized(
             ? (uint32_t)(-(int64_t)block->quantized[position])
             : (uint32_t)block->quantized[position];
         unsigned int base_context = av1_coeff_base_context(
-            tx_size, AV1_TX_DCT_DCT, levels, position, scan_index,
+            tx_size, tx_type, levels, position, scan_index,
             scan_index == block->eob - 1U);
 
         if (scan_index == block->eob - 1U) {
@@ -1061,7 +1061,7 @@ static AvifencStatus transform_write_coefficients_sized(
         if (status != AVIFENC_OK) return status;
         if (level > TRANSFORM_BASE_LEVELS) {
             unsigned int range_context = av1_coeff_br_context(
-                tx_size, AV1_TX_DCT_DCT, levels, position);
+                tx_size, tx_type, levels, position);
             unsigned int range_tx_context = info.tx_size_context < 3U
                 ? info.tx_size_context : 3U;
             uint32_t remaining = level - 3U;
@@ -1170,6 +1170,7 @@ static uint64_t transform_estimate_cost_sized(
     size_t block_width,
     size_t block_height,
     Av1TxSize tx_size,
+    Av1TxType tx_type,
     int write_tx_type,
     const AvifencAv1TransformBlock *block) {
     const Av1CoeffPlaneContext *context = &state->contexts.plane[plane];
@@ -1181,8 +1182,7 @@ static uint64_t transform_estimate_cost_sized(
     size_t scan_index;
 
     avifdec_memory_fill(levels, 0U, sizeof(levels));
-    if (av1_coeff_coding_info(
-            tx_size, AV1_TX_DCT_DCT, &info) != AVIFDEC_OK) {
+    if (av1_coeff_coding_info(tx_size, tx_type, &info) != AVIFDEC_OK) {
         return UINT64_MAX;
     }
     skip_context = av1_coeff_txb_skip_context(
@@ -1201,7 +1201,7 @@ static uint64_t transform_estimate_cost_sized(
             ? (uint32_t)(-(int64_t)block->quantized[position])
             : (uint32_t)block->quantized[position];
         unsigned int base_context = av1_coeff_base_context(
-            tx_size, AV1_TX_DCT_DCT, levels, position, scan_index,
+            tx_size, tx_type, levels, position, scan_index,
             scan_index == block->eob - 1U);
 
         if (scan_index == block->eob - 1U) {
@@ -1218,7 +1218,7 @@ static uint64_t transform_estimate_cost_sized(
         }
         if (level > TRANSFORM_BASE_LEVELS) {
             unsigned int range_context = av1_coeff_br_context(
-                tx_size, AV1_TX_DCT_DCT, levels, position);
+                tx_size, tx_type, levels, position);
             unsigned int range_tx_context = info.tx_size_context < 3U
                 ? info.tx_size_context : 3U;
             uint32_t remaining = level - 3U;
@@ -1269,6 +1269,7 @@ static AvifencStatus transform_prepare_sized(
     size_t pixel_x,
     size_t pixel_y,
     Av1TxSize tx_size,
+    Av1TxType tx_type,
     uint8_t quantizer,
     AvifencAv1TransformBlock *block) {
     int16_t input[1024];
@@ -1293,8 +1294,23 @@ static AvifencStatus transform_prepare_sized(
     status = avifenc_av1_forward_dct(
         input, tx->width, tx_size, transformed, 1024U);
     if (status != AVIFENC_OK) return status;
-    return avifenc_av1_quantize(
+    status = avifenc_av1_quantize(
         transformed, tx_size, quantizer, block);
+    if (status == AVIFENC_OK && tx_type != AV1_TX_DCT_DCT) {
+        Av1CoeffCodingInfo info;
+        size_t index;
+
+        if (av1_coeff_coding_info(tx_size, tx_type, &info) != AVIFDEC_OK) {
+            return AVIFENC_INVALID_ARGUMENT;
+        }
+        block->eob = 0U;
+        for (index = 0U; index < info.segment_eob; ++index) {
+            if (block->quantized[info.scan[index]] != 0) {
+                block->eob = (uint16_t)(index + 1U);
+            }
+        }
+    }
+    return status;
 }
 
 static AvifencStatus transform_reconstruct_sized(
@@ -1302,6 +1318,7 @@ static AvifencStatus transform_reconstruct_sized(
     size_t pixel_x,
     size_t pixel_y,
     Av1TxSize tx_size,
+    Av1TxType tx_type,
     uint16_t *reconstruction,
     size_t reconstruction_stride,
     uint8_t quantizer,
@@ -1318,11 +1335,11 @@ static AvifencStatus transform_reconstruct_sized(
     params.plane = (uint8_t)plane;
     params.qm_level = 15U;
     decoder_status = av1_recon_dequantize(
-        block->quantized, count, tx_size, AV1_TX_DCT_DCT,
+        block->quantized, count, tx_size, tx_type,
         &params, dequantized, count);
     if (decoder_status == AVIFDEC_OK) {
         decoder_status = av1_recon_inverse_transform(
-            dequantized, count, tx_size, AV1_TX_DCT_DCT,
+            dequantized, count, tx_size, tx_type,
             8U, 0U, residual, count);
     }
     if (decoder_status == AVIFDEC_OK) {
@@ -1351,6 +1368,7 @@ AvifencStatus avifenc_av1_transform_encode(
     uint16_t *reconstruction,
     size_t reconstruction_stride,
     uint8_t quantizer,
+    Av1TxType tx_type,
     int write_tx_type,
     AvifencAv1TransformBlock *block) {
     const Av1TxSizeInfo *tx;
@@ -1359,7 +1377,8 @@ AvifencStatus avifenc_av1_transform_encode(
     AvifencStatus status;
 
     if (state == 0 || writer == 0 || source == 0 || reconstruction == 0 ||
-        block == 0 || plane >= 3U || !transform_size_supported(tx_size) ||
+        block == 0 || plane >= 3U || tx_type >= AV1_TX_TYPES ||
+        !transform_size_supported(tx_size) ||
         source_stride < source_width || write_tx_type < 0 ||
         write_tx_type > 1) {
         return AVIFENC_INVALID_ARGUMENT;
@@ -1370,7 +1389,8 @@ AvifencStatus avifenc_av1_transform_encode(
         y4 + (tx->height >> 2U) > state->contexts.plane[plane].height4) {
         return AVIFENC_INVALID_ARGUMENT;
     }
-    if (tx_size == AV1_TX_4X4 && block_width == 4U && block_height == 4U) {
+    if (tx_type == AV1_TX_DCT_DCT && tx_size == AV1_TX_4X4 &&
+        block_width == 4U && block_height == 4U) {
         return avifenc_av1_transform_encode_4x4(
             state, writer, plane, x4, y4, source, source_stride,
             source_width, source_height, reconstruction,
@@ -1379,14 +1399,14 @@ AvifencStatus avifenc_av1_transform_encode(
     status = transform_prepare_sized(
         source, source_stride, source_width, source_height,
         reconstruction, reconstruction_stride, pixel_x, pixel_y,
-        tx_size, quantizer, block);
+        tx_size, tx_type, quantizer, block);
     if (status != AVIFENC_OK) return status;
     status = transform_write_coefficients_sized(
         state, writer, plane, x4, y4, block_width, block_height,
-        tx_size, write_tx_type, block);
+        tx_size, tx_type, write_tx_type, block);
     if (status != AVIFENC_OK) return status;
     return transform_reconstruct_sized(
-        plane, pixel_x, pixel_y, tx_size, reconstruction,
+        plane, pixel_x, pixel_y, tx_size, tx_type, reconstruction,
         reconstruction_stride, quantizer, block);
 }
 
@@ -1405,6 +1425,7 @@ AvifencStatus avifenc_av1_transform_trial(
     uint16_t *reconstruction,
     size_t reconstruction_stride,
     uint8_t quantizer,
+    Av1TxType tx_type,
     int write_tx_type,
     AvifencAv1TransformBlock *block,
     uint64_t *distortion,
@@ -1418,6 +1439,7 @@ AvifencStatus avifenc_av1_transform_trial(
 
     if (state == 0 || source == 0 || reconstruction == 0 || block == 0 ||
         distortion == 0 || rate_cost == 0 || plane >= 3U ||
+        tx_type >= AV1_TX_TYPES ||
         !transform_size_supported(tx_size) || source_stride < source_width ||
         write_tx_type < 0 || write_tx_type > 1) {
         return AVIFENC_INVALID_ARGUMENT;
@@ -1428,7 +1450,8 @@ AvifencStatus avifenc_av1_transform_trial(
         y4 + (tx->height >> 2U) > state->contexts.plane[plane].height4) {
         return AVIFENC_INVALID_ARGUMENT;
     }
-    if (tx_size == AV1_TX_4X4 && block_width == 4U && block_height == 4U) {
+    if (tx_type == AV1_TX_DCT_DCT && tx_size == AV1_TX_4X4 &&
+        block_width == 4U && block_height == 4U) {
         return avifenc_av1_transform_trial_4x4(
             state, plane, x4, y4, source, source_stride,
             source_width, source_height, reconstruction,
@@ -1438,14 +1461,14 @@ AvifencStatus avifenc_av1_transform_trial(
     status = transform_prepare_sized(
         source, source_stride, source_width, source_height,
         reconstruction, reconstruction_stride, pixel_x, pixel_y,
-        tx_size, quantizer, block);
+        tx_size, tx_type, quantizer, block);
     if (status != AVIFENC_OK) return status;
     *rate_cost = transform_estimate_cost_sized(
         state, plane, x4, y4, block_width, block_height,
-        tx_size, write_tx_type, block);
+        tx_size, tx_type, write_tx_type, block);
     if (*rate_cost == UINT64_MAX) return AVIFENC_INVALID_ARGUMENT;
     status = transform_reconstruct_sized(
-        plane, pixel_x, pixel_y, tx_size, reconstruction,
+        plane, pixel_x, pixel_y, tx_size, tx_type, reconstruction,
         reconstruction_stride, quantizer, block);
     if (status != AVIFENC_OK) return status;
     *distortion = 0U;

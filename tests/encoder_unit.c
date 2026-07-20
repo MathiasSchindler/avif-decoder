@@ -595,24 +595,24 @@ typedef struct {
 
 static int test_av1_header_writer(void) {
       static const uint8_t golden_2x2[] = {
-            0x0aU, 0x08U, 0x18U, 0x00U, 0x30U, 0x08U, 0x08U, 0x08U,
-            0x08U, 0x20U, 0x1aU, 0x05U, 0x98U, 0x00U, 0x00U, 0x00U,
-            0x18U, 0x22U, 0x01U, 0x00U
+            0x0aU, 0x08U, 0x18U, 0x00U, 0x34U, 0x08U, 0x08U, 0x08U,
+            0x08U, 0x20U, 0x1aU, 0x05U, 0xe6U, 0x00U, 0x00U, 0x00U,
+            0x06U, 0x22U, 0x01U, 0x00U
       };
       static const uint8_t golden_64x64[] = {
-            0x0aU, 0x09U, 0x18U, 0x15U, 0x7fU, 0xfcU, 0x02U, 0x02U,
-            0x02U, 0x02U, 0x08U, 0x1aU, 0x05U, 0x98U, 0x00U, 0x00U,
-            0x00U, 0x18U, 0x22U, 0x01U, 0x00U
-      };
-      static const uint8_t golden_130x66[] = {
-            0x0aU, 0x09U, 0x18U, 0x1dU, 0xa0U, 0x60U, 0x80U, 0x40U,
-            0x40U, 0x40U, 0x41U, 0x1aU, 0x05U, 0x92U, 0x00U, 0x00U,
+            0x0aU, 0x09U, 0x18U, 0x15U, 0x7fU, 0xfdU, 0x02U, 0x02U,
+            0x02U, 0x02U, 0x08U, 0x1aU, 0x05U, 0xe6U, 0x00U, 0x00U,
             0x00U, 0x06U, 0x22U, 0x01U, 0x00U
       };
+      static const uint8_t golden_130x66[] = {
+            0x0aU, 0x09U, 0x18U, 0x1dU, 0xa0U, 0x60U, 0xa0U, 0x40U,
+            0x40U, 0x40U, 0x41U, 0x1aU, 0x06U, 0xe4U, 0x80U, 0x00U,
+            0x00U, 0x01U, 0x80U, 0x22U, 0x01U, 0x00U
+      };
       static const uint8_t golden_640x480[] = {
-            0x0aU, 0x0aU, 0x19U, 0x26U, 0x27U, 0xfeU, 0xf8U, 0x04U,
-            0x04U, 0x04U, 0x04U, 0x10U, 0x1aU, 0x05U, 0x92U, 0x00U,
-            0x00U, 0x00U, 0x06U, 0x22U, 0x01U, 0x00U
+            0x0aU, 0x0aU, 0x19U, 0x26U, 0x27U, 0xfeU, 0xfaU, 0x04U,
+            0x04U, 0x04U, 0x04U, 0x10U, 0x1aU, 0x06U, 0xe4U, 0x80U,
+            0x00U, 0x00U, 0x01U, 0x80U, 0x22U, 0x01U, 0x00U
       };
       static const Av1HeaderGolden golden[] = {
             { 2U, 2U, 0U, golden_2x2, sizeof(golden_2x2) },
@@ -665,8 +665,8 @@ static int test_av1_header_writer(void) {
             CHECK(info.reduced_still_picture_header == 1U &&
                     info.frame_type == 0U && info.base_q_index == 128U &&
                     info.coded_lossless == 0U &&
-                    info.allow_screen_content_tools == 0U &&
-                    info.allow_intrabc == 0U && info.enable_filter_intra == 0U &&
+                    info.allow_screen_content_tools == 1U &&
+                    info.allow_intrabc == 0U && info.enable_filter_intra == 1U &&
                     info.enable_intra_edge_filter == 0U &&
                     info.segmentation_enabled == 0U &&
                     info.delta_q_present == 0U && info.tx_mode == 1U &&
@@ -913,6 +913,8 @@ static int test_av1_tile_writer(void) {
                              0, 0U, 0U, 0U, 0U, 0U, 0U };
       AvifdecEntropyTrace trace;
       AvifdecError error;
+      AvifdecStatus decode_status;
+      AvifencStatistics statistics;
       size_t tile_size;
       size_t repeated_size;
       size_t index;
@@ -923,6 +925,7 @@ static int test_av1_tile_writer(void) {
       source.planes[0] = source_y;
       source.planes[1] = source_u;
       source.planes[2] = source_v;
+      source.statistics = &statistics;
       source.strides[0] = 66U;
       source.strides[1] = 33U;
       source.strides[2] = 33U;
@@ -936,6 +939,7 @@ static int test_av1_tile_writer(void) {
 
       for (index = 0U; index < sizeof(dimensions) / sizeof(dimensions[0]);
            ++index) {
+            avifdec_memory_fill(&statistics, 0U, sizeof(statistics));
             source.width = dimensions[index][0];
             source.height = dimensions[index][1];
             source.quantizer = quantizers[index];
@@ -1040,19 +1044,29 @@ static int test_av1_tile_writer(void) {
             image.strides[0] = source.width;
             image.strides[1] = source.width >> 1U;
             image.strides[2] = source.width >> 1U;
-            CHECK(avifdec_av1_decode(
-                        &span, 1U, 0, &info, decode_workspace,
-                        sizeof(decode_workspace), &image, &trace, &error) ==
-                  AVIFDEC_OK);
+            avifdec_memory_fill(&trace, 0U, sizeof(trace));
+            decode_status = avifdec_av1_decode(
+                  &span, 1U, 0, &info, decode_workspace,
+                  sizeof(decode_workspace), &image, &trace, &error);
+            CHECK(decode_status == AVIFDEC_OK);
             if (index == 5U) {
                   CHECK(trace.block_count == 1U &&
                         trace.transform_size_mask ==
                               ((uint32_t)1U << AV1_TX_16X16 | 1U << AV1_TX_32X32));
             }
+            if (index == 2U) {
+                  CHECK(statistics.palette_block_count == 6U &&
+                        statistics.luma_mode_mask == 1U &&
+                        statistics.chroma_mode_mask == 1U);
+            }
             if (index == 6U) {
-                  CHECK(trace.block_count == 64U &&
-                        trace.transform_size_mask ==
-                              ((uint32_t)1U << AV1_TX_4X4));
+                  CHECK(trace.block_count == 28U);
+                  CHECK(trace.transform_size_mask ==
+                        ((uint32_t)1U << AV1_TX_4X4 |
+                         (uint32_t)1U << AV1_TX_8X8));
+                  CHECK(statistics.palette_block_count == 0U &&
+                        statistics.luma_mode_mask == 0x19U &&
+                        statistics.chroma_mode_mask == 0x19U);
             }
             if (index == 7U) {
                   CHECK(trace.block_count == 2U &&
@@ -1078,7 +1092,7 @@ static int test_av1_tile_writer(void) {
                               ((uint32_t)1U << AV1_TX_8X4 |
                                (uint32_t)1U << AV1_TX_16X8));
             }
-                                    CHECK(index == 0U
+                                    CHECK(index == 0U || index == 2U
                                                       ? trace.nonzero_transform_count == 0U &&
                                                             trace.coefficient_count == 0U
                                                       : trace.nonzero_transform_count != 0U &&
@@ -1613,18 +1627,18 @@ static uint64_t quality_plane_sse(const uint8_t *source,
 
 static int test_quality_controls(void) {
       static const uint16_t quantizers[3] = { 32U, 96U, 192U };
-            static const uint64_t expected_checksums[3][3] = {
-                        { 0x9720129fa9f99171ULL, 0xdc9d73212425b345ULL,
-                              0xcbc4773b81eea441ULL },
-                        { 0x1672a8e91bb4fe87ULL, 0xce6d6df005f34496ULL,
-                              0x9f72a02fb2cdaedaULL },
-                        { 0xb18ff0d3c399c54cULL, 0x6db4ee309f3360cbULL,
-                              0x1bb2af4c4bd2dd7fULL }
-      };
-      static const size_t minimum_sizes[3] = { 1360U, 1048U, 616U };
-      static const size_t maximum_sizes[3] = { 1394U, 1082U, 650U };
-      static const uint64_t minimum_sse[3] = { 220000U, 230000U, 400000U };
-      static const uint64_t maximum_sse[3] = { 250000U, 265000U, 450000U };
+                  static const uint64_t expected_checksums[3][3] = {
+                                    { 0xe7c40708e44cda83ULL, 0x319dfbf50fd1c14bULL,
+                                          0x45e02d95bd14929eULL },
+                                    { 0x5192b442f625d5eeULL, 0x3d80e1e445745082ULL,
+                                          0x370ff10a169e887cULL },
+                                    { 0xb87c854ffc96b7e8ULL, 0xe55db4ee70ebce27ULL,
+                                          0x76f0789fe9a826e1ULL }
+                  };
+                  static const size_t minimum_sizes[3] = { 1366U, 1066U, 626U };
+                  static const size_t maximum_sizes[3] = { 1400U, 1100U, 660U };
+                  static const uint64_t minimum_sse[3] = { 220000U, 230000U, 400000U };
+                  static const uint64_t maximum_sse[3] = { 250000U, 265000U, 450000U };
       static uint8_t source_y[32U * 32U];
       static uint8_t source_u[16U * 16U];
       static uint8_t source_v[16U * 16U];
@@ -1695,9 +1709,13 @@ static int test_quality_controls(void) {
             size_t output_written;
             size_t repeated_written;
             size_t baseline_written;
+            size_t middle_size;
             uint64_t full_sse;
             uint64_t middle_sse;
             uint64_t baseline_sse;
+            uint64_t full_checksum;
+            uint64_t middle_checksum;
+            uint64_t baseline_checksum;
 
             avifenc_options_default(&options);
             options.quantizer = quantizers[index];
@@ -1731,9 +1749,8 @@ static int test_quality_controls(void) {
                     AVIFENC_OK);
             CHECK(output_written == repeated_written &&
                     avifdec_memory_compare(
-                          output, repeated, output_written) == 0 &&
-                    quality_checksum(output, output_written) ==
-                          expected_checksums[index][0]);
+                          output, repeated, output_written) == 0);
+            full_checksum = quality_checksum(output, output_written);
             CHECK(output_written >= minimum_sizes[index] &&
                     output_written <= maximum_sizes[index]);
             CHECK(avifdec_decode(
@@ -1760,9 +1777,9 @@ static int test_quality_controls(void) {
                     AVIFENC_OK);
             CHECK(repeated_written == baseline_written &&
                     avifdec_memory_compare(
-                          repeated, baseline, repeated_written) == 0 &&
-                    quality_checksum(repeated, repeated_written) ==
-                          expected_checksums[index][1]);
+                          repeated, baseline, repeated_written) == 0);
+            middle_checksum = quality_checksum(repeated, repeated_written);
+            middle_size = repeated_written;
             CHECK(avifdec_decode(
                           repeated, repeated_written, 0, decode_workspace,
                           sizeof(decode_workspace), &decoded, 0, &decode_error) ==
@@ -1785,9 +1802,8 @@ static int test_quality_controls(void) {
                     AVIFENC_OK);
             CHECK(baseline_written == repeated_written &&
                     avifdec_memory_compare(
-                          baseline, repeated, baseline_written) == 0 &&
-                    quality_checksum(baseline, baseline_written) ==
-                          expected_checksums[index][2]);
+                          baseline, repeated, baseline_written) == 0);
+            baseline_checksum = quality_checksum(baseline, baseline_written);
             CHECK(avifdec_decode(
                           baseline, baseline_written, 0, decode_workspace,
                           sizeof(decode_workspace), &decoded, 0, &decode_error) ==
@@ -1798,6 +1814,10 @@ static int test_quality_controls(void) {
                         source_u, 16U, decoded_u, 16U, 16U, 16U) +
                   quality_plane_sse(
                         source_v, 16U, decoded_v, 16U, 16U, 16U);
+            CHECK(full_checksum == expected_checksums[index][0] &&
+                  middle_checksum == expected_checksums[index][1] &&
+                  baseline_checksum == expected_checksums[index][2] &&
+                  middle_size != 0U);
             CHECK(full_sse <= middle_sse && middle_sse < baseline_sse);
             if (index != 0U) {
                   CHECK(full_sse > previous_sse && output_written < previous_size);

@@ -169,10 +169,10 @@ and deterministic reconstruction behavior. The nine-case scorecard records
 the reviewed rate-distortion and work changes; external FFmpeg, libaom, dav1d,
 and libavif comparisons decode both rectangular orientations exactly.
 
-## Goal 4: Complete intra and chroma prediction
+## Goal 4: Complete intra and chroma prediction (complete)
 
-Expand prediction from the current small luma set and DC chroma baseline to the
-high-value AV1 intra tools already understood by the decoder:
+Prediction now covers the high-value AV1 intra tools already understood by the
+decoder:
 
 - directional luma and chroma modes with legal angle deltas;
 - all smooth variants and Paeth where applicable;
@@ -192,6 +192,11 @@ predictors, syntax matches external decoders, screen-content fixtures improve
 materially with palettes, photographic chroma improves with CfL or directional
 prediction, and the default corpus has no quality regression at comparable
 size.
+
+The bounded implementation now covers all listed tools except intra block copy.
+Intrabc remains deferred until overlap-safe DV search and motion-vector stack
+infrastructure exist. Strict reconstruction vectors, external decoder checks,
+and the deterministic scorecard cover the committed Goal 4 surface.
 
 ## Goal 5: Quantization, lossless, and rate control
 

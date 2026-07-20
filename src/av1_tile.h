@@ -10,6 +10,14 @@
 #include "av1_recon.h"
 
 typedef struct {
+    uint16_t y_mode[7][3][3];
+    uint16_t uv_mode[2][3];
+    uint16_t y_size[7][8];
+    uint16_t uv_size[7][8];
+    uint16_t color[2][7][5][9];
+} Av1PaletteCdfs;
+
+typedef struct {
     Av1PartitionCdfs partition;
     uint16_t skip[3][3];
     uint16_t segment_id[3][9];
@@ -37,6 +45,8 @@ typedef struct {
     Av1IntraCdfs intra;
     Av1CoeffCdfs coeff;
 } Av1TileCdfs;
+
+void av1_palette_cdfs_init(Av1PaletteCdfs *cdfs);
 
 typedef AvifdecStatus (*Av1TileDecodeBlock)(void *user_data,
                                             Av1SymbolDecoder *decoder,
@@ -337,6 +347,7 @@ typedef struct {
     uint8_t subsampling_y;
     uint8_t reduced_tx_set;
     uint8_t tx_mode;
+    uint8_t enable_intra_edge_filter;
     uint8_t enable_order_hint;
     uint8_t order_hint_bits;
     uint8_t base_q_index;

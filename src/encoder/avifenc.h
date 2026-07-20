@@ -66,7 +66,7 @@ typedef struct {
 
 typedef struct {
     uint16_t quantizer;
-    /* 0 searches five luma modes, 1 searches three, and 2 uses DC only. */
+    /* Lower values search broader bounded mode, angle, and partition sets. */
     uint8_t speed;
 } AvifencOptions;
 
@@ -86,6 +86,12 @@ typedef struct {
     uint64_t entropy_symbol_count;
     uint64_t literal_bit_count;
     uint64_t filter_unit_count;
+    uint64_t luma_mode_mask;
+    uint64_t chroma_mode_mask;
+    uint64_t angle_delta_mask;
+    uint64_t cfl_block_count;
+    uint64_t filter_intra_block_count;
+    uint64_t palette_block_count;
     uint64_t reconstruction_checksum[3];
 } AvifencStatistics;
 
