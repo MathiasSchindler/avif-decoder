@@ -52,10 +52,10 @@ The human table reports aggregate monotonic wall-clock milliseconds for the sele
 `--workers N` uses a hosted pthread executor for reproducible core scaling
 measurements without adding a production dependency. Stable JSON requires one
 worker so its workspace values remain cross-platform. On the named M4 Max host,
-the median of five 20-iteration runs for `multi-tile-wide` is 654.483 ms with
-one worker and 335.443 ms with two, a 1.95x speedup. Whole-corpus medians are
-1821.482 ms and 1502.577 ms respectively (1.21x); the other eight cases are
-legally single-tile and therefore serial.
+the Goal 4 whole-corpus median of five 20-iteration runs is 8801.412 ms with
+one worker and 8542.427 ms with two, a 1.03x speedup. The other eight cases are
+legally single-tile, so whole-corpus scaling understates the benefit available
+to the `multi-tile-wide` case.
 
 ## Stable metrics
 
@@ -77,13 +77,16 @@ Structural edge error is the sum of absolute differences between source and reco
 
 The scorecard script regenerates stable JSON and byte-compares it with the checked-in baseline. A difference can represent a bug, an intentional coding change, or a real quality improvement; it always requires review. Update the baseline only after inspecting every changed size, checksum, quality metric, capacity, and work count, then run `make test` and the applicable external interoperability suite.
 
-The Goal 3 baseline demonstrates the intended adaptation. Relative to the
-fixed-4x4 baseline, `gradient` is 25.3% smaller with 33.4% lower luma SSE and
-`chroma-detail` is 38.6% smaller with lower U and V SSE. `text-edge` is 1.7%
-smaller with a 0.8% luma-SSE trade, and `photograph` is 8.2% smaller with a
-1.5% luma-SSE trade. Noise and both large speed-2 cases retain identical bytes
-and quality. Workspace grows by a bounded 2 KiB per active tile worker for
-partition candidate reconstruction checkpoints.
+The Goal 4 baseline records the expanded bounded intra and chroma search.
+Relative to Goal 3, `gradient` is 6.8% smaller with 1.4% lower luma SSE;
+`text-edge` is 53.7% smaller with 91.4% lower luma SSE; and `animation` is
+20.8% smaller with 68.2%, 79.4%, and 73.2% lower Y, U, and V SSE.
+`chroma-detail` is 19.1% smaller with 57.8% lower U SSE and 28.7% lower V SSE.
+`photograph` trades 1.5% more bytes for 2.6%, 4.2%, and 3.2% lower Y, U, and V
+SSE. The speed-2 cases retain identical reconstruction quality while using
+2.2% more bytes for `noise` and about 7.0% more for the two large cases.
+Workspace remains explicitly bounded and grows by less than 2 KiB for the
+small single-tile scorecard cases.
 
 ## Named timing reference
 
@@ -91,6 +94,6 @@ Wall-clock timing is informative and never gates `make test`. The first referenc
 
 | Host | Toolchain | Iterations | Time per corpus | Throughput | Informational budget |
 | --- | --- | ---: | ---: | ---: | --- |
-| `Mac16,6`, Apple M4 Max, macOS 26.5.2 | Homebrew Clang 22.1.8, `-O2` | 20 | 91.074 ms | 15.360 MP/s | at most 115 ms and at least 12 MP/s |
+| `Mac16,6`, Apple M4 Max, macOS 26.5.2 | Homebrew Clang 22.1.8, `-O2` | 20 | 440.071 ms | 3.179 MP/s | at most 550 ms and at least 2.5 MP/s |
 
 Run timing on an otherwise idle named machine, use at least 20 iterations, and compare the median of five process runs. Add Linux/x86-64 reference rows when a stable named host is available. A budget miss prompts profiling; it does not justify weakening deterministic or quality gates.

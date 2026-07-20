@@ -11,7 +11,7 @@ ten ordered goals spanning **speed**, **features**, and **encoding quality**.
 | 1. Measurement and regression budgets | Reproducible decisions | Yes |  | Yes | Complete |
 | 2. Multi-tile encoding and bounded parallelism | Large images without resizing | Yes | Yes |  | Complete |
 | 3. Variable partitions and transforms | Better local adaptation | Yes | Yes | Yes | Complete |
-| 4. Complete intra and chroma prediction | Stronger still-image coding | Yes | Yes | Yes | Planned |
+| 4. Complete intra and chroma prediction | Stronger still-image coding | Yes | Yes | Yes | Complete |
 | 5. Quantization, lossless, and rate control | Useful quality/size controls | Yes | Yes | Yes | Planned |
 | 6. In-loop filters and restoration | Better reconstruction per byte | Yes | Yes | Yes | Planned |
 | 7. Bit-depth and chroma-format parity | Monochrome, 4:2:2, 4:4:4, HDR |  | Yes | Yes | Planned |
