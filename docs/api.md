@@ -102,12 +102,13 @@ and valid but unsupported requests. `AvifencError` identifies the failing
 context and, for capacity errors, records the required and provided sizes.
 
 The CLI in `src/encoder/main.c` is an adapter around this planar API. Raw input
-is tightly packed Y, then U, then V. Its
-`src/encoder/cli/image_input.c` adapter decodes PNG and baseline JPEG with
-project-owned freestanding code and converts them to limited-range BT.709
-YUV420 with integer arithmetic. Odd image dimensions repeat the last row or
-column. Supported image dimensions are preserved. Progressive JPEG and
-interlaced PNG are unsupported.
+is tightly packed Y, then U, then V. For image input,
+`src/encoder/cli/image_input.c` dispatches to the PNG and baseline-JPEG adapters
+in `image_input_png.c` and `image_input_jpeg.c`. Those project-owned
+freestanding modules decode and convert input to limited-range BT.709 YUV420
+with integer arithmetic. Odd image dimensions repeat the last row or column.
+Supported image dimensions are preserved. Progressive JPEG and interlaced PNG
+are unsupported.
 
 ## Still images
 

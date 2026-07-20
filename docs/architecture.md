@@ -26,12 +26,12 @@ The code separates portable, freestanding codec cores from thin
 **CLI/runtime/platform** layers:
 
 - The public decoder contract is `src/avifdec.h`. Decoder internals are under
-  `src/decoder`; only `src/decoder/main.c` is the decoder CLI.
+  `src/decoder`; `main.c` and `png_write.c` form the decoder CLI layer.
 - Shared AV1 entropy, coefficient, prediction, reconstruction, and DSP
   primitives used by both codec directions are under `src/codec`.
 - The encoder core and public `src/encoder/avifenc.h` are under `src/encoder`.
   `src/encoder/main.c` is the CLI adapter, and
-  `src/encoder/cli/image_input.c` supplies its PNG/JPEG input conversion.
+  `src/encoder/cli/image_input.c` dispatches its image input adapters.
 - Root-level `src/base.c` and `src/base.h` own common checked arithmetic,
   readers, memory helpers, and the caller-backed arena. Root-level
   `src/task_pool.c` and `src/task_pool.h` adapt the public executors to native
@@ -54,10 +54,11 @@ src/
   base.c, base.h         Checked arithmetic, readers, memory, caller arena
   task_pool.c, .h        Common native-worker scheduler and executor adapter
   decoder/
-    bmff.c, avif*.c      AVIF container, sequence, transforms, presentation
-    av1*.c               Decoder-specific AV1 parsing and reconstruction flow
-    png.c                Allocation-free streaming PNG output
-    main.c               Freestanding avifdec command-line front end
+    bmff.c, avif*.c       AVIF parse, recursive item decode, and presentation
+    av1*.c                Decoder-specific AV1 parsing and reconstruction flow
+    png.c                 Allocation-free streaming PNG encoder
+    png_write.c           Decoder CLI RGB conversion and PNG file output
+    main.c                Freestanding avifdec command-line front end
   codec/                 AV1 primitives shared by decoder and encoder
   encoder/
     avifenc.h             Public allocation-free encoder API
@@ -65,7 +66,9 @@ src/
     avif_write.c          Single-item AVIF serializer
     av1_*.c               Reduced-still AV1 coding and transforms
     main.c                Freestanding avifenc command-line front end
-    cli/image_input.c     Allocation-free PNG/baseline-JPEG CLI input
+    cli/image_input.c     CLI image-format dispatch adapter
+    cli/image_input_png.c Allocation-free PNG query and decode
+    cli/image_input_jpeg.c Allocation-free baseline-JPEG query and decode
   shared/                Freestanding standard-header shims
   platform/
     platform.h           Native I/O, page-memory, and worker abstraction
@@ -78,14 +81,22 @@ docs/                    This documentation
 ```
 
 Within `src/decoder`, AV1 work is split by stage: bitstream/OBU framing
-(`av1_bitstream.c`), high-level frame flow (`av1.c`), references and frame
-context (`av1_reference.c`), tile parsing (`av1_tile*.c`), inter prediction and
-warping (`av1_inter*.c`, `av1_warp.c`), partition/block flow
-(`av1_partition.c`, `av1_block.c`), post-filters (`av1_filter.c`,
-`av1_cdef.c`, `av1_superres.c`, `av1_restoration_filter.c`), film grain
-(`av1_film_grain.c`), profiles/levels (`av1_profile.c`), and metadata
-(`av1_metadata.c`). Entropy/CDF, coefficients, intra prediction, DSP, and
-reconstruction primitives shared with the encoder live in `src/codec`.
+(`av1_bitstream.c`), high-level frame flow (`av1.c`), frame-header syntax
+(`av1_frame_header.c`), frame/image copies and output scaling (`av1_copy.c`),
+and references and frame context (`av1_reference.c`). Tile partition and mode
+syntax live in `av1_tile_mode.c`; `av1_tile.c` handles residual decoding and
+block reconstruction, with specialized inter-mode, motion-vector, palette, and
+restoration modules alongside it. Inter prediction and warping
+(`av1_inter*.c`, `av1_warp.c`), partition/block flow (`av1_partition.c`,
+`av1_block.c`), post-filters (`av1_filter.c`, `av1_cdef.c`, `av1_superres.c`,
+`av1_restoration_filter.c`), film grain (`av1_film_grain.c`), profiles/levels
+(`av1_profile.c`), and metadata (`av1_metadata.c`) remain separate. Entropy/CDF,
+coefficients, intra prediction, DSP, and reconstruction primitives shared with
+the encoder live in `src/codec`.
+
+AVIF container processing has a similar internal boundary: `avif_parse.c`
+validates and indexes container metadata and resolves item extents, while
+`avif.c` recursively queries and decodes items and plans their workspace.
 
 ## Workspace and memory model
 

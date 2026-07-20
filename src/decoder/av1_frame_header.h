@@ -1,0 +1,111 @@
+#ifndef AVIFDEC_AV1_FRAME_HEADER_H
+#define AVIFDEC_AV1_FRAME_HEADER_H
+
+#include "av1.h"
+#include "av1_parse.h"
+
+typedef struct {
+    uint32_t frame_width;
+    uint32_t frame_height;
+    uint32_t upscaled_width;
+    uint32_t render_width;
+    uint32_t render_height;
+    uint32_t mi_cols;
+    uint32_t mi_rows;
+    uint32_t current_frame_id;
+    uint32_t order_hint;
+    uint8_t allow_intrabc;
+    uint8_t allow_screen_content_tools;
+    uint8_t base_q_index;
+    int8_t delta_q_y_dc;
+    int8_t delta_q_u_dc;
+    int8_t delta_q_u_ac;
+    int8_t delta_q_v_dc;
+    int8_t delta_q_v_ac;
+    uint8_t using_qmatrix;
+    uint8_t qm_y;
+    uint8_t qm_u;
+    uint8_t qm_v;
+    uint8_t coded_lossless;
+    uint8_t frame_type;
+    uint8_t show_existing_frame;
+    uint8_t frame_to_show_map_idx;
+    uint8_t show_frame;
+    uint8_t showable_frame;
+    uint8_t spatial_id;
+    uint8_t error_resilient_mode;
+    uint8_t refresh_frame_flags;
+    uint8_t primary_ref_frame;
+    uint8_t force_integer_mv;
+    uint8_t allow_high_precision_mv;
+    uint8_t interpolation_filter;
+    uint8_t is_motion_mode_switchable;
+    uint8_t use_ref_frame_mvs;
+    uint8_t reference_select;
+    uint8_t skip_mode_present;
+    uint8_t skip_mode_frame[2];
+    uint8_t allow_warped_motion;
+    uint8_t ref_frame_idx[7];
+    uint8_t ref_frame_sign_bias[8];
+    uint8_t gm_type[7];
+    int32_t gm_params[7][6];
+    uint8_t disable_cdf_update;
+    uint8_t disable_frame_end_update_cdf;
+    uint8_t tile_columns_log2;
+    uint8_t tile_rows_log2;
+    uint8_t tile_size_bytes;
+    uint8_t segmentation_enabled;
+    uint8_t segmentation_update_map;
+    uint8_t segmentation_temporal_update;
+    uint8_t seg_id_pre_skip;
+    uint8_t last_active_segment;
+    uint8_t lossless[8];
+    uint8_t feature_enabled[8][8];
+    int16_t feature_data[8][8];
+    uint8_t delta_q_present;
+    uint8_t delta_q_res;
+    uint8_t delta_lf_present;
+    uint8_t delta_lf_res;
+    uint8_t delta_lf_multi;
+    uint8_t loop_filter_level[4];
+    uint8_t loop_filter_sharpness;
+    uint8_t loop_filter_delta_enabled;
+    int8_t loop_filter_ref_deltas[8];
+    int8_t loop_filter_mode_deltas[2];
+    uint8_t cdef_bits;
+    uint8_t cdef_damping;
+    uint8_t cdef_y_pri_strength[8];
+    uint8_t cdef_y_sec_strength[8];
+    uint8_t cdef_uv_pri_strength[8];
+    uint8_t cdef_uv_sec_strength[8];
+    uint8_t restoration_type[3];
+    uint16_t loop_restoration_size[3];
+    uint8_t superres_denom;
+    uint8_t tx_mode;
+    uint8_t reduced_tx_set;
+    uint8_t buffer_removal_time_present;
+    uint8_t frame_presentation_time_present;
+    uint32_t buffer_removal_time;
+    uint32_t frame_presentation_time;
+    uint16_t tile_columns;
+    uint16_t tile_rows;
+    uint16_t context_update_tile_id;
+    uint32_t mi_col_starts[65];
+    uint32_t mi_row_starts[65];
+    Av1FilmGrainParams film_grain;
+} Av1Frame;
+
+typedef struct {
+    Av1ReferenceSlot slots[AV1_NUM_REF_FRAMES];
+    uint32_t previous_frame_id;
+    uint8_t have_previous_frame_id;
+} Av1ReferenceState;
+
+AvifdecStatus av1_parse_frame_header(Av1Bits *bits,
+                                     const Av1Sequence *sequence,
+                                     uint8_t temporal_id,
+                                     uint8_t spatial_id,
+                                     Av1ReferenceState *references,
+                                     Av1Frame *frame);
+
+#endif

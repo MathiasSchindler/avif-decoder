@@ -1,6 +1,7 @@
 #ifndef AVIFDEC_AV1_COPY_H
 #define AVIFDEC_AV1_COPY_H
 
+#include "av1_parse.h"
 #include "av1_tile.h"
 
 typedef struct {
@@ -48,5 +49,26 @@ AvifdecStatus av1_copy_image_scale_range(size_t begin,
                                          size_t end,
                                          size_t worker_index,
                                          void *arg);
+AvifdecStatus av1_plane_copy_dispatch(const AvifdecExecutor *executor,
+                                      Av1PlaneCopyPlan *plan);
+AvifdecStatus av1_flat_copy_dispatch(const AvifdecExecutor *executor,
+                                     void *destination,
+                                     const void *source,
+                                     size_t count,
+                                     size_t element_size);
+AvifdecStatus av1_copy_planes(Av1FramePlanes *destination,
+                              const Av1FramePlanes *source,
+                              const Av1Sequence *sequence,
+                              uint32_t width,
+                              uint32_t height,
+                              const AvifdecExecutor *executor);
+AvifdecStatus av1_copy_image(AvifdecImage *image,
+                             const Av1FramePlanes *source,
+                             const Av1Sequence *sequence,
+                             uint32_t source_width,
+                             uint32_t source_height,
+                             uint32_t output_width,
+                             uint32_t output_height,
+                             const AvifdecExecutor *executor);
 
 #endif

@@ -383,49 +383,6 @@ void av1_tile_cdfs_init(Av1TileCdfs *cdfs);
 void av1_tile_cdfs_init_frame(Av1TileCdfs *cdfs, uint8_t base_q_index);
 void av1_tile_cdfs_reset_counts(Av1TileCdfs *cdfs);
 uint64_t av1_tile_cdfs_checksum(const Av1TileCdfs *cdfs);
-AvifdecStatus av1_tile_read_skip(Av1SymbolDecoder *decoder,
-                                 Av1TileCdfs *cdfs,
-                                 const Av1BlockState *state,
-                                 const Av1BlockAvailability *availability,
-                                 uint32_t row,
-                                 uint32_t column,
-                                 int forced_skip,
-                                 uint8_t *skip);
-AvifdecStatus av1_tile_read_segment_id(Av1SymbolDecoder *decoder,
-                                       Av1TileCdfs *cdfs,
-                                       const Av1BlockState *state,
-                                       const Av1BlockAvailability *availability,
-                                       uint32_t row,
-                                       uint32_t column,
-                                       uint8_t last_active_segment,
-                                       int skip,
-                                       uint8_t *segment_id);
-AvifdecStatus av1_tile_read_delta(Av1SymbolDecoder *decoder,
-                                  uint16_t cdf[5],
-                                  int32_t *delta);
-AvifdecStatus av1_tile_read_y_mode(Av1SymbolDecoder *decoder,
-                                   Av1TileCdfs *cdfs,
-                                   uint32_t width,
-                                   uint32_t height,
-                                   uint8_t *y_mode);
-AvifdecStatus av1_tile_read_intra_frame_y_mode(
-    Av1SymbolDecoder *decoder,
-    Av1TileCdfs *cdfs,
-    const Av1BlockState *state,
-    const Av1BlockAvailability *availability,
-    uint32_t row,
-    uint32_t column,
-    uint8_t *y_mode);
-AvifdecStatus av1_tile_read_angle_delta(Av1SymbolDecoder *decoder,
-                                        Av1TileCdfs *cdfs,
-                                        uint8_t mode,
-                                        int8_t *angle_delta);
-AvifdecStatus av1_tile_read_tx_depth(Av1SymbolDecoder *decoder,
-                                     Av1TileCdfs *cdfs,
-                                     unsigned int maximum_tx_log2,
-                                     unsigned int maximum_depth,
-                                     unsigned int context,
-                                     uint8_t *tx_depth);
 AvifdecStatus av1_restoration_state_init(Av1RestorationState *state,
                                          Av1RestorationUnit *units,
                                          size_t unit_capacity,
@@ -451,16 +408,6 @@ AvifdecStatus av1_tile_read_restoration(void *user_data,
                                         uint32_t row,
                                         uint32_t column,
                                         uint32_t superblock_mi);
-AvifdecStatus av1_tile_decode_partitions(const Av1TilePartitionConfig *config,
-                                         const Av1TileCdfs *frame_cdfs,
-                                         Av1TileCdfs *tile_cdfs,
-                                         Av1PartitionTrace *trace);
-AvifdecStatus av1_tile_decode_modes(
-    const Av1TilePartitionConfig *partition_config,
-    const Av1TileModeConfig *mode_config,
-    const Av1TileCdfs *frame_cdfs,
-    Av1TileCdfs *tile_cdfs,
-    Av1PartitionTrace *partition_trace);
 AvifdecStatus av1_tile_residual_state_init(
     Av1TileResidualState *state,
     Av1CoeffContextState *coeff_contexts,
@@ -536,5 +483,7 @@ void av1_block_trace_init(Av1BlockTrace *trace);
 AvifdecStatus av1_block_state_record(Av1BlockState *state,
                                      const Av1BlockTraceFields *fields,
                                      Av1BlockTrace *trace);
+
+#include "av1_tile_mode.h"
 
 #endif

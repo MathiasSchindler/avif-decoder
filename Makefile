@@ -104,16 +104,18 @@ CODEC_C_SOURCES := \
 	src/codec/av1_dsp.c src/codec/av1_intra.c src/codec/av1_predict.c \
 	src/codec/av1_recon.c src/codec/av1_tile_cdf.c
 DECODER_C_SOURCES := \
-	src/decoder/bmff.c src/decoder/avif.c \
+	src/decoder/bmff.c src/decoder/avif.c src/decoder/avif_parse.c \
 	src/decoder/avif_properties_internal.c src/decoder/avif_sequence.c \
 	src/decoder/avif_rgb.c src/decoder/avif_sato.c src/decoder/png.c \
 	src/decoder/av1.c src/decoder/av1_bitstream.c \
+	src/decoder/av1_frame_header.c \
 	src/decoder/av1_copy.c src/decoder/av1_metadata.c \
 	src/decoder/av1_parse.c src/decoder/av1_profile.c \
 	src/decoder/av1_reference.c src/decoder/av1_film_grain.c \
 	src/decoder/av1_inter.c src/decoder/av1_inter_predict.c \
 	src/decoder/av1_warp.c src/decoder/av1_partition.c \
-	src/decoder/av1_tile.c src/decoder/av1_tile_inter_mode.c \
+	src/decoder/av1_tile.c src/decoder/av1_tile_mode.c \
+	src/decoder/av1_tile_inter_mode.c \
 	src/decoder/av1_tile_inter_mv.c src/decoder/av1_tile_restoration.c \
 	src/decoder/av1_tile_palette.c src/decoder/av1_block.c \
 	src/decoder/av1_filter.c src/decoder/av1_cdef.c \
@@ -125,7 +127,8 @@ ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 	src/encoder/av1_tile_intra.c src/encoder/av1_tile_palette.c \
 	src/encoder/av1_tile_partition.c src/encoder/av1_transform_forward.c \
 	src/encoder/av1_transform_write.c
-IMAGE_INPUT_C_SOURCES := src/encoder/cli/image_input.c
+IMAGE_INPUT_C_SOURCES := src/encoder/cli/image_input.c \
+	src/encoder/cli/image_input_png.c src/encoder/cli/image_input_jpeg.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/codec/av1_cdf.c src/codec/av1_symbol.c src/codec/av1_coeff.c \
 	src/codec/av1_intra.c src/codec/av1_predict.c src/codec/av1_dsp.c \
@@ -138,7 +141,7 @@ CORE_HEADERS := src/avifdec.h src/base.h \
 	$(wildcard src/codec/*.h src/codec/*.inc \
 	src/decoder/*.h src/decoder/*.inc)
 ENCODER_HEADERS := $(wildcard src/encoder/*.h src/encoder/cli/*.h)
-IMAGE_INPUT_HEADERS := src/encoder/cli/image_input.h src/base.h
+IMAGE_INPUT_HEADERS := $(wildcard src/encoder/cli/image_input*.h) src/base.h
 PLATFORM_HEADERS := src/platform/platform.h src/task_pool.h \
 	$(wildcard $(PLATFORM_DIR)/*.h $(ARCH_DIR)/*.h)
 ENCODER_TEST_HEADERS := $(CORE_HEADERS) $(ENCODER_HEADERS) \
@@ -147,8 +150,8 @@ ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
 	$(IMAGE_INPUT_C_SOURCES) src/task_pool.c $(PLATFORM_DIR)/thread.c \
 	$(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
-C_SOURCES := src/decoder/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
-	$(PLATFORM_DIR)/io.c
+C_SOURCES := src/decoder/main.c src/decoder/png_write.c \
+	$(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) $(PLATFORM_DIR)/io.c
 SOURCES := $(C_SOURCES) $(ARCH_SOURCES)
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(SOURCES:.c=.o))
 OBJECTS := $(OBJECTS:.S=.o)
@@ -162,11 +165,14 @@ ENCODER_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ENCODER_C_SOURCES:.c=.o)) \
 	$(ARCH_OBJECTS)
 COLD_OBJECTS := \
 	$(BUILD_DIR)/src/decoder/av1.o \
+	$(BUILD_DIR)/src/decoder/av1_frame_header.o \
 	$(BUILD_DIR)/src/decoder/av1_metadata.o \
 	$(BUILD_DIR)/src/decoder/avif.o \
+	$(BUILD_DIR)/src/decoder/avif_parse.o \
 	$(BUILD_DIR)/src/decoder/avif_sequence.o \
 	$(BUILD_DIR)/src/decoder/bmff.o \
 	$(BUILD_DIR)/src/decoder/main.o \
+	$(BUILD_DIR)/src/decoder/png_write.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o
 STRICT_UNIT_OBJECTS := $(BUILD_DIR)/tests/unit.o $(CORE_OBJECTS) $(ARCH_OBJECTS)
