@@ -1,6 +1,7 @@
 #include "base.h"
 #include "av1.h"
 #include "av1_coeff.h"
+#include "av1_dsp.h"
 #include "av1_film_grain.h"
 #include "av1_filter.h"
 #include "av1_inter.h"
@@ -3178,6 +3179,140 @@ static int test_av1_inverse_transforms(void) {
     return 0;
 }
 
+static int test_av1_dsp_add_residual(void) {
+    static const size_t widths[] = { 4U, 8U, 16U, 32U, 64U };
+    uint16_t expected[67U * 8U];
+    uint16_t actual[67U * 8U];
+    int32_t residual[64U * 8U];
+    unsigned int depth_index;
+    unsigned int flip_lr;
+    unsigned int flip_ud;
+    size_t width_index;
+
+    for (depth_index = 0U; depth_index < 3U; ++depth_index) {
+        uint8_t bit_depth = (uint8_t)(8U + depth_index * 2U);
+        uint16_t maximum = (uint16_t)(((uint32_t)1U << bit_depth) - 1U);
+        for (flip_lr = 0U; flip_lr < 2U; ++flip_lr) {
+            for (flip_ud = 0U; flip_ud < 2U; ++flip_ud) {
+                for (width_index = 0U;
+                     width_index < sizeof(widths) / sizeof(widths[0]);
+                     ++width_index) {
+                    size_t width = widths[width_index];
+                    size_t index;
+
+                    for (index = 0U;
+                         index < sizeof(expected) / sizeof(expected[0]);
+                         ++index) {
+                        expected[index] =
+                            (uint16_t)((index * 193U + width * 17U) & maximum);
+                        actual[index] = expected[index];
+                    }
+                    for (index = 0U; index < width * 8U; ++index) {
+                        residual[index] =
+                            (int32_t)((index * 8191U + width * 257U) & 8191U) -
+                            4096;
+                    }
+                    residual[0] = -65536;
+                    residual[width * 8U - 1U] = 65536;
+                    av1_dsp_add_residual_c(
+                        expected, 67U, width, 8U, residual,
+                        bit_depth, (uint8_t)flip_lr, (uint8_t)flip_ud);
+                    av1_dsp_add_residual(
+                        actual, 67U, width, 8U, residual,
+                        bit_depth, (uint8_t)flip_lr, (uint8_t)flip_ud);
+                    CHECK(avifdec_memory_compare(
+                        expected, actual, sizeof(expected)) == 0);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_av1_dsp_inverse_dct4(void) {
+    int32_t input[16];
+    int32_t expected[16];
+    int32_t actual[16];
+    uint32_t random = 0x6d2b79f5U;
+    unsigned int iteration;
+    size_t index;
+
+    for (iteration = 0U; iteration < 4096U; ++iteration) {
+        for (index = 0U; index < 16U; ++index) {
+            random = random * 1664525U + 1013904223U;
+            input[index] = (int32_t)((random >> 16) & 0xffffU) - 32768;
+        }
+        if (iteration == 0U) {
+            for (index = 0U; index < 16U; ++index) input[index] = 0;
+        } else if (iteration == 1U) {
+            for (index = 0U; index < 16U; ++index) {
+                input[index] = (index & 1U) != 0U ? -32768 : 32767;
+            }
+        }
+        av1_dsp_inverse_dct4_c(input, expected);
+        av1_dsp_inverse_dct4(input, actual);
+        CHECK(avifdec_memory_compare(
+            expected, actual, sizeof(expected)) == 0);
+    }
+    return 0;
+}
+
+static int test_av1_dsp_inverse_dct8(void) {
+    int32_t input[64];
+    int32_t expected[64];
+    int32_t actual[64];
+    uint32_t random = 0x9e3779b9U;
+    unsigned int iteration;
+    size_t index;
+
+    for (iteration = 0U; iteration < 4096U; ++iteration) {
+        for (index = 0U; index < 64U; ++index) {
+            random = random * 1664525U + 1013904223U;
+            input[index] = (int32_t)((random >> 16) & 0xffffU) - 32768;
+        }
+        if (iteration == 0U) {
+            for (index = 0U; index < 64U; ++index) input[index] = 0;
+        } else if (iteration == 1U) {
+            for (index = 0U; index < 64U; ++index) {
+                input[index] = (index & 1U) != 0U ? -32768 : 32767;
+            }
+        }
+        av1_dsp_inverse_dct8_c(input, expected);
+        av1_dsp_inverse_dct8(input, actual);
+        CHECK(avifdec_memory_compare(
+            expected, actual, sizeof(expected)) == 0);
+    }
+    return 0;
+}
+
+static int test_av1_dsp_inverse_dct16(void) {
+    int32_t input[256];
+    int32_t expected[256];
+    int32_t actual[256];
+    uint32_t random = 0x243f6a88U;
+    unsigned int iteration;
+    size_t index;
+
+    for (iteration = 0U; iteration < 2048U; ++iteration) {
+        for (index = 0U; index < 256U; ++index) {
+            random = random * 1664525U + 1013904223U;
+            input[index] = (int32_t)((random >> 16) & 0xffffU) - 32768;
+        }
+        if (iteration == 0U) {
+            for (index = 0U; index < 256U; ++index) input[index] = 0;
+        } else if (iteration == 1U) {
+            for (index = 0U; index < 256U; ++index) {
+                input[index] = (index & 1U) != 0U ? -32768 : 32767;
+            }
+        }
+        av1_dsp_inverse_dct16_c(input, expected);
+        av1_dsp_inverse_dct16(input, actual);
+        CHECK(avifdec_memory_compare(
+            expected, actual, sizeof(expected)) == 0);
+    }
+    return 0;
+}
+
     static int test_av1_loop_filter(void) {
         uint16_t samples[32];
         uint16_t *edge = samples + 12U;
@@ -4516,6 +4651,14 @@ int main(int argc, char **argv) {
     result = test_av1_dequantization();
     if (result != 0) return result;
     result = test_av1_inverse_transforms();
+    if (result != 0) return result;
+    result = test_av1_dsp_add_residual();
+    if (result != 0) return result;
+    result = test_av1_dsp_inverse_dct4();
+    if (result != 0) return result;
+    result = test_av1_dsp_inverse_dct8();
+    if (result != 0) return result;
+    result = test_av1_dsp_inverse_dct16();
     if (result != 0) return result;
     result = test_av1_loop_filter();
     if (result != 0) return result;

@@ -47,7 +47,7 @@ check_case() {
     expected=$(perl tools/y4m-reconstruction-checksum.pl "$reference")
     checkpoint=reconstruction
     if [ "$mode" = filtered ]; then checkpoint=restoration; fi
-    actual=$($decoder --raw "$encoded" "$actual_raw" |
+    actual=$($decoder --diagnostics --raw "$encoded" "$actual_raw" |
         sed -n "s/^${checkpoint}_checksum=//p")
     [ "$actual" = "$expected" ] || {
         echo "$name: expected $expected, got $actual" >&2
@@ -60,7 +60,8 @@ check_case() {
     if [ "$mode" = filtered ]; then
         threaded_raw="$work/$name-threaded.yuv"
         threaded_output=$(
-            "$decoder" --workers 4 --raw "$encoded" "$threaded_raw"
+            "$decoder" --workers 4 --diagnostics --raw \
+                "$encoded" "$threaded_raw"
         )
         threaded=$(printf '%s\n' "$threaded_output" |
             sed -n "s/^${checkpoint}_checksum=//p")
@@ -109,9 +110,11 @@ ffmpeg -hide_banner -loglevel error -f lavfi \
 avifenc --qcolor 70 --jobs 1 --speed 6 --codec aom --cicp 2/2/6 \
     -a tile-columns=1 -a tile-rows=1 \
     "$tile_source" "$tile_avif" >/dev/null
-"$decoder" --workers 1 --raw "$tile_avif" "$tile_serial" \
+"$decoder" --workers 1 --diagnostics --raw \
+    "$tile_avif" "$tile_serial" \
     >"$work/tiled-serial.out"
-"$decoder" --workers 4 --raw "$tile_avif" "$tile_threaded" \
+"$decoder" --workers 4 --diagnostics --raw \
+    "$tile_avif" "$tile_threaded" \
     >"$work/tiled-threaded.out"
 cmp "$tile_serial" "$tile_threaded" || {
     echo "tiled: threaded planar YUV differs" >&2

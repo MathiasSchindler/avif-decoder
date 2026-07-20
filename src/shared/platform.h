@@ -14,6 +14,10 @@ typedef struct {
     volatile int clear_tid;
     void *stack;
     size_t stack_size;
+    void *handle;
+    PlatformWorkerMain entry;
+    void *arg;
+    int result;
 } PlatformWorkerThread;
 
 long platform_write(int fd, const void *buffer, size_t count);

@@ -1,4 +1,5 @@
 #include "av1_recon.h"
+#include "av1_dsp.h"
 #include "base.h"
 
 static const int16_t av1_cos128_full[256] = {
@@ -652,6 +653,21 @@ AvifdecStatus av1_recon_inverse_transform(const int32_t *dequantized,
         (lossless != 0U && tx_size != AV1_TX_4X4)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
+    if (tx_size == AV1_TX_4X4 && tx_type == AV1_TX_DCT_DCT &&
+        bit_depth == 8U && lossless == 0U) {
+        av1_dsp_inverse_dct4(dequantized, residual);
+        return AVIFDEC_OK;
+    }
+    if (tx_size == AV1_TX_8X8 && tx_type == AV1_TX_DCT_DCT &&
+        bit_depth == 8U && lossless == 0U) {
+        av1_dsp_inverse_dct8(dequantized, residual);
+        return AVIFDEC_OK;
+    }
+    if (tx_size == AV1_TX_16X16 && tx_type == AV1_TX_DCT_DCT &&
+        bit_depth == 8U && lossless == 0U) {
+        av1_dsp_inverse_dct16(dequantized, residual);
+        return AVIFDEC_OK;
+    }
     row_clamp = bit_depth + 8U;
     column_clamp = bit_depth + 6U < 16U ? 16U : bit_depth + 6U;
     row_shift = lossless != 0U ? 0U : av1_transform_row_shift[tx_size];
@@ -705,25 +721,13 @@ AvifdecStatus av1_recon_add_residual(uint16_t *destination,
                                      uint8_t bit_depth,
                                      uint8_t flip_lr,
                                      uint8_t flip_ud) {
-    size_t row;
-    size_t column;
-    int32_t maximum;
     if (destination == 0 || residual == 0 || stride < width ||
         residual_count < width * height ||
         (bit_depth != 8U && bit_depth != 10U && bit_depth != 12U)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
-    maximum = ((int32_t)1 << bit_depth) - 1;
-    for (row = 0U; row < height; ++row) {
-        size_t output_row = flip_ud != 0U ? height - row - 1U : row;
-        for (column = 0U; column < width; ++column) {
-            size_t output_column = flip_lr != 0U ? width - column - 1U : column;
-            int32_t value = destination[output_row * stride + output_column] +
-                            residual[row * width + column];
-            if (value < 0) value = 0;
-            if (value > maximum) value = maximum;
-            destination[output_row * stride + output_column] = (uint16_t)value;
-        }
-    }
+    av1_dsp_add_residual(
+        destination, stride, width, height, residual,
+        bit_depth, flip_lr, flip_ud);
     return AVIFDEC_OK;
 }

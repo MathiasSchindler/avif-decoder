@@ -104,9 +104,9 @@ units, frame-plane copies, per-plane trace checksums, and film-grain stripes.
 Sequence frames stay ordered, but each replayed frame can use those AV1
 regions. See [`api.md`](api.md) for the exact workspace implications.
 
-On Linux/x86-64 the CLI supplies this executor through the imported newos
-clone/futex task-pool substrate (`src/task_pool.c`). macOS currently uses a
-serial task-pool backend.
+The CLI supplies this executor through the task-pool scheduler in
+`src/task_pool.c`. Linux/x86-64 workers use clone/futex primitives; macOS/arm64
+workers use pthread and ulock primitives from the already-linked `libSystem`.
 
 ## Generated tables
 

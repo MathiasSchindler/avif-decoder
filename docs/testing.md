@@ -15,7 +15,8 @@ project itself builds. It includes:
 - strict freestanding and hosted ASan/UBSan unit binaries;
 - checked arithmetic, readers, arena alignment, PNG, transforms, prediction,
   filters, film grain, and malformed-input vectors;
-- native clone/futex task-pool tests on Linux/x86-64;
+- native clone/futex task-pool tests on Linux/x86-64 and pthread/ulock
+  task-pool tests on macOS/arm64;
 - a smoke test that confirms the freestanding binary decodes;
 - AV1 feature-fixture checks (including a corrupt-input rejection built with
   `od`/`dd`);
@@ -71,7 +72,8 @@ The additional coverage includes:
 - timed image-sequence tests covering dependent-frame seeking, varied
   durations, finite/infinite repetition, compact sample tables, straight and
   premultiplied alpha, repeated decoding, and malformed tables;
-- byte-exact width-1/width-4 grid comparisons on Linux/x86-64.
+- byte-exact width-1/width-4 grid comparisons on Linux/x86-64 and
+  macOS/arm64.
 - exact encoder reconstruction comparisons through FFmpeg, direct libaom, and
   every usable libavif decoder backend, plus ffprobe metadata validation and
   repeated-encode determinism checks, including wide multi-tile output;

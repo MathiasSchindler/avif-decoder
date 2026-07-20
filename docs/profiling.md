@@ -165,7 +165,72 @@ On an otherwise identical hosted `-O2` harness decoding `tribu-large.avif` and h
 
 Not requesting diagnostics reduced this workload by about 23% with identical decoded output.
 
+The CLI now follows the API convention: still and indexed-frame output modes
+pass a null trace by default, while `--diagnostics` explicitly restores trace
+hashing and reporting. Inspection without an output mode remains diagnostic.
+On the macOS benchmark corpus, five interleaved warm runs measured a 1.53x
+speedup at 11.2 MP and a 1.43x speedup at 30.1 MP compared with
+`--diagnostics`; output bytes were identical.
+
 Predictor checkpoint hashing is intentionally still performed. An experiment that removed it changed pixels on the large inter-frame workload even though the hash should be observational only. This indicates an unresolved aliasing, initialization, or other undefined-behavior dependency in the predictor path. The optimization was not shipped until that dependency can be isolated and reference-tested.
+
+### ARM64 reconstruction DSP
+
+The reconstruction path now has an internal DSP boundary with portable scalar
+references. macOS ARM64 selects exact vector implementations for unflipped
+8-bit residual addition on widths divisible by eight and for non-lossless
+8-bit 4x4, 8x8, and 16x16 DCT-DCT inverse transforms. Flipped transforms,
+4-wide residual blocks, 10/12-bit data, and other transform sizes and types
+retain the scalar path. Linux and WASM also use the scalar implementation.
+
+The residual kernel widens eight predicted `uint16_t` samples, adds two vectors
+of signed 32-bit residuals, clamps to 0 through 255, and narrows back. The
+inverse DCT kernels perform four transforms lane-wise with signed 64-bit
+products and the same AV1 rounding and 16-bit intermediate clipping as the
+scalar code. Freestanding tests compare dispatch against scalar residual output
+across all bit depths, flips, widths, strides, and clipping extremes. They also
+compare 4,096 randomized/extreme inputs for both 4x4 and 8x8 transforms and
+2,048 for 16x16 exactly. Hosted ASan/UBSan tests and the existing all-transform
+checksum provide additional coverage.
+
+Nine interleaved warm runs compared a same-source scalar-dispatch binary with
+the ARM64 build. Residual addition plus the three square inverse DCT kernels
+reduced complete null-trace decode time by 4.85% on the 11.2 MP 8-bit lossy
+image and 6.36% on the 2.5 MP 8-bit lossy image. The 10/12-bit, rectangular,
+ADST, identity, and larger transform paths remain scalar.
+
+### Frame-plane traffic
+
+Frame reconstruction planes are allocated for the sequence maximum rounded to
+the superblock boundary. Frame start previously cleared that complete
+allocation, including a redundant allocation-time clear, and frame finish
+copied the complete allocation into the deblocking plane. The decoder now
+clears and copies only the current frame's MI-grid extent. A contiguous clear
+is retained when that extent spans the allocation stride; variable-size frames
+use bounded row clears so inactive columns and rows are not touched.
+
+Exact sequence, strict corpus, and libaom reference tests confirm that visible
+pixels, padded prediction edges, and filter results are unchanged. Interleaved
+one-worker timing was neutral on the 11.2 MP and 30.1 MP still-image cases
+(within 0.3% in either direction), because their frame dimensions equal the
+sequence maximum. The change targets variable-size sequences and removes the
+unconditional first-use clear without regressing the common contiguous path.
+
+### Entropy micro-optimization experiments
+
+Three narrow entropy/coefficient changes were measured and not retained:
+
+- removing the per-symbol monotonic-CDF check;
+- clearing coefficient output only for skipped transforms;
+- specializing binary symbols and converting coefficient output only through
+    the coded EOB scan extent.
+
+All passed the unit and 60-file strict corpus checks, but interleaved timing was
+inconsistent. The combined binary/EOB experiment ranged from 0.64% faster on
+the 2.5 MP lossy image to effectively unchanged on the 11.2 MP image. The CDF
+and conditional-clear experiments were also within noise. Future entropy work
+should begin with stage counters or a current flat profile and target a larger
+operation boundary rather than accumulate unmeasured hot-loop complexity.
 
 ## Tool observations
 
@@ -176,9 +241,8 @@ The NewOS profiler runtime in the tested checkout also reused a shared static en
 ## Top-level grid threading
 
 The 1.1 executor API keeps serial decoding as the default and optionally
-dispatches independent top-level AVIF grid tiles through the newos task-pool
-model. The Linux/x86-64 CLI exposes this with `--workers`; macOS currently uses
-the serial backend.
+dispatches independent top-level AVIF grid tiles through the task-pool model.
+The Linux/x86-64 and macOS/arm64 CLIs expose this with `--workers`.
 
 A 2x2 benchmark was generated from four 2048x2048 crops of
 `images/tribu-large.jpg`, encoded with:
@@ -208,6 +272,29 @@ substantial, CLI threading remains explicit rather than automatic.
 
 The resulting static PIE is 459,552 bytes on the measurement build, 9,440
 bytes (2.1%) above the previously recorded 450,112-byte optimized binary.
+
+### macOS worker substrate
+
+The macOS/arm64 backend uses `pthread_create` and `pthread_join` plus
+`__ulock_wait`/`__ulock_wake` from the already-linked `libSystem`.
+`sysctlbyname("hw.logicalcpu")` supplies the automatic width. The default
+remains one worker; `--workers 0` selects the available width capped at 32.
+
+On the M4 Max host, seven deterministic interleaved warm runs of the 11.2 MP
+8-bit lossy image measured:
+
+| Workers | Median elapsed | Speedup |
+| ---: | ---: | ---: |
+| 1 | 548.057 ms | 1.00x |
+| 2 | 293.922 ms | 1.86x |
+| 4 | 165.283 ms | 3.32x |
+| 8 | 106.214 ms | 5.16x |
+| 16 | 92.006 ms | 5.96x |
+
+Raw output and every diagnostic checksum were identical at widths 1, 4, and
+the automatic width of 16. The freestanding thread unit also requires actual
+main/worker overlap, verifies exact-once range coverage, propagates errors, and
+joins every worker.
 
 ## Sample-transform row threading
 

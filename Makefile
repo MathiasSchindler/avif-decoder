@@ -62,12 +62,13 @@ endif
 else ifeq ($(OS),Darwin)
 ifeq ($(ARCH),arm64)
 ARCH_DIR := src/arch/aarch64/macos
-ARCH_SOURCES := $(ARCH_DIR)/crt0.S
+ARCH_SOURCES := $(ARCH_DIR)/crt0.S $(ARCH_DIR)/av1_dsp.S
 PLATFORM_DIR := src/platform/macos
 MACOS_SDKROOT := $(shell xcrun --sdk macosx --show-sdk-path)
 LINK_TOOLS := $(MACHO_DYLIB_REMOVER)
 POST_LINK = $(MACHO_DYLIB_REMOVER) $@ && codesign --force --sign - $@
-TARGET_CFLAGS := -target arm64-apple-macos11 -isysroot $(MACOS_SDKROOT)
+TARGET_CFLAGS := -target arm64-apple-macos11 -isysroot $(MACOS_SDKROOT) \
+	-DAVIFDEC_AARCH64_NEON=1
 LDFLAGS := \
 	$(TARGET_CFLAGS) -nostdlib -lSystem -Wl,-no_fixup_chains \
 	-Wl,-platform_version,macos,11.0,11.0 \
@@ -100,6 +101,7 @@ FUZZ_CFLAGS := \
 CORE_C_SOURCES := \
 	src/base.c src/shared/av1_cdf.c src/bmff.c src/avif.c src/avif_sequence.c src/avif_rgb.c \
 	src/avif_sato.c src/png.c \
+	src/av1_dsp.c \
 	src/av1.c src/av1_bitstream.c src/av1_metadata.c src/av1_profile.c \
 	src/av1_reference.c \
 	src/av1_film_grain.c \
@@ -117,7 +119,8 @@ ENCODER_MODULE_C_SOURCES := src/encoder/avifenc.c src/encoder/write.c \
 IMAGE_INPUT_C_SOURCES := src/encoder/image_input.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
-	src/av1_intra.c src/av1_predict.c src/av1_recon.c src/av1_tile_cdf.c
+	src/av1_intra.c src/av1_predict.c src/av1_dsp.c src/av1_recon.c \
+	src/av1_tile_cdf.c
 WASM_C_SOURCES := $(CORE_C_SOURCES) $(ENCODER_MODULE_C_SOURCES) \
 	$(IMAGE_INPUT_C_SOURCES)
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)

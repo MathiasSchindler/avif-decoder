@@ -33,6 +33,16 @@ build/x86_64/avifdec --rgba16 image.avif image.rgba16
 The `--rgba-premul` and `--rgba16-premul` variants request premultiplied packed
 output. Normal RGBA and PNG output use straight alpha.
 
+Output modes skip diagnostic trace hashing by default. Add `--diagnostics` to
+report entropy counters and reconstruction-stage checksums while decoding:
+
+```sh
+build/x86_64/avifdec --diagnostics --raw image.avif image.yuv
+```
+
+One `--diagnostics` flag may appear anywhere in the command line. Inspection
+without an output mode always computes and reports the diagnostic trace.
+
 ## Image sequences
 
 Query an `avis` image sequence:
@@ -54,12 +64,13 @@ and the sync frame used for random access.
 
 ## Parallel workers
 
-The Linux/x86-64 CLI can optionally decode independent top-level AVIF grid
-tiles, AV1 bitstream tiles, sample-transform output rows, loop-filter
+The native Linux/x86-64 and macOS/arm64 CLIs can optionally decode independent
+top-level AVIF grid tiles, AV1 bitstream tiles, sample-transform output rows, loop-filter
 row/column units, CDEF/restoration row units, super-resolution rows,
 film-grain stripes, frame copies, and diagnostic plane checksums through the
-imported newos clone/futex task-pool substrate. Indexed sequence frames use
-the same executor while retaining ordered inter-frame reconstruction:
+task-pool substrate. Linux uses clone/futex workers and macOS uses pthread/ulock
+workers. Indexed sequence frames use the same executor while retaining ordered
+inter-frame reconstruction:
 
 ```sh
 build/x86_64/avifdec --workers 4 --png grid.avif grid.png
@@ -71,7 +82,6 @@ capped by the available work and 32 workers. One `--workers N` pair may appear
 anywhere in the command line. For packed RGB/RGBA output, the CLI also reuses
 the pool to convert presentation rows. Streaming PNG converts bounded batches
 of up to 64 rows in parallel before feeding them to the ordered compressor.
-macOS currently uses the serial task-pool backend.
 
 The CLI rejects input files larger than 1 GiB.
 

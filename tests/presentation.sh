@@ -100,7 +100,8 @@ cmp "$work/grid-worker1.rgb" "$work/grid-worker4.rgb"
     "$work/grid-worker4.png" --workers 4 >/dev/null
 cmp "$work/grid-ours.png" "$work/grid-worker4.png"
 grep -q '^decode_workers=1$' "$work/grid-worker1.out"
-if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+if { [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; } ||
+   { [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; }; then
     grep -q '^decode_workers=4$' "$work/grid-worker4.out"
 else
     grep -q '^decode_workers=1$' "$work/grid-worker4.out"

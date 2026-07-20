@@ -75,6 +75,31 @@ static int extract_worker_option(
     return 1;
 }
 
+static int extract_flag_option(
+    int *argument_count,
+    char **arguments,
+    const char *option,
+    int *enabled) {
+    int index = 1;
+
+    while (index < *argument_count) {
+        int shift;
+
+        if (!text_equal(arguments[index], option)) {
+            ++index;
+            continue;
+        }
+        if (*enabled) return 0;
+        *enabled = 1;
+        for (shift = index; shift + 1 < *argument_count; ++shift) {
+            arguments[shift] = arguments[shift + 1];
+        }
+        --*argument_count;
+        arguments[*argument_count] = 0;
+    }
+    return 1;
+}
+
 static int write_bytes(int fd, const void *data, size_t length) {
     const unsigned char *bytes = (const unsigned char *)data;
     size_t written = 0;
@@ -134,6 +159,63 @@ static int write_fourcc(int fd, uint32_t type) {
         if (text[index] < 0x20U || text[index] > 0x7eU) text[index] = '.';
     }
     return write_bytes(fd, text, sizeof(text));
+}
+
+static void write_entropy_trace(const AvifdecEntropyTrace *trace) {
+    (void)write_text(1, "\nentropy_tiles=");
+    (void)write_unsigned(1, trace->tile_count);
+    (void)write_text(1, "\nentropy_partition_nodes=");
+    (void)write_unsigned(1, trace->partition_nodes);
+    (void)write_text(1, "\nentropy_blocks=");
+    (void)write_unsigned(1, trace->block_count);
+    (void)write_text(1, "\nframes=");
+    (void)write_unsigned(1, trace->frame_count);
+    (void)write_text(1, "\nshow_existing_frames=");
+    (void)write_unsigned(1, trace->show_existing_frame_count);
+    (void)write_text(1, "\ninter_blocks=");
+    (void)write_unsigned(1, trace->inter_block_count);
+    (void)write_text(1, "\ncompound_blocks=");
+    (void)write_unsigned(1, trace->compound_block_count);
+    (void)write_text(1, "\nentropy_transforms=");
+    (void)write_unsigned(1, trace->transform_count);
+    (void)write_text(1, "\nentropy_nonzero_transforms=");
+    (void)write_unsigned(1, trace->nonzero_transform_count);
+    (void)write_text(1, "\nentropy_coefficients=");
+    (void)write_unsigned(1, trace->coefficient_count);
+    (void)write_text(1, "\ntransform_size_mask=");
+    (void)write_hex_u64(1, trace->transform_size_mask);
+    (void)write_text(1, "\ntransform_type_mask=");
+    (void)write_hex_u64(1, trace->transform_type_mask);
+    (void)write_text(1, "\nentropy_checksum=");
+    (void)write_hex_u64(1, trace->checksum);
+    (void)write_text(1, "\nmode_checksum=");
+    (void)write_hex_u64(1, trace->mode_checksum);
+    (void)write_text(1, "\nreference_state_checksum=");
+    (void)write_hex_u64(1, trace->reference_state_checksum);
+    (void)write_text(1, "\ninter_mode_checksum=");
+    (void)write_hex_u64(1, trace->inter_mode_checksum);
+    (void)write_text(1, "\nmv_stack_checksum=");
+    (void)write_hex_u64(1, trace->mv_stack_checksum);
+    (void)write_text(1, "\nmv_checksum=");
+    (void)write_hex_u64(1, trace->mv_checksum);
+    (void)write_text(1, "\npredictor_checksum=");
+    (void)write_hex_u64(1, trace->predictor_checksum);
+    (void)write_text(1, "\nquantized_checksum=");
+    (void)write_hex_u64(1, trace->quantized_checksum);
+    (void)write_text(1, "\ndequantized_checksum=");
+    (void)write_hex_u64(1, trace->dequantized_checksum);
+    (void)write_text(1, "\nresidual_checksum=");
+    (void)write_hex_u64(1, trace->residual_checksum);
+    (void)write_text(1, "\nreconstruction_checksum=");
+    (void)write_hex_u64(1, trace->reconstruction_checksum);
+    (void)write_text(1, "\ndeblocked_checksum=");
+    (void)write_hex_u64(1, trace->deblocked_checksum);
+    (void)write_text(1, "\ncdef_checksum=");
+    (void)write_hex_u64(1, trace->cdef_checksum);
+    (void)write_text(1, "\nsuperres_checksum=");
+    (void)write_hex_u64(1, trace->superres_checksum);
+    (void)write_text(1, "\nrestoration_checksum=");
+    (void)write_hex_u64(1, trace->restoration_checksum);
 }
 
 static int read_exact(int fd, unsigned char *buffer, size_t count) {
@@ -628,11 +710,11 @@ static AvifdecStatus write_sequence_png(
         size_t frame_index,
         const char *output_path,
         const AvifdecExecutor *executor,
+        AvifdecEntropyTrace *trace,
         AvifdecSequenceInfo *sequence,
         AvifdecFrameInfo *frame,
         AvifdecError *error) {
         AvifdecImage image;
-        AvifdecEntropyTrace trace;
         void *workspace = 0;
         void *image_memory = 0;
         size_t image_memory_size = 0U;
@@ -652,7 +734,8 @@ static AvifdecStatus write_sequence_png(
         if (status != AVIFDEC_OK) goto cleanup;
         status = avifdec_sequence_decode_frame_ex(
             data, size, 0, executor, frame_index, workspace,
-            frame->image.workspace_required, &image, &trace, frame,
+            frame->image.workspace_required, &image,
+            trace, frame,
             error);
         if (status != AVIFDEC_OK) goto cleanup;
 
@@ -677,11 +760,11 @@ static AvifdecStatus write_sequence_raw(
     size_t frame_index,
     const char *output_path,
     const AvifdecExecutor *executor,
+    AvifdecEntropyTrace *trace,
     AvifdecSequenceInfo *sequence,
     AvifdecFrameInfo *frame,
     AvifdecError *error) {
     AvifdecImage image;
-    AvifdecEntropyTrace trace;
     void *workspace = 0;
     void *image_memory = 0;
     size_t image_memory_size = 0U;
@@ -701,7 +784,8 @@ static AvifdecStatus write_sequence_raw(
     if (status == AVIFDEC_OK) {
         status = avifdec_sequence_decode_frame_ex(
             data, size, 0, executor, frame_index, workspace,
-            frame->image.workspace_required, &image, &trace, frame,
+            frame->image.workspace_required, &image,
+            trace, frame,
             error);
     }
     if (status == AVIFDEC_OK &&
@@ -749,11 +833,18 @@ int main(int argc, char **argv) {
     AvifdecExecutor executor;
     const AvifdecExecutor *decode_executor = 0;
     int task_pool_initialized = 0;
+    int diagnostics = 0;
 
     if (!extract_worker_option(
             &argc, argv, &requested_workers)) {
         (void)write_text(
             2, "avifdec: invalid worker count\n");
+        return 2;
+    }
+    if (!extract_flag_option(
+            &argc, argv, "--diagnostics", &diagnostics)) {
+        (void)write_text(
+            2, "avifdec: duplicate diagnostics option\n");
         return 2;
     }
     if (argc == 3 && text_equal(argv[1], "--boxes")) {
@@ -808,7 +899,7 @@ int main(int argc, char **argv) {
         output_path = argv[3];
     } else if (argc != 2) {
         (void)write_text(2,
-            "usage: avifdec [--workers N] [--boxes INPUT.avif | --raw INPUT.avif OUTPUT.yuv | --raw-frame INDEX INPUT.avif OUTPUT.yuv | --png INPUT.avif OUTPUT.png | --png-frame INDEX INPUT.avif OUTPUT.png | --rgb INPUT.avif OUTPUT.rgb | --rgba INPUT.avif OUTPUT.rgba | --rgba-premul INPUT.avif OUTPUT.rgba | --rgb16 INPUT.avif OUTPUT.rgb16 | --rgba16 INPUT.avif OUTPUT.rgba16 | --rgba16-premul INPUT.avif OUTPUT.rgba16 | INPUT.avif]\n");
+            "usage: avifdec [--workers N] [--diagnostics] [--boxes INPUT.avif | --raw INPUT.avif OUTPUT.yuv | --raw-frame INDEX INPUT.avif OUTPUT.yuv | --png INPUT.avif OUTPUT.png | --png-frame INDEX INPUT.avif OUTPUT.png | --rgb INPUT.avif OUTPUT.rgb | --rgba INPUT.avif OUTPUT.rgba | --rgba-premul INPUT.avif OUTPUT.rgba | --rgb16 INPUT.avif OUTPUT.rgb16 | --rgba16 INPUT.avif OUTPUT.rgba16 | --rgba16-premul INPUT.avif OUTPUT.rgba16 | INPUT.avif]\n");
         return 2;
     } else {
         input_path = argv[1];
@@ -892,11 +983,13 @@ int main(int argc, char **argv) {
         if (sequence_png_output) {
             status = write_sequence_png(
                 data, size, sequence_frame_index, output_path,
-                decode_executor, &sequence, &frame, &error);
+                decode_executor, diagnostics ? &entropy_trace : 0,
+                &sequence, &frame, &error);
         } else if (sequence_raw_output) {
             status = write_sequence_raw(
                 data, size, sequence_frame_index, output_path,
-                decode_executor, &sequence, &frame, &error);
+                decode_executor, diagnostics ? &entropy_trace : 0,
+                &sequence, &frame, &error);
         } else {
             status = avifdec_sequence_query_ex(
                 data, size, 0, decode_executor, &sequence, &error);
@@ -950,6 +1043,7 @@ int main(int argc, char **argv) {
                 1, sequence_png_output
                     ? "\npacked_format=png"
                     : "\nraw_plane_order=YUV");
+            if (diagnostics) write_entropy_trace(&entropy_trace);
         }
         (void)write_text(1, "\n");
         if (task_pool_initialized) {
@@ -1119,7 +1213,7 @@ int main(int argc, char **argv) {
                     status = avifdec_decode_ex(
                         data, size, 0, decode_executor,
                         workspace, image_info.workspace_required,
-                        &image, &entropy_trace, &error);
+                        &image, diagnostics ? &entropy_trace : 0, &error);
                     if (status == AVIFDEC_OK) {
                         if (raw_output) {
                             if (write_raw_image(
@@ -1355,60 +1449,10 @@ int main(int argc, char **argv) {
         (void)write_unsigned(
             1, decode_executor == 0
                 ? 1U : decode_executor->worker_count);
-        (void)write_text(1, "\nentropy_tiles=");
-        (void)write_unsigned(1, entropy_trace.tile_count);
-        (void)write_text(1, "\nentropy_partition_nodes=");
-        (void)write_unsigned(1, entropy_trace.partition_nodes);
-        (void)write_text(1, "\nentropy_blocks=");
-        (void)write_unsigned(1, entropy_trace.block_count);
-        (void)write_text(1, "\nframes=");
-        (void)write_unsigned(1, entropy_trace.frame_count);
-        (void)write_text(1, "\nshow_existing_frames=");
-        (void)write_unsigned(1, entropy_trace.show_existing_frame_count);
-        (void)write_text(1, "\ninter_blocks=");
-        (void)write_unsigned(1, entropy_trace.inter_block_count);
-        (void)write_text(1, "\ncompound_blocks=");
-        (void)write_unsigned(1, entropy_trace.compound_block_count);
-        (void)write_text(1, "\nentropy_transforms=");
-        (void)write_unsigned(1, entropy_trace.transform_count);
-        (void)write_text(1, "\nentropy_nonzero_transforms=");
-        (void)write_unsigned(1, entropy_trace.nonzero_transform_count);
-        (void)write_text(1, "\nentropy_coefficients=");
-        (void)write_unsigned(1, entropy_trace.coefficient_count);
-        (void)write_text(1, "\ntransform_size_mask=");
-        (void)write_hex_u64(1, entropy_trace.transform_size_mask);
-        (void)write_text(1, "\ntransform_type_mask=");
-        (void)write_hex_u64(1, entropy_trace.transform_type_mask);
-        (void)write_text(1, "\nentropy_checksum=");
-        (void)write_hex_u64(1, entropy_trace.checksum);
-        (void)write_text(1, "\nmode_checksum=");
-        (void)write_hex_u64(1, entropy_trace.mode_checksum);
-        (void)write_text(1, "\nreference_state_checksum=");
-        (void)write_hex_u64(1, entropy_trace.reference_state_checksum);
-        (void)write_text(1, "\ninter_mode_checksum=");
-        (void)write_hex_u64(1, entropy_trace.inter_mode_checksum);
-        (void)write_text(1, "\nmv_stack_checksum=");
-        (void)write_hex_u64(1, entropy_trace.mv_stack_checksum);
-        (void)write_text(1, "\nmv_checksum=");
-        (void)write_hex_u64(1, entropy_trace.mv_checksum);
-        (void)write_text(1, "\npredictor_checksum=");
-        (void)write_hex_u64(1, entropy_trace.predictor_checksum);
-        (void)write_text(1, "\nquantized_checksum=");
-        (void)write_hex_u64(1, entropy_trace.quantized_checksum);
-        (void)write_text(1, "\ndequantized_checksum=");
-        (void)write_hex_u64(1, entropy_trace.dequantized_checksum);
-        (void)write_text(1, "\nresidual_checksum=");
-        (void)write_hex_u64(1, entropy_trace.residual_checksum);
-        (void)write_text(1, "\nreconstruction_checksum=");
-        (void)write_hex_u64(1, entropy_trace.reconstruction_checksum);
-        (void)write_text(1, "\ndeblocked_checksum=");
-        (void)write_hex_u64(1, entropy_trace.deblocked_checksum);
-        (void)write_text(1, "\ncdef_checksum=");
-        (void)write_hex_u64(1, entropy_trace.cdef_checksum);
-        (void)write_text(1, "\nsuperres_checksum=");
-        (void)write_hex_u64(1, entropy_trace.superres_checksum);
-        (void)write_text(1, "\nrestoration_checksum=");
-        (void)write_hex_u64(1, entropy_trace.restoration_checksum);
+        if (diagnostics ||
+            (!raw_output && !png_output && packed_format < 0)) {
+            write_entropy_trace(&entropy_trace);
+        }
         if (raw_output) {
             (void)write_text(1, "\nraw_sample_bytes=");
             (void)write_unsigned(1, image.bit_depth == 8U ? 1U : 2U);

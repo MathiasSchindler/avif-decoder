@@ -201,15 +201,18 @@ if $binary >/dev/null 2>&1; then
     exit 1
 fi
 
-test -z "$(nm -u "$binary")"
 case $(uname -s) in
     Darwin)
+        unexpected=$(nm -u "$binary" | grep -Ev \
+            '^(___ulock_wait|___ulock_wake|_pthread_create|_pthread_join|_sysctlbyname|dyld_stub_binder)$' || true)
+        test -z "$unexpected"
         if test -n "$(otool -L "$binary" | sed '1d')"; then
             echo 'freestanding encoder has a dynamic library dependency' >&2
             exit 1
         fi
         ;;
     *)
+        test -z "$(nm -u "$binary")"
         if readelf -l "$binary" | grep -q INTERP; then
             echo 'freestanding encoder has a dynamic interpreter' >&2
             exit 1

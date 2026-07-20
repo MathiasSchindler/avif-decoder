@@ -127,9 +127,9 @@ tile jobs and ordered serialization in `src/encoder/avifenc.c`, and the CLI's
 `--workers` adapter. Strict layout vectors, hosted concurrent sanitizer tests,
 CLI byte-identity tests, the nine-case scorecard, and external interoperability
 cover the contract. On the named M4 Max host, a hosted two-worker executor
-encodes the balanced 8192x64 case 1.95x faster than serial; the freestanding
-macOS substrate currently falls back to one worker, while Linux uses the
-existing native task pool.
+encodes the balanced 8192x64 case 1.95x faster than serial. The freestanding
+Linux and macOS CLIs both use the native task pool when multiple workers are
+requested.
 
 ## Goal 3: Variable partitions and transforms
 

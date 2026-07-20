@@ -89,7 +89,7 @@ The `avifenc` CLI additionally accepts non-interlaced 8-bit PNG and baseline
 edges to even dimensions, and preserves supported source dimensions. The core
 API remains planar and preserves the caller-supplied NCLX color fields. The
 optional executor and CLI `--workers` setting parallelize independent tiles;
-Linux uses native worker threads and macOS currently falls back to serial.
+Linux and macOS both use native worker threads.
 
 ## Known limitations
 
