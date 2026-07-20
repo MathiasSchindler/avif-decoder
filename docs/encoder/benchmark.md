@@ -47,6 +47,20 @@ BENCHMARK_ITERATIONS=20 make encoder-benchmark-json
 build/host/encoder-benchmark --human --iterations 20 --workers 2
 ```
 
+For an opt-in AQ comparison without changing the checked-in fixed-q baseline,
+run:
+
+```sh
+build/host/encoder-benchmark --stable-json --aq-strength 12
+build/host/encoder-benchmark --stable-json --aq-strength 4 \
+	--aq-match-fixed-size
+```
+
+The second command first measures each fixed-q case and feeds that encoded byte
+count to the finite target-size controller. The 2x2 zero-distortion case keeps
+its fixed quantizer because AQ signaling alone cannot fit its original syntax
+floor.
+
 The human table reports aggregate monotonic wall-clock milliseconds for the selected iteration count, throughput in megapixels per second, output bytes, luma PSNR, and prediction trials. The timed loop uses `avifenc_encode_with_executor()` with null statistics, so statistics collection and reconstruction hashing do not distort the encoder baseline. JSON includes those timing fields plus the complete stable scorecard.
 
 `--workers N` uses a hosted pthread executor for reproducible core scaling
@@ -87,6 +101,14 @@ SSE. The speed-2 cases retain identical reconstruction quality while using
 2.2% more bytes for `noise` and about 7.0% more for the two large cases.
 Workspace remains explicitly bounded and grows by less than 2 KiB for the
 small single-tile scorecard cases.
+
+The Goal 5 default fixed-q baseline preserves every Goal 4 output byte count,
+checksum, quality metric, and operation count. Workspace grows by 10,036 to
+59,184 bytes across the nine cases for fixed qmatrix tables and AQ state;
+selected qindex and pass count are now stable metrics. Activity AQ at strength
+12 and the same base qindices uses 9.18% more bytes while reducing aggregate
+Y/U/V SSE by 3.20%, 0.12%, and 0.10%, and structural edge error by 2.83%,
+0.48%, and 0.27%. This is a quality-biased tradeoff, not an equal-size claim.
 
 ## Named timing reference
 

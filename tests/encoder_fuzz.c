@@ -116,10 +116,37 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
     image.color.transfer_characteristics = 1U;
     image.color.matrix_coefficients = 1U;
     avifenc_options_default(&options);
-    options.quantizer = (uint16_t)(
-        1U + fuzz_byte(data, size, 2U) % 255U);
+    options.quantizer = fuzz_byte(data, size, 2U);
     options.speed = (uint8_t)(fuzz_byte(data, size, 3U) %
                               (AVIFENC_MAX_SPEED + 1U));
+    if (options.quantizer != 0U) {
+        options.quantization.delta_q_y_dc =
+            (int8_t)((int)(fuzz_byte(data, size, 8U) % 128U) - 64);
+        options.quantization.delta_q_u_dc =
+            (int8_t)((int)(fuzz_byte(data, size, 9U) % 128U) - 64);
+        options.quantization.delta_q_u_ac =
+            (int8_t)((int)(fuzz_byte(data, size, 10U) % 128U) - 64);
+        options.quantization.delta_q_v_dc =
+            (int8_t)((int)(fuzz_byte(data, size, 11U) % 128U) - 64);
+        options.quantization.delta_q_v_ac =
+            (int8_t)((int)(fuzz_byte(data, size, 12U) % 128U) - 64);
+        options.quantization.matrix_mode =
+            (uint8_t)(fuzz_byte(data, size, 13U) % 3U);
+        options.quantization.matrix_levels[0] =
+            (uint8_t)(fuzz_byte(data, size, 14U) % 15U);
+        options.quantization.matrix_levels[1] =
+            (uint8_t)(fuzz_byte(data, size, 15U) % 15U);
+        options.quantization.matrix_levels[2] =
+            (uint8_t)(fuzz_byte(data, size, 16U) % 15U);
+        options.quantization.adaptive_quantization =
+            (uint8_t)(fuzz_byte(data, size, 17U) & 1U);
+        options.quantization.aq_strength =
+            (uint8_t)(fuzz_byte(data, size, 18U) % 64U);
+        options.rate_control.mode =
+            (uint8_t)(fuzz_byte(data, size, 19U) % 2U);
+        options.rate_control.target_quality =
+            (uint16_t)(7000U + fuzz_byte(data, size, 20U) * 7U);
+    }
 
     fuzz_require(avifenc_query(
         &image, &options, &requirements, &error) == AVIFENC_OK);
@@ -159,18 +186,27 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
     avifdec_memory_fill(fuzz_output, 0xa5U, sizeof(fuzz_output));
     avifdec_memory_fill(
         fuzz_output_repeat, 0xa5U, sizeof(fuzz_output_repeat));
-    fuzz_require(avifenc_encode(
+    status = avifenc_encode(
         &image, &options, fuzz_workspace + workspace_offset,
         requirements.workspace_required,
         fuzz_output + workspace_offset,
         requirements.output_capacity_required,
-        &output_written, &error) == AVIFENC_OK);
-    status = avifenc_encode(
+        &output_written, &error);
+    {
+        AvifencStatus repeated_status = avifenc_encode(
         &image, &options, fuzz_workspace_repeat + repeat_offset,
         requirements.workspace_required,
         fuzz_output_repeat + repeat_offset,
         requirements.output_capacity_required,
         &repeated_written, &error);
+
+        fuzz_require(status == repeated_status);
+    }
+    if (status == AVIFENC_LIMIT_EXCEEDED) {
+        fuzz_require(options.rate_control.mode != 0U &&
+                     output_written == 0U && repeated_written == 0U);
+        return 0;
+    }
     fuzz_require(status == AVIFENC_OK);
     fuzz_require(output_written == repeated_written && output_written != 0U &&
                  avifdec_memory_compare(
@@ -188,7 +224,8 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
         fuzz_output + workspace_offset, output_written,
         0, 0, 0U, &decoded_info, &decode_error) == AVIFDEC_OK);
     fuzz_require(decoded_info.width == width && decoded_info.height == height &&
-                 decoded_info.base_q_index == options.quantizer &&
+                 (options.rate_control.mode != 0U ||
+                  decoded_info.base_q_index == options.quantizer) &&
                  decoded_info.workspace_required <=
                      ENCODER_FUZZ_DECODE_WORKSPACE_SIZE);
     fuzz_require(avifdec_decode(
@@ -201,5 +238,30 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
                  decoded.heights[1] == height / 2U &&
                  decoded.widths[2] == width / 2U &&
                  decoded.heights[2] == height / 2U);
+    if (options.quantizer == 0U) {
+        uint32_t row;
+        uint32_t column;
+
+        fuzz_require(decoded_info.coded_lossless == 1U);
+        for (row = 0U; row < height; ++row) {
+            for (column = 0U; column < width; ++column) {
+                fuzz_require(fuzz_decoded_y[
+                    (size_t)row * ENCODER_FUZZ_MAX_WIDTH + column] ==
+                    fuzz_y[(size_t)row * width + column]);
+            }
+        }
+        for (row = 0U; row < height / 2U; ++row) {
+            for (column = 0U; column < width / 2U; ++column) {
+                size_t decoded_index =
+                    (size_t)row * (ENCODER_FUZZ_MAX_WIDTH / 2U) + column;
+                size_t source_index = (size_t)row * (width / 2U) + column;
+
+                fuzz_require(fuzz_decoded_u[decoded_index] ==
+                                 fuzz_u[source_index] &&
+                             fuzz_decoded_v[decoded_index] ==
+                                 fuzz_v[source_index]);
+            }
+        }
+    }
     return 0;
 }

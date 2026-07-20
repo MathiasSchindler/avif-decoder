@@ -35,9 +35,10 @@ half width and half height. `AvifencColor` is written as NCLX/AV1 color
 configuration: each color index must fit in 8 bits, `full_range` is 0 or 1,
 and `chroma_sample_position` is 0 through 3.
 
-Quantizers 1 through 255 and speed levels 0 through `AVIFENC_MAX_SPEED` (2)
-are supported. Quantizer 0, including lossless encoding, returns
-`AVIFENC_UNSUPPORTED`. Eligible blocks search all luma and chroma intra modes,
+Quantizers 0 through 255 and speed levels 0 through `AVIFENC_MAX_SPEED` (2)
+are supported. Quantizer 0 uses 4x4 WHT transforms and reconstructs every YUV
+sample exactly. Lossless mode rejects nonzero quantizer deltas, matrices, and
+adaptive quantization. Eligible blocks search all luma and chroma intra modes,
 including legal directional deltas, smooth variants, Paeth, CfL, filter intra,
 and exact palettes. Speed 0 uses the broadest bounded mode, delta, and partition
 budgets; speed 1 narrows delta and partition trials; speed 2 follows a
@@ -48,9 +49,26 @@ weighted twice. Lower quantizers generally preserve more detail and increase
 output size. Speed changes bounded search work, not the format surface or
 memory requirement.
 
+`AvifencQuantization` exposes signed Y DC, U DC/AC, and V DC/AC deltas in the
+legal -64 through 63 range. Matrix mode 0 disables qmatrices, mode 1 uses the
+three explicit levels 0 through 14, and mode 2 resolves per-plane levels from
+source activity. Adaptive-quantization mode 1 classifies luma and chroma
+gradients into three ALT_Q segments and clips effective lossy qindices to
+1 through 255. AQ strength is 0 through 63.
+
+`AvifencRateControl` mode 0 uses the fixed quantizer, mode 1 targets the
+0 through `AVIFENC_TARGET_QUALITY_MAX` quality score, and mode 2 targets a
+nonzero maximum encoded byte count. The search is deterministic and capped at
+9, 7, and 5 total passes for speeds 0, 1, and 2. The selected qindex is always
+encoded again for final output. Target size never exceeds its limit and returns
+`AVIFENC_LIMIT_EXCEEDED` when qindex 255 cannot fit; discrete small streams may
+undershoot the target.
+
 `avifenc_query()` returns conservative capacities that are independent of
-source pixel values and speed. The workspace includes a fixed 2 KiB partition
-trial reconstruction checkpoint in addition to coding and transform contexts.
+source pixel values and speed. The workspace includes fixed qmatrix tables, an
+AQ segment map, and a 2 KiB partition-trial reconstruction checkpoint in
+addition to coding and transform contexts. Rate-control queries also include a
+private trial-output span; no pass allocates or retains hidden state.
 `avifenc_encode()` accepts an unaligned
 workspace, requires capacities at least as large as the query result, sets
 `output_written` to the exact encoded length on success, and sets it to zero on
@@ -61,6 +79,8 @@ same image bytes, metadata, and options are byte-identical.
 `AvifencStatistics` with deterministic counts for tiles, partition nodes,
 blocks, prediction and transform trials, committed transforms, entropy
 symbols, literal bits, filter units, and per-plane reconstruction checksums.
+Goal 5 additionally reports per-plane reconstruction SSE, selected qindex,
+achieved quality, and total encode pass count.
 The checksums cover visible sample values and are independent of host byte
 order. Statistics are cleared on entry and are valid after success. They
 contain no timers or platform state, so callers can compare coding work across

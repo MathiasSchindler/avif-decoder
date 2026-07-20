@@ -142,6 +142,45 @@ static int32_t av1_recon_clip_dequant(int64_t value, uint8_t bit_depth) {
     return (int32_t)value;
 }
 
+AvifdecStatus av1_recon_quant_step(const Av1DequantParams *params,
+                                   Av1TxSize tx_size,
+                                   Av1TxType tx_type,
+                                   size_t coefficient_index,
+                                   uint32_t *step) {
+    const Av1TxSizeInfo *tx;
+    size_t count;
+    uint32_t quant;
+
+    if (params == 0 || step == 0 || tx_size >= AV1_TX_SIZES_ALL ||
+        tx_type >= AV1_TX_TYPES || params->plane >= 3U ||
+        params->qm_level > 15U) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    tx = &av1_tx_size_info[tx_size];
+    count = (size_t)(tx->width < 32U ? tx->width : 32U) *
+        (tx->height < 32U ? tx->height : 32U);
+    if (coefficient_index >= count) return AVIFDEC_INVALID_ARGUMENT;
+    quant = coefficient_index == 0U
+        ? av1_recon_dc_quant(
+            params->bit_depth,
+            params->q_index + av1_recon_dc_delta(params))
+        : av1_recon_ac_quant(
+            params->bit_depth,
+            params->q_index + av1_recon_ac_delta(params));
+    if (params->using_qmatrix != 0U && tx_type < AV1_TX_IDTX &&
+        params->qm_level < 15U) {
+        size_t matrix_index =
+            (size_t)av1_qm_offset[tx_size] + coefficient_index;
+
+        if (matrix_index >= AV1_QM_TOTAL_SIZE || params->qmatrix == 0) {
+            return AVIFDEC_INVALID_DATA;
+        }
+        quant = (quant * params->qmatrix[matrix_index] + 16U) >> 5U;
+    }
+    *step = quant;
+    return AVIFDEC_OK;
+}
+
 AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
                                    size_t quantized_count,
                                    Av1TxSize tx_size,

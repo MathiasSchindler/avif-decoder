@@ -36,6 +36,14 @@ static unsigned int av1_write_tile_log2(uint32_t block_size,
     return result;
 }
 
+static void av1_write_delta_q(AvifencBitWriter *writer, int8_t delta) {
+    (void)avifenc_bit_writer_write(writer, delta != 0, 1U);
+    if (delta != 0) {
+        (void)avifenc_bit_writer_write(
+            writer, (uint8_t)delta & 0x7fU, 7U);
+    }
+}
+
 AvifencStatus avifenc_av1_tile_layout(
     uint32_t width,
     uint32_t height,
@@ -162,7 +170,16 @@ static AvifencStatus av1_write_sequence_header(
     (void)avifenc_bit_writer_write(writer, config->color.full_range, 1U);
     (void)avifenc_bit_writer_write(
         writer, config->color.chroma_sample_position, 2U);
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
+    (void)avifenc_bit_writer_write(
+        writer,
+        config->quantization.delta_q_u_dc !=
+                config->quantization.delta_q_v_dc ||
+            config->quantization.delta_q_u_ac !=
+                config->quantization.delta_q_v_ac ||
+            (config->quantization.matrix_mode != 0U &&
+             config->quantization.matrix_levels[1] !=
+                config->quantization.matrix_levels[2]),
+        1U);
 
     /* film_grain_params_present. */
     (void)avifenc_bit_writer_write(writer, 0U, 1U);
@@ -182,6 +199,14 @@ static AvifencStatus av1_write_frame_header(AvifencBitWriter *writer,
     unsigned int min_tiles_log2 = av1_write_tile_log2(
         2304U, sb_cols * sb_rows);
     unsigned int index;
+    int separate_uv =
+        config->quantization.delta_q_u_dc !=
+            config->quantization.delta_q_v_dc ||
+        config->quantization.delta_q_u_ac !=
+            config->quantization.delta_q_v_ac ||
+        (config->quantization.matrix_mode != 0U &&
+         config->quantization.matrix_levels[1] !=
+            config->quantization.matrix_levels[2]);
 
     /* disable_cdf_update and per-frame screen-content tool selection. */
     (void)avifenc_bit_writer_write(writer, 1U, 1U);
@@ -214,15 +239,61 @@ static AvifencStatus av1_write_frame_header(AvifencBitWriter *writer,
             writer, layout->tile_size_bytes - 1U, 2U);
     }
 
-    /* quantization_params: one base index, zero deltas, no qmatrix. */
+    /* quantization_params. */
     (void)avifenc_bit_writer_write(writer, config->quantizer, 8U);
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
+    av1_write_delta_q(writer, config->quantization.delta_q_y_dc);
+    if (separate_uv) (void)avifenc_bit_writer_write(writer, 1U, 1U);
+    av1_write_delta_q(writer, config->quantization.delta_q_u_dc);
+    av1_write_delta_q(writer, config->quantization.delta_q_u_ac);
+    if (separate_uv) {
+        av1_write_delta_q(writer, config->quantization.delta_q_v_dc);
+        av1_write_delta_q(writer, config->quantization.delta_q_v_ac);
+    }
+    (void)avifenc_bit_writer_write(
+        writer, config->quantization.matrix_mode != 0U, 1U);
+    if (config->quantization.matrix_mode != 0U) {
+        (void)avifenc_bit_writer_write(
+            writer, config->quantization.matrix_levels[0], 4U);
+        (void)avifenc_bit_writer_write(
+            writer, config->quantization.matrix_levels[1], 4U);
+        if (separate_uv) {
+            (void)avifenc_bit_writer_write(
+                writer, config->quantization.matrix_levels[2], 4U);
+        }
+    }
 
-    /* segmentation_enabled and delta_q_present. */
-    (void)avifenc_bit_writer_write(writer, 0U, 1U);
+    /* Segmentation uses ALT_Q only for bounded activity AQ. */
+    (void)avifenc_bit_writer_write(
+        writer, config->quantization.adaptive_quantization != 0U, 1U);
+    if (config->quantization.adaptive_quantization != 0U) {
+        unsigned int segment;
+        unsigned int feature;
+
+        for (segment = 0U; segment < 8U; ++segment) {
+            for (feature = 0U; feature < 8U; ++feature) {
+                int enabled = feature == 0U &&
+                    (segment == 1U || segment == 2U);
+
+                (void)avifenc_bit_writer_write(writer, enabled, 1U);
+                if (enabled) {
+                    int value;
+
+                    if (segment == 1U) {
+                        unsigned int maximum = 255U - config->quantizer;
+                        value = config->quantization.aq_strength < maximum
+                            ? config->quantization.aq_strength
+                            : (int)maximum;
+                    } else {
+                        unsigned int maximum = config->quantizer - 1U;
+                        value = -(int)(config->quantization.aq_strength < maximum
+                            ? config->quantization.aq_strength : maximum);
+                    }
+                    (void)avifenc_bit_writer_write(
+                        writer, (uint16_t)value & 0x1ffU, 9U);
+                }
+            }
+        }
+    }
     if (config->quantizer != 0U) {
         (void)avifenc_bit_writer_write(writer, 0U, 1U);
 

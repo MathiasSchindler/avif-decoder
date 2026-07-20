@@ -85,7 +85,9 @@ build/x86_64/avifenc --quantizer 128 --speed 0 \
 	640 480 frame.yuv frame.avif
 ```
 
-The quantizer range is 1 through 255 and defaults to 128. Input from standard
+The quantizer range is 0 through 255 and defaults to 128. Quantizer 0 selects
+pixel-exact lossless coding; it cannot be combined with quantizer deltas,
+matrices, or adaptive quantization. Input from standard
 input and output to standard output are selected with `-`. The encoder rejects
 truncated input and trailing bytes.
 
@@ -94,6 +96,8 @@ The CLI also reads dimensions directly from PNG and JPEG files:
 ```sh
 build/x86_64/avifenc --quantizer 96 --speed 1 photo.jpg photo.avif
 build/x86_64/avifenc --workers 4 artwork.png artwork.avif
+build/x86_64/avifenc --target-size 50000 --aq activity --aq-strength 12 \
+	artwork.png artwork-small.avif
 build/x86_64/avifenc artwork.png artwork.avif
 ```
 
@@ -114,12 +118,27 @@ uses the classification-only 4x4 baseline. Eligible blocks can select all AV1
 luma and chroma intra directions, smooth variants, Paeth, CfL, filter intra,
 and exact palettes; speed changes search work, not the supported file format.
 
+`--y-dc-delta`, `--u-dc-delta`, `--u-ac-delta`, `--v-dc-delta`, and
+`--v-ac-delta` accept the legal signed AV1 delta range, -64 through 63.
+`--qmatrix LEVEL` selects levels 0 through 14 for all planes; `--qmatrix auto`
+selects bounded per-plane levels from source activity. `--aq activity` uses
+three ALT_Q segments selected from luma and chroma gradients while retaining
+variable partitions; `--aq-strength 0..63` sets the clipped qindex offset and
+defaults to 8.
+
+`--target-quality 0..10000` and `--target-size BYTES` are mutually exclusive.
+They run deterministic finite qindex searches capped at 9, 7, and 5 total
+passes for speeds 0, 1, and 2, including the final output pass. Target size
+never exceeds the requested byte count and reports an error when even qindex
+255 cannot reach it. Small or discontinuous streams can undershoot; regression
+fixtures require an undershoot no larger than 10% plus 32 bytes.
+
 The encoder writes one 8-bit Main-profile reduced-still key frame with a
 deterministic uniform tile layout. `--workers 1..32` is orthogonal to speed and
 uses the existing task pool where platform worker threads are supported;
-unsupported substrates fall back to serial. Alpha, lossless mode, grids,
-sequences, inter prediction, rate control, and target-size encoding are
-unsupported. See [`api.md`](api.md) for caller-owned buffer contracts.
+unsupported substrates fall back to serial. Alpha, grids, sequences, and inter
+prediction are unsupported. See [`api.md`](api.md) for caller-owned buffer
+contracts.
 
 ## Output formats
 

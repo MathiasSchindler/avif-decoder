@@ -73,7 +73,11 @@ requires even dimensions, an odd final row or column is repeated once.
 Supported source dimensions are preserved and split into deterministic AV1
 tiles when one tile would exceed width or area limits.
 
-Quantizers 1 through 255 and speed levels 0 through 2 are supported. Speed 0
+Quantizers 0 through 255 and speed levels 0 through 2 are supported. Quantizer
+0 uses the exact lossless 4x4 WHT path. Lossy encoding supports separate legal
+Y/U/V DC and AC deltas, fixed or activity-selected quantization matrices,
+three-segment activity AQ, and finite target-quality or target-size searches.
+Speed 0
 performs the broadest bounded mode and legal angle-delta search, speed 1 uses
 narrower angle and partition budgets, and speed 2 keeps the classification-only
 4x4 baseline. Eligible blocks can use all AV1 intra directions, smooth variants,

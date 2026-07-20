@@ -8,10 +8,10 @@ trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 mkdir -p "$tmp_dir"
 
 output=$($binary --version)
-test "$output" = 'avifenc 0.1.0'
+test "$output" = 'avifenc 0.2.0'
 output=$($binary --help)
 case "$output" in
-    *'usage: avifenc [--quantizer 1..255] [--speed 0..2] [--workers 1..32] WIDTH HEIGHT INPUT.yuv OUTPUT.avif'*) ;;
+    *'usage: avifenc [--quantizer 0..255] [--speed 0..2] [--workers 1..32]'*) ;;
     *) echo 'encoder help is missing the command contract' >&2; exit 1 ;;
 esac
 case "$output" in
@@ -166,18 +166,22 @@ case "$output" in
     *) echo 'invalid quantizer returned the wrong error' >&2; exit 1 ;;
 esac
 
-if output=$($binary --quantizer 0 2 2 "$tmp_dir/flat-2x2.yuv" \
-        "$tmp_dir/lossless.avif" 2>&1); then
-    echo 'unsupported zero quantizer was accepted' >&2
+$binary --quantizer 0 2 2 "$tmp_dir/flat-2x2.yuv" \
+    "$tmp_dir/lossless.avif"
+$decoder "$tmp_dir/lossless.avif" >/dev/null
+
+$binary --quantizer 96 --y-dc-delta -7 --u-dc-delta 3 \
+    --u-ac-delta -5 --v-dc-delta 9 --v-ac-delta 4 \
+    --qmatrix 7 --aq activity --aq-strength 12 \
+    10 6 "$tmp_dir/ramp-10x6.yuv" "$tmp_dir/goal5.avif"
+$decoder "$tmp_dir/goal5.avif" >/dev/null
+
+if $binary --target-quality 9000 --target-size 500 \
+        2 2 "$tmp_dir/flat-2x2.yuv" "$tmp_dir/conflicting.avif" \
+        >/dev/null 2>&1; then
+    echo 'conflicting rate targets were accepted' >&2
     exit 1
-else
-    exit_code=$?
 fi
-test "$exit_code" -eq 2
-case "$output" in
-    *'unsupported feature: quantizer'*) ;;
-    *) echo 'zero quantizer returned the wrong error' >&2; exit 1 ;;
-esac
 
 if output=$($binary --speed 3 2 2 "$tmp_dir/flat-2x2.yuv" \
         "$tmp_dir/speed.avif" 2>&1); then

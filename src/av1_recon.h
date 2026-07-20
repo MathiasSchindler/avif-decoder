@@ -33,6 +33,11 @@ AvifdecStatus av1_recon_qmatrix_decode(uint8_t level,
                                        uint8_t chroma,
                                        uint8_t *matrix,
                                        size_t matrix_capacity);
+AvifdecStatus av1_recon_quant_step(const Av1DequantParams *params,
+                                   Av1TxSize tx_size,
+                                   Av1TxType tx_type,
+                                   size_t coefficient_index,
+                                   uint32_t *step);
 AvifdecStatus av1_recon_dequantize(const int32_t *quantized,
                                    size_t quantized_count,
                                    Av1TxSize tx_size,

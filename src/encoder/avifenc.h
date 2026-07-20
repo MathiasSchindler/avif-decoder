@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define AVIFENC_VERSION_MAJOR 0U
-#define AVIFENC_VERSION_MINOR 1U
+#define AVIFENC_VERSION_MINOR 2U
 #define AVIFENC_VERSION_PATCH 0U
 
 #define AVIFENC_MAX_DIMENSION 65536U
@@ -13,6 +13,7 @@
 #define AVIFENC_DEFAULT_SPEED 0U
 #define AVIFENC_MAX_SPEED 2U
 #define AVIFENC_EXECUTOR_MAX_WORKERS 32U
+#define AVIFENC_TARGET_QUALITY_MAX 10000U
 
 typedef enum {
     AVIFENC_OK = 0,
@@ -38,7 +39,9 @@ typedef enum {
     AVIFENC_CONTEXT_WORKSPACE,
     AVIFENC_CONTEXT_OUTPUT,
     AVIFENC_CONTEXT_IMPLEMENTATION,
-    AVIFENC_CONTEXT_EXECUTOR
+    AVIFENC_CONTEXT_EXECUTOR,
+    AVIFENC_CONTEXT_QUANTIZATION,
+    AVIFENC_CONTEXT_RATE_CONTROL
 } AvifencErrorContext;
 
 typedef struct {
@@ -65,9 +68,32 @@ typedef struct {
 } AvifencImage;
 
 typedef struct {
+    int8_t delta_q_y_dc;
+    int8_t delta_q_u_dc;
+    int8_t delta_q_u_ac;
+    int8_t delta_q_v_dc;
+    int8_t delta_q_v_ac;
+    /* 0 disables matrices, 1 uses explicit levels, 2 selects by activity. */
+    uint8_t matrix_mode;
+    uint8_t matrix_levels[3];
+    /* 0 disables spatial adaptation; 1 selects bounded activity AQ. */
+    uint8_t adaptive_quantization;
+    uint8_t aq_strength;
+} AvifencQuantization;
+
+typedef struct {
+    /* 0 uses quantizer, 1 targets quality, 2 targets output byte size. */
+    uint8_t mode;
+    uint16_t target_quality;
+    size_t target_size;
+} AvifencRateControl;
+
+typedef struct {
     uint16_t quantizer;
     /* Lower values search broader bounded mode, angle, and partition sets. */
     uint8_t speed;
+    AvifencQuantization quantization;
+    AvifencRateControl rate_control;
 } AvifencOptions;
 
 typedef struct {
@@ -93,6 +119,10 @@ typedef struct {
     uint64_t filter_intra_block_count;
     uint64_t palette_block_count;
     uint64_t reconstruction_checksum[3];
+    uint64_t reconstruction_sse[3];
+    uint16_t selected_quantizer;
+    uint16_t achieved_quality;
+    uint8_t encode_pass_count;
 } AvifencStatistics;
 
 typedef AvifencStatus (*AvifencParallelBody)(

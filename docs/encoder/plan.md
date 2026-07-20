@@ -12,7 +12,7 @@ ten ordered goals spanning **speed**, **features**, and **encoding quality**.
 | 2. Multi-tile encoding and bounded parallelism | Large images without resizing | Yes | Yes |  | Complete |
 | 3. Variable partitions and transforms | Better local adaptation | Yes | Yes | Yes | Complete |
 | 4. Complete intra and chroma prediction | Stronger still-image coding | Yes | Yes | Yes | Complete |
-| 5. Quantization, lossless, and rate control | Useful quality/size controls | Yes | Yes | Yes | Planned |
+| 5. Quantization, lossless, and rate control | Useful quality/size controls | Yes | Yes | Yes | Complete |
 | 6. In-loop filters and restoration | Better reconstruction per byte | Yes | Yes | Yes | Planned |
 | 7. Bit-depth and chroma-format parity | Monochrome, 4:2:2, 4:4:4, HDR |  | Yes | Yes | Planned |
 | 8. Alpha and metadata-rich still images | Practical AVIF item parity |  | Yes | Yes | Planned |
@@ -220,6 +220,22 @@ This goal is complete when lossless output is pixel-exact, fixed-quantizer
 results remain deterministic, target-quality behavior is monotonic, target-size
 fixtures meet documented tolerances, and adaptive quantization improves the
 corpus score without unacceptable chroma or edge regressions.
+
+Implemented by the exact 4x4 WHT lossless path, shared encoder/decoder
+quantization-step math, legal per-plane deltas and qmatrices, and three ALT_Q
+activity segments derived from luma and chroma gradients. AQ retains variable
+partitions and clips effective lossy qindices to 1 through 255. Fixed,
+target-quality, and target-size modes use caller-owned trial storage and
+deterministic 9/7/5 total-pass caps for speeds 0/1/2; unreachable byte targets
+fail explicitly.
+
+Strict, sanitizer, parallel, CLI, 1,000-case fuzz, and external FFmpeg,
+libaom, dav1d, and libavif checks cover the surface. Quantizer zero is
+pixel-exact across external decoders. The default fixed-q scorecard remains
+byte-identical to Goal 4. At fixed base qindices, activity AQ strength 12 spends
+9.18% more bytes while improving aggregate Y/U/V SSE and structural edge error
+on every measured plane; [`benchmark.md`](benchmark.md) records the reviewed
+tradeoff and reproducible commands.
 
 ## Goal 6: In-loop filters and restoration
 

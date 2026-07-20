@@ -61,7 +61,7 @@ static void avifenc_error_reset(AvifencError *error) {
 }
 
 const char *avifenc_version_string(void) {
-    return "0.1.0";
+    return "0.2.0";
 }
 
 const char *avifenc_status_string(AvifencStatus status) {
@@ -93,15 +93,121 @@ const char *avifenc_error_context_string(AvifencErrorContext context) {
         case AVIFENC_CONTEXT_OUTPUT: return "output";
         case AVIFENC_CONTEXT_IMPLEMENTATION: return "encoder implementation";
         case AVIFENC_CONTEXT_EXECUTOR: return "executor";
+        case AVIFENC_CONTEXT_QUANTIZATION: return "quantization";
+        case AVIFENC_CONTEXT_RATE_CONTROL: return "rate control";
     }
     return "unknown context";
 }
 
 void avifenc_options_default(AvifencOptions *options) {
     if (options != 0) {
+        avifdec_memory_fill(options, 0U, sizeof(*options));
         options->quantizer = AVIFENC_DEFAULT_QUANTIZER;
         options->speed = AVIFENC_DEFAULT_SPEED;
     }
+}
+
+static uint8_t avifenc_activity_matrix_level(const uint8_t *plane,
+                                             size_t stride,
+                                             uint32_t width,
+                                             uint32_t height) {
+    uint64_t activity = 0U;
+    uint64_t edges = 0U;
+    uint32_t row;
+    uint32_t column;
+
+    for (row = 0U; row < height; ++row) {
+        for (column = 0U; column < width; ++column) {
+            uint8_t sample = plane[(size_t)row * stride + column];
+
+            if (column != 0U) {
+                uint8_t previous = plane[(size_t)row * stride + column - 1U];
+                activity += sample > previous ? sample - previous
+                                              : previous - sample;
+                ++edges;
+            }
+            if (row != 0U) {
+                uint8_t previous = plane[(size_t)(row - 1U) * stride + column];
+                activity += sample > previous ? sample - previous
+                                              : previous - sample;
+                ++edges;
+            }
+        }
+    }
+    if (edges == 0U) return 8U;
+    activity /= edges;
+    if (activity < 4U) return 10U;
+    if (activity < 12U) return 8U;
+    if (activity < 32U) return 6U;
+    return 4U;
+}
+
+static AvifencStatus avifenc_options_resolve(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    AvifencOptions *resolved,
+    AvifencError *error) {
+    unsigned int plane;
+
+    *resolved = *options;
+    if (options->rate_control.mode > 2U ||
+        options->rate_control.target_quality > AVIFENC_TARGET_QUALITY_MAX ||
+        (options->rate_control.mode == 2U &&
+         options->rate_control.target_size == 0U)) {
+        return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
+                            AVIFENC_CONTEXT_RATE_CONTROL,
+                            options->rate_control.mode == 1U
+                                ? AVIFENC_TARGET_QUALITY_MAX : 1U,
+                            options->rate_control.mode == 1U
+                                ? options->rate_control.target_quality
+                                : options->rate_control.target_size);
+    }
+    if (options->quantization.matrix_mode > 2U ||
+        options->quantization.adaptive_quantization > 1U ||
+        options->quantization.aq_strength > 63U ||
+        options->quantization.delta_q_y_dc < -64 ||
+        options->quantization.delta_q_y_dc > 63 ||
+        options->quantization.delta_q_u_dc < -64 ||
+        options->quantization.delta_q_u_dc > 63 ||
+        options->quantization.delta_q_u_ac < -64 ||
+        options->quantization.delta_q_u_ac > 63 ||
+        options->quantization.delta_q_v_dc < -64 ||
+        options->quantization.delta_q_v_dc > 63 ||
+        options->quantization.delta_q_v_ac < -64 ||
+        options->quantization.delta_q_v_ac > 63) {
+        return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
+                            AVIFENC_CONTEXT_QUANTIZATION, 0U, 0U);
+    }
+    if (options->quantization.matrix_mode == 1U) {
+        for (plane = 0U; plane < 3U; ++plane) {
+            if (options->quantization.matrix_levels[plane] > 14U) {
+                return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
+                                    AVIFENC_CONTEXT_QUANTIZATION, 14U,
+                                    options->quantization.matrix_levels[plane]);
+            }
+        }
+    } else if (options->quantization.matrix_mode == 2U) {
+        for (plane = 0U; plane < 3U; ++plane) {
+            resolved->quantization.matrix_levels[plane] =
+                avifenc_activity_matrix_level(
+                    image->planes[plane], image->strides[plane],
+                    plane == 0U ? image->width : image->width / 2U,
+                    plane == 0U ? image->height : image->height / 2U);
+        }
+        resolved->quantization.matrix_mode = 1U;
+    }
+    if (options->quantizer == 0U &&
+        (resolved->quantization.delta_q_y_dc != 0 ||
+         resolved->quantization.delta_q_u_dc != 0 ||
+         resolved->quantization.delta_q_u_ac != 0 ||
+         resolved->quantization.delta_q_v_dc != 0 ||
+         resolved->quantization.delta_q_v_ac != 0 ||
+         resolved->quantization.matrix_mode != 0U ||
+         resolved->quantization.adaptive_quantization != 0U)) {
+        return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
+                            AVIFENC_CONTEXT_QUANTIZATION, 0U, 0U);
+    }
+    return AVIFENC_OK;
 }
 
 static AvifencStatus avifenc_validate_plane(const uint8_t *plane,
@@ -145,6 +251,42 @@ static uint64_t avifenc_reconstruction_checksum(const uint16_t *plane,
     return checksum;
 }
 
+    static uint64_t avifenc_reconstruction_sse(const uint8_t *source,
+                                               size_t source_stride,
+                                               const uint16_t *reconstruction,
+                                               size_t reconstruction_stride,
+                                               uint32_t width,
+                                               uint32_t height) {
+        uint64_t distortion = 0U;
+        uint32_t row;
+        uint32_t column;
+
+        for (row = 0U; row < height; ++row) {
+            for (column = 0U; column < width; ++column) {
+                int32_t difference =
+                    (int32_t)source[(size_t)row * source_stride + column] -
+                    (int32_t)reconstruction[
+                        (size_t)row * reconstruction_stride + column];
+
+                distortion += (uint64_t)(difference * difference);
+            }
+        }
+        return distortion;
+    }
+
+    static uint16_t avifenc_quality_score(const AvifencStatistics *statistics,
+                                          uint32_t width,
+                                          uint32_t height) {
+        uint64_t weighted = statistics->reconstruction_sse[0] +
+            2U * (statistics->reconstruction_sse[1] +
+                  statistics->reconstruction_sse[2]);
+        uint64_t denominator = 2U * (uint64_t)width * height;
+        uint64_t mse = denominator == 0U ? 65025U : weighted / denominator;
+
+        if (mse > 65025U) mse = 65025U;
+        return (uint16_t)(((65025U - mse) * AVIFENC_TARGET_QUALITY_MAX) /
+                          65025U);
+    }
 static int avifenc_executor_valid(const AvifencExecutor *executor) {
     return executor == 0 ||
         (executor->parallel_for != 0 && executor->worker_count != 0U &&
@@ -181,6 +323,7 @@ static void avifenc_tile_source_init(
     source->quantizer = options->quantizer;
     source->speed = options->speed;
     source->statistics = 0;
+    source->quantization = options->quantization;
     *x_offset = x;
     *y_offset = y;
 }
@@ -214,6 +357,7 @@ static AvifencStatus avifenc_assembly_layout(
     assembly->tile_source.height = image->height;
     assembly->tile_source.quantizer = options->quantizer;
     assembly->tile_source.speed = options->speed;
+    assembly->tile_source.quantization = options->quantization;
     status = avifenc_av1_tile_layout(
         image->width, image->height, &assembly->tile_layout);
     if (status != AVIFENC_OK) return status;
@@ -236,6 +380,7 @@ static AvifencStatus avifenc_assembly_layout(
     av1_config.height = image->height;
     av1_config.color = image->color;
     av1_config.quantizer = options->quantizer;
+    av1_config.quantization = options->quantization;
     if (assembly->tile_count == 1U) {
         avifenc_byte_writer_init_sizing(&sizing);
         status = avifenc_av1_write_with_tile(
@@ -434,6 +579,7 @@ AvifencStatus avifenc_query_with_executor(
     AvifencStatus status;
     AvifencAssembly assembly;
     AvifdecArena sizing;
+    AvifencOptions resolved;
 
     avifenc_error_reset(error);
     if (requirements == 0) {
@@ -474,10 +620,6 @@ AvifencStatus avifenc_query_with_executor(
                             AVIFENC_CONTEXT_QUANTIZER, 255U,
                             options->quantizer);
     }
-    if (options->quantizer == 0U) {
-        return avifenc_fail(error, AVIFENC_UNSUPPORTED,
-                            AVIFENC_CONTEXT_QUANTIZER, 1U, 0U);
-    }
     if (options->speed > AVIFENC_MAX_SPEED) {
         return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
                             AVIFENC_CONTEXT_OPTIONS,
@@ -508,10 +650,13 @@ AvifencStatus avifenc_query_with_executor(
         image->height / 2U, AVIFENC_CONTEXT_PLANE_V, error);
     if (status != AVIFENC_OK) return status;
 
+    status = avifenc_options_resolve(image, options, &resolved, error);
+    if (status != AVIFENC_OK) return status;
+
     avifdec_memory_fill(&assembly, 0U, sizeof(assembly));
     avifdec_arena_init_sizing(&sizing);
     status = avifenc_assembly_layout(
-        image, options, executor == 0 ? 1U : executor->worker_count,
+        image, &resolved, executor == 0 ? 1U : executor->worker_count,
         &sizing, &assembly);
     if (status != AVIFENC_OK) {
         requirements->workspace_required = 0U;
@@ -526,6 +671,15 @@ AvifencStatus avifenc_query_with_executor(
     requirements->workspace_required = assembly.workspace_required;
     requirements->output_capacity_required =
         assembly.output_capacity_required;
+    if (resolved.rate_control.mode != 0U &&
+        !avifdec_size_add(requirements->workspace_required,
+                          requirements->output_capacity_required,
+                          &requirements->workspace_required)) {
+        requirements->workspace_required = 0U;
+        requirements->output_capacity_required = 0U;
+        return avifenc_fail(error, AVIFENC_OVERFLOW,
+                            AVIFENC_CONTEXT_REQUIREMENTS, 0U, 0U);
+    }
     return AVIFENC_OK;
 }
 
@@ -599,7 +753,7 @@ static void avifenc_statistics_add(AvifencStatistics *total,
     total->filter_unit_count += part->filter_unit_count;
 }
 
-AvifencStatus avifenc_encode_with_executor(
+static AvifencStatus avifenc_encode_single_pass(
     const AvifencImage *image,
     const AvifencOptions *options,
     const AvifencExecutor *executor,
@@ -620,6 +774,7 @@ AvifencStatus avifenc_encode_with_executor(
     size_t tile_payload_size;
     size_t av1_payload_size;
     AvifencStatus status;
+    AvifencOptions resolved;
 
     avifenc_error_reset(error);
     if (statistics != 0) {
@@ -632,6 +787,8 @@ AvifencStatus avifenc_encode_with_executor(
     *output_written = 0U;
     status = avifenc_query_with_executor(
         image, options, executor, &requirements, error);
+    if (status != AVIFENC_OK) return status;
+    status = avifenc_options_resolve(image, options, &resolved, error);
     if (status != AVIFENC_OK) return status;
     if (workspace_size < requirements.workspace_required) {
         return avifenc_fail(error, AVIFENC_OUT_OF_MEMORY,
@@ -660,7 +817,7 @@ AvifencStatus avifenc_encode_with_executor(
     avifdec_memory_fill(&assembly, 0U, sizeof(assembly));
     avifdec_arena_init(&arena, workspace, workspace_size);
     status = avifenc_assembly_layout(
-        image, options, executor == 0 ? 1U : executor->worker_count,
+        image, &resolved, executor == 0 ? 1U : executor->worker_count,
         &arena, &assembly);
     if (status != AVIFENC_OK) {
         return avifenc_fail(error, status, AVIFENC_CONTEXT_WORKSPACE,
@@ -739,18 +896,33 @@ AvifencStatus avifenc_encode_with_executor(
         unsigned int plane;
 
         for (plane = 0U; plane < 3U; ++plane) {
+            uint32_t plane_width =
+                plane == 0U ? image->width : image->width / 2U;
+            uint32_t plane_height =
+                plane == 0U ? image->height : image->height / 2U;
+
             statistics->reconstruction_checksum[plane] =
                 avifenc_reconstruction_checksum(
                     assembly.reconstruction.planes[plane],
                     assembly.reconstruction.strides[plane],
-                    plane == 0U ? image->width : image->width / 2U,
-                    plane == 0U ? image->height : image->height / 2U);
+                    plane_width, plane_height);
+            statistics->reconstruction_sse[plane] =
+                avifenc_reconstruction_sse(
+                    image->planes[plane], image->strides[plane],
+                    assembly.reconstruction.planes[plane],
+                    assembly.reconstruction.strides[plane],
+                    plane_width, plane_height);
         }
+        statistics->selected_quantizer = resolved.quantizer;
+        statistics->achieved_quality = avifenc_quality_score(
+            statistics, image->width, image->height);
+        statistics->encode_pass_count = 1U;
     }
     av1_config.width = image->width;
     av1_config.height = image->height;
     av1_config.color = image->color;
     av1_config.quantizer = options->quantizer;
+    av1_config.quantization = resolved.quantization;
     avifenc_byte_writer_init(
         &byte_writer, assembly.av1_payload, assembly.av1_payload_capacity);
     if (assembly.tile_count == 1U) {
@@ -782,6 +954,215 @@ AvifencStatus avifenc_encode_with_executor(
                             output_capacity);
     }
     *output_written = avifenc_byte_writer_size(&byte_writer);
+    return AVIFENC_OK;
+}
+
+AvifencStatus avifenc_encode_with_executor(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    const AvifencExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    void *output,
+    size_t output_capacity,
+    size_t *output_written,
+    AvifencStatistics *statistics,
+    AvifencError *error) {
+    static const uint8_t pass_caps[3] = { 9U, 7U, 5U };
+    AvifencOptions trial_options;
+    AvifencStatistics trial_statistics;
+    AvifencStatistics final_statistics;
+    AvifencRequirements base_requirements;
+    AvifencRequirements rate_requirements;
+    uint8_t *trial_output;
+    uint16_t low;
+    uint16_t high;
+    uint16_t selected = 0U;
+    uint16_t under_quantizer = 0U;
+    uint16_t over_quantizer = 0U;
+    size_t under_size = 0U;
+    size_t over_size = 0U;
+    size_t trial_written = 0U;
+    uint8_t pass_count = 0U;
+    uint8_t pass_cap;
+    int have_selected = 0;
+    AvifencStatus status;
+
+    if (options == 0 || options->rate_control.mode == 0U) {
+        return avifenc_encode_single_pass(
+            image, options, executor, workspace, workspace_size,
+            output, output_capacity, output_written, statistics, error);
+    }
+    if (options->speed > AVIFENC_MAX_SPEED) {
+        return avifenc_encode_single_pass(
+            image, options, executor, workspace, workspace_size,
+            output, output_capacity, output_written, statistics, error);
+    }
+    trial_options = *options;
+    trial_options.rate_control.mode = 0U;
+    trial_options.rate_control.target_quality = 0U;
+    trial_options.rate_control.target_size = 0U;
+    status = avifenc_query_with_executor(
+        image, options, executor, &rate_requirements, error);
+    if (status != AVIFENC_OK) return status;
+    if (output_written == 0) {
+        return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
+                            AVIFENC_CONTEXT_OUTPUT, 1U, 0U);
+    }
+    *output_written = 0U;
+    if (output_capacity < rate_requirements.output_capacity_required) {
+        return avifenc_fail(
+            error, AVIFENC_OUTPUT_TOO_SMALL, AVIFENC_CONTEXT_OUTPUT,
+            rate_requirements.output_capacity_required, output_capacity);
+    }
+    if (output == 0) {
+        return avifenc_fail(
+            error, AVIFENC_INVALID_ARGUMENT, AVIFENC_CONTEXT_OUTPUT,
+            rate_requirements.output_capacity_required, output_capacity);
+    }
+    status = avifenc_query_with_executor(
+        image, &trial_options, executor, &base_requirements, error);
+    if (status != AVIFENC_OK) return status;
+    if (workspace == 0 || workspace_size < rate_requirements.workspace_required) {
+        if (output_written != 0) *output_written = 0U;
+        return avifenc_fail(
+            error, workspace == 0 ? AVIFENC_INVALID_ARGUMENT
+                                  : AVIFENC_OUT_OF_MEMORY,
+            AVIFENC_CONTEXT_WORKSPACE, rate_requirements.workspace_required,
+            workspace_size);
+    }
+    trial_output = (uint8_t *)workspace + base_requirements.workspace_required;
+    pass_cap = pass_caps[options->speed];
+    low = options->rate_control.mode == 1U &&
+          options->quantization.matrix_mode == 0U &&
+          options->quantization.adaptive_quantization == 0U &&
+          options->quantization.delta_q_y_dc == 0 &&
+          options->quantization.delta_q_u_dc == 0 &&
+          options->quantization.delta_q_u_ac == 0 &&
+          options->quantization.delta_q_v_dc == 0 &&
+          options->quantization.delta_q_v_ac == 0 ? 0U : 1U;
+    high = 255U;
+
+    if (options->rate_control.mode == 2U) {
+        trial_options.quantizer = 255U;
+        status = avifenc_encode_single_pass(
+            image, &trial_options, executor, workspace,
+            base_requirements.workspace_required,
+            trial_output, base_requirements.output_capacity_required,
+            &trial_written, &trial_statistics,
+            error);
+        if (status != AVIFENC_OK) return status;
+        ++pass_count;
+        if (trial_written > options->rate_control.target_size) {
+            if (output_written != 0) *output_written = 0U;
+            return avifenc_fail(
+                error, AVIFENC_LIMIT_EXCEEDED,
+                AVIFENC_CONTEXT_RATE_CONTROL,
+                trial_written, options->rate_control.target_size);
+        }
+        selected = 255U;
+        under_quantizer = 255U;
+        under_size = trial_written;
+        have_selected = 1;
+    } else {
+        trial_options.quantizer = low;
+        status = avifenc_encode_single_pass(
+            image, &trial_options, executor, workspace,
+            base_requirements.workspace_required,
+            trial_output, base_requirements.output_capacity_required,
+            &trial_written, &trial_statistics,
+            error);
+        if (status != AVIFENC_OK) return status;
+        ++pass_count;
+        if (trial_statistics.achieved_quality <
+            options->rate_control.target_quality) {
+            if (output_written != 0) *output_written = 0U;
+            return avifenc_fail(
+                error, AVIFENC_LIMIT_EXCEEDED,
+                AVIFENC_CONTEXT_RATE_CONTROL,
+                options->rate_control.target_quality,
+                trial_statistics.achieved_quality);
+        }
+        selected = low;
+        have_selected = 1;
+    }
+
+    while (low <= high && pass_count + 1U < pass_cap) {
+        uint16_t middle = (uint16_t)(low + (high - low) / 2U);
+        int meets_target;
+
+        if (options->rate_control.mode == 2U && over_size > under_size &&
+            over_quantizer + 1U < under_quantizer) {
+            size_t scaled;
+            size_t size_span = over_size - under_size;
+            size_t target_span = over_size -
+                options->rate_control.target_size;
+            size_t quantizer_span = under_quantizer - over_quantizer;
+
+            if (avifdec_size_multiply(
+                    target_span, quantizer_span, &scaled)) {
+                size_t offset = scaled / size_span;
+
+                if (scaled % size_span != 0U) ++offset;
+                if (offset != 0U && offset < quantizer_span) {
+                    uint16_t interpolated = (uint16_t)(
+                        over_quantizer + offset);
+
+                    if (interpolated >= low && interpolated <= high) {
+                        middle = interpolated;
+                    }
+                }
+            }
+        }
+
+        trial_options.quantizer = middle;
+        status = avifenc_encode_single_pass(
+            image, &trial_options, executor, workspace,
+            base_requirements.workspace_required,
+            trial_output, base_requirements.output_capacity_required,
+            &trial_written, &trial_statistics,
+            error);
+        if (status != AVIFENC_OK) return status;
+        ++pass_count;
+        meets_target = options->rate_control.mode == 1U
+            ? trial_statistics.achieved_quality >=
+                options->rate_control.target_quality
+            : trial_written <= options->rate_control.target_size;
+        if (meets_target) {
+            selected = middle;
+            have_selected = 1;
+            if (options->rate_control.mode == 1U) {
+                low = (uint16_t)(middle + 1U);
+            } else if (middle == 0U) {
+                break;
+            } else {
+                under_quantizer = middle;
+                under_size = trial_written;
+                high = (uint16_t)(middle - 1U);
+            }
+        } else if (options->rate_control.mode == 1U) {
+            if (middle == 0U) break;
+            high = (uint16_t)(middle - 1U);
+        } else {
+            over_quantizer = middle;
+            over_size = trial_written;
+            low = (uint16_t)(middle + 1U);
+        }
+    }
+    if (!have_selected) {
+        if (output_written != 0) *output_written = 0U;
+        return avifenc_fail(error, AVIFENC_LIMIT_EXCEEDED,
+                            AVIFENC_CONTEXT_RATE_CONTROL, 0U, 0U);
+    }
+    trial_options.quantizer = selected;
+    status = avifenc_encode_single_pass(
+        image, &trial_options, executor, workspace,
+        base_requirements.workspace_required,
+        output, output_capacity, output_written, &final_statistics, error);
+    if (status != AVIFENC_OK) return status;
+    ++pass_count;
+    final_statistics.encode_pass_count = pass_count;
+    if (statistics != 0) *statistics = final_statistics;
     return AVIFENC_OK;
 }
 

@@ -43,6 +43,19 @@ static int text_to_u32(const char *text, uint32_t *value) {
     return 1;
 }
 
+static int text_to_i8(const char *text, int8_t *value) {
+    uint32_t magnitude;
+    int negative = text != 0 && text[0] == '-';
+
+    if (text == 0 || value == 0 ||
+        !text_to_u32(text + negative, &magnitude) ||
+        magnitude > (negative ? 64U : 63U)) {
+        return 0;
+    }
+    *value = negative ? (int8_t)-(int)magnitude : (int8_t)magnitude;
+    return 1;
+}
+
 static int write_bytes(int fd, const void *data, size_t size) {
     const unsigned char *bytes = (const unsigned char *)data;
     size_t written = 0U;
@@ -281,9 +294,17 @@ static AvifencStatus encoder_cli_parallel_for(
 static void write_usage(int fd) {
     (void)write_text(
         fd,
-        "usage: avifenc [--quantizer 1..255] [--speed 0..2] [--workers 1..32] "
+        "usage: avifenc [--quantizer 0..255] [--speed 0..2] [--workers 1..32] "
+        "[--target-quality 0..10000|--target-size BYTES] "
+        "[--qmatrix off|auto|LEVEL] [--aq off|activity] "
+        "[--aq-strength 0..63] [--y-dc-delta N] [--u-dc-delta N] "
+        "[--u-ac-delta N] [--v-dc-delta N] [--v-ac-delta N] "
         "WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
-        "       avifenc [--quantizer 1..255] [--speed 0..2] [--workers 1..32] "
+        "       avifenc [--quantizer 0..255] [--speed 0..2] [--workers 1..32] "
+        "[--target-quality 0..10000|--target-size BYTES] "
+        "[--qmatrix off|auto|LEVEL] [--aq off|activity] "
+        "[--aq-strength 0..63] [--y-dc-delta N] [--u-dc-delta N] "
+        "[--u-ac-delta N] [--v-dc-delta N] [--v-ac-delta N] "
         "INPUT.png|jpg|jpeg OUTPUT.avif\n"
         "       avifenc --help\n"
         "       avifenc --version\n");
@@ -323,6 +344,14 @@ int main(int argc, char **argv) {
     uint32_t quantizer = AVIFENC_DEFAULT_QUANTIZER;
     uint32_t speed = AVIFENC_DEFAULT_SPEED;
     uint32_t requested_workers = 1U;
+    uint32_t target_quality = 0U;
+    uint32_t target_size = 0U;
+    uint32_t matrix_level = 0U;
+    uint32_t aq_strength = 8U;
+    int8_t quant_deltas[5] = { 0 };
+    uint8_t rate_mode = 0U;
+    uint8_t matrix_mode = 0U;
+    uint8_t aq_mode = 0U;
     RtTaskPool task_pool;
     AvifencExecutor executor;
     const AvifencExecutor *encode_executor = 0;
@@ -364,6 +393,57 @@ int main(int argc, char **argv) {
                 (void)write_text(2, "avifenc: invalid worker count\n");
                 return 2;
             }
+        } else if (text_equal(argv[argument], "--target-quality")) {
+            if (rate_mode == 2U ||
+                !text_to_u32(argv[argument + 1], &target_quality) ||
+                target_quality > AVIFENC_TARGET_QUALITY_MAX) {
+                (void)write_text(2, "avifenc: invalid target quality\n");
+                return 2;
+            }
+            rate_mode = 1U;
+        } else if (text_equal(argv[argument], "--target-size")) {
+            if (rate_mode == 1U ||
+                !text_to_u32(argv[argument + 1], &target_size) ||
+                target_size == 0U) {
+                (void)write_text(2, "avifenc: invalid target size\n");
+                return 2;
+            }
+            rate_mode = 2U;
+        } else if (text_equal(argv[argument], "--qmatrix")) {
+            if (text_equal(argv[argument + 1], "off")) {
+                matrix_mode = 0U;
+            } else if (text_equal(argv[argument + 1], "auto")) {
+                matrix_mode = 2U;
+            } else if (text_to_u32(argv[argument + 1], &matrix_level) &&
+                       matrix_level <= 14U) {
+                matrix_mode = 1U;
+            } else {
+                (void)write_text(2, "avifenc: invalid qmatrix\n");
+                return 2;
+            }
+        } else if (text_equal(argv[argument], "--aq")) {
+            if (text_equal(argv[argument + 1], "off")) aq_mode = 0U;
+            else if (text_equal(argv[argument + 1], "activity")) aq_mode = 1U;
+            else {
+                (void)write_text(2, "avifenc: invalid aq mode\n");
+                return 2;
+            }
+        } else if (text_equal(argv[argument], "--aq-strength")) {
+            if (!text_to_u32(argv[argument + 1], &aq_strength) ||
+                aq_strength > 63U) {
+                (void)write_text(2, "avifenc: invalid aq strength\n");
+                return 2;
+            }
+        } else if (text_equal(argv[argument], "--y-dc-delta")) {
+            if (!text_to_i8(argv[argument + 1], &quant_deltas[0])) return 2;
+        } else if (text_equal(argv[argument], "--u-dc-delta")) {
+            if (!text_to_i8(argv[argument + 1], &quant_deltas[1])) return 2;
+        } else if (text_equal(argv[argument], "--u-ac-delta")) {
+            if (!text_to_i8(argv[argument + 1], &quant_deltas[2])) return 2;
+        } else if (text_equal(argv[argument], "--v-dc-delta")) {
+            if (!text_to_i8(argv[argument + 1], &quant_deltas[3])) return 2;
+        } else if (text_equal(argv[argument], "--v-ac-delta")) {
+            if (!text_to_i8(argv[argument + 1], &quant_deltas[4])) return 2;
         } else {
             break;
         }
@@ -447,6 +527,20 @@ int main(int argc, char **argv) {
     avifenc_options_default(&options);
     options.quantizer = (uint16_t)quantizer;
     options.speed = (uint8_t)speed;
+    options.quantization.delta_q_y_dc = quant_deltas[0];
+    options.quantization.delta_q_u_dc = quant_deltas[1];
+    options.quantization.delta_q_u_ac = quant_deltas[2];
+    options.quantization.delta_q_v_dc = quant_deltas[3];
+    options.quantization.delta_q_v_ac = quant_deltas[4];
+    options.quantization.matrix_mode = matrix_mode;
+    options.quantization.matrix_levels[0] = (uint8_t)matrix_level;
+    options.quantization.matrix_levels[1] = (uint8_t)matrix_level;
+    options.quantization.matrix_levels[2] = (uint8_t)matrix_level;
+    options.quantization.adaptive_quantization = aq_mode;
+    options.quantization.aq_strength = (uint8_t)aq_strength;
+    options.rate_control.mode = rate_mode;
+    options.rate_control.target_quality = (uint16_t)target_quality;
+    options.rate_control.target_size = target_size;
     if (requested_workers > 1U) {
         if (rt_task_pool_init(&task_pool, requested_workers) != 0) {
             (void)write_text(2, "avifenc: failed to initialize workers\n");

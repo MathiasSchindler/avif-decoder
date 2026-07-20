@@ -177,4 +177,46 @@ for specification in flat:2:2:1:2 edge:32:32:128:1 hedge:32:32:128:1 detail:64:4
     fixtures=$((fixtures + 1))
 done
 
+for feature in lossless goal5; do
+    prefix=$work/$feature-32x32
+    source=$prefix-input.yuv
+    encoded=$prefix.avif
+    ours=$prefix-ours.yuv
+
+    write_fixture "$source" 32 32 detail
+    if test "$feature" = lossless; then
+        "$encoder" --quantizer 0 32 32 "$source" "$encoded"
+    else
+        "$encoder" --quantizer 96 --y-dc-delta -7 --u-dc-delta 3 \
+            --u-ac-delta -5 --v-dc-delta 9 --v-ac-delta 4 \
+            --qmatrix 7 --aq activity --aq-strength 12 \
+            32 32 "$source" "$encoded"
+    fi
+    "$decoder" --raw "$encoded" "$ours" >/dev/null
+    if test "$feature" = lossless; then
+        cmp "$source" "$ours" || {
+            echo "$encoded: lossless output differs from source" >&2
+            exit 1
+        }
+    fi
+    ffmpeg -hide_banner -loglevel error -i "$encoded" -frames:v 1 \
+        -pix_fmt yuv420p -f rawvideo -y "$prefix-ffmpeg.yuv"
+    cmp "$ours" "$prefix-ffmpeg.yuv"
+    ffmpeg -hide_banner -loglevel error -i "$encoded" -map 0:v:0 \
+        -c copy -f obu -y "$prefix.obu"
+    aomdec --limit=1 --rawvideo --i420 -o "$prefix-libaom.yuv" \
+        "$prefix.obu" >/dev/null 2>&1
+    cmp "$ours" "$prefix-libaom.yuv"
+    comparisons=$((comparisons + 2))
+    for codec in $codecs; do
+        avifdec --codec "$codec" "$encoded" "$prefix-$codec.y4m" >/dev/null
+        ffmpeg -hide_banner -loglevel error -i "$prefix-$codec.y4m" \
+            -frames:v 1 -pix_fmt yuv420p -f rawvideo -y \
+            "$prefix-$codec.yuv"
+        cmp "$ours" "$prefix-$codec.yuv"
+        comparisons=$((comparisons + 1))
+    done
+    fixtures=$((fixtures + 1))
+done
+
 echo "encoder interoperability: $fixtures fixtures, $comparisons exact external decodes, codecs:$codecs"

@@ -521,6 +521,8 @@ static uint64_t benchmark_elapsed_ns(const struct timespec *start,
 
 static void benchmark_run_case(const BenchmarkCase *definition,
                                unsigned int iterations,
+                               unsigned int aq_strength,
+                               size_t target_size,
                                const AvifencExecutor *executor,
                                BenchmarkResult *result) {
     BenchmarkSource source;
@@ -547,6 +549,14 @@ static void benchmark_run_case(const BenchmarkCase *definition,
     avifenc_options_default(&options);
     options.quantizer = definition->quantizer;
     options.speed = definition->speed;
+    if (aq_strength != 0U) {
+        options.quantization.adaptive_quantization = 1U;
+        options.quantization.aq_strength = (uint8_t)aq_strength;
+    }
+    if (target_size != 0U) {
+        options.rate_control.mode = 2U;
+        options.rate_control.target_size = target_size;
+    }
     (void)memset(result, 0, sizeof(*result));
     result->definition = definition;
         if (avifenc_query_with_executor(
@@ -677,7 +687,8 @@ static void benchmark_print_json(const BenchmarkResult *result,
         "\"partition_nodes\":%llu,\"blocks\":%llu,"
         "\"prediction_trials\":%llu,\"transform_trials\":%llu,"
         "\"transforms\":%llu,\"entropy_symbols\":%llu,"
-        "\"literal_bits\":%llu,\"filter_units\":%llu",
+        "\"literal_bits\":%llu,\"filter_units\":%llu,"
+        "\"selected_quantizer\":%u,\"encode_passes\":%u",
         definition->name, definition->width, definition->height,
         definition->quantizer, definition->speed,
         result->requirements.workspace_required,
@@ -698,7 +709,9 @@ static void benchmark_print_json(const BenchmarkResult *result,
         (unsigned long long)result->statistics.transform_count,
         (unsigned long long)result->statistics.entropy_symbol_count,
         (unsigned long long)result->statistics.literal_bit_count,
-        (unsigned long long)result->statistics.filter_unit_count);
+        (unsigned long long)result->statistics.filter_unit_count,
+        result->statistics.selected_quantizer,
+        result->statistics.encode_pass_count);
     if (!stable) {
         (void)printf(
             ",\"psnr_y_milli_db\":%llu,\"psnr_u_milli_db\":%llu,"
@@ -759,6 +772,8 @@ static unsigned int benchmark_parse_iterations(const char *text) {
 int main(int argc, char **argv) {
     enum { OUTPUT_HUMAN, OUTPUT_JSON, OUTPUT_STABLE_JSON } output = OUTPUT_HUMAN;
     unsigned int iterations = 1U;
+    unsigned int aq_strength = 0U;
+    int aq_match_fixed_size = 0;
     size_t workers = 1U;
     AvifencExecutor executor;
     const AvifencExecutor *encode_executor = NULL;
@@ -783,11 +798,23 @@ int main(int argc, char **argv) {
             if (workers > AVIFENC_EXECUTOR_MAX_WORKERS) {
                 benchmark_fail("workers must be in 1..32");
             }
+        } else if (strcmp(argv[argument], "--aq-strength") == 0 &&
+                   argument + 1 < argc) {
+            aq_strength = benchmark_parse_iterations(argv[++argument]);
+            if (aq_strength > 63U) {
+                benchmark_fail("AQ strength must be in 1..63");
+            }
+        } else if (strcmp(argv[argument], "--aq-match-fixed-size") == 0) {
+            aq_match_fixed_size = 1;
         } else {
             benchmark_fail(
                 "usage: encoder-benchmark [--human|--json|--stable-json] "
-                "[--iterations N] [--workers N]");
+                "[--iterations N] [--workers N] [--aq-strength 1..63] "
+                "[--aq-match-fixed-size]");
         }
+    }
+    if (aq_match_fixed_size && aq_strength == 0U) {
+        benchmark_fail("AQ size matching requires --aq-strength");
     }
     if (output == OUTPUT_STABLE_JSON && workers != 1U) {
         benchmark_fail("stable JSON requires one worker");
@@ -803,9 +830,21 @@ int main(int argc, char **argv) {
          index < sizeof(benchmark_cases) / sizeof(benchmark_cases[0]);
          ++index) {
         BenchmarkResult result;
+        size_t target_size = 0U;
+
+        if (aq_match_fixed_size &&
+            benchmark_cases[index].pattern != BENCHMARK_MINIMUM) {
+            BenchmarkResult fixed_result;
+
+            benchmark_run_case(
+                &benchmark_cases[index], 1U, 0U, 0U,
+                encode_executor, &fixed_result);
+            target_size = fixed_result.output_bytes;
+        }
 
         benchmark_run_case(
-            &benchmark_cases[index], iterations, encode_executor, &result);
+            &benchmark_cases[index], iterations, aq_strength, target_size,
+            encode_executor, &result);
         total_ns += result.elapsed_ns;
         total_pixels += (uint64_t)benchmark_cases[index].width *
             benchmark_cases[index].height * iterations;

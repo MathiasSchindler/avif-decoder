@@ -3,6 +3,7 @@
 
 #include "encoder/av1_symbol_write.h"
 #include "av1_coeff.h"
+#include "av1_recon.h"
 
 typedef struct {
     int32_t quantized[1024];
@@ -13,6 +14,8 @@ typedef struct {
     Av1CoeffCdfs cdfs;
     Av1CoeffContextState contexts;
     uint16_t tx_type_set2[6];
+    Av1DequantParams dequant[3];
+    uint8_t *matrix_workspace;
 } AvifencAv1TransformState;
 
 AvifencStatus avifenc_av1_forward_dct_4x4(const int16_t *input,
@@ -40,6 +43,12 @@ AvifencStatus avifenc_av1_transform_state_init(
     uint32_t mi_rows,
     void *workspace,
     size_t workspace_size);
+AvifencStatus avifenc_av1_transform_state_set_quantization(
+    AvifencAv1TransformState *state,
+    const AvifencQuantization *quantization,
+    uint8_t quantizer,
+    void *matrix_workspace,
+    size_t matrix_workspace_size);
 AvifencStatus avifenc_av1_transform_encode_4x4(
     AvifencAv1TransformState *state,
     AvifencAv1SymbolWriter *writer,

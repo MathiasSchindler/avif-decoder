@@ -164,6 +164,11 @@ int main(void) {
     image.color.matrix_coefficients = 1U;
     avifenc_options_default(&options);
     options.speed = AVIFENC_MAX_SPEED;
+    options.quantization.matrix_mode = 2U;
+    options.quantization.adaptive_quantization = 1U;
+    options.quantization.aq_strength = 8U;
+    options.rate_control.mode = 1U;
+    options.rate_control.target_quality = 7000U;
 
     CHECK(avifenc_query(
         &image, &options, &serial_requirements, &error) == AVIFENC_OK);
@@ -201,6 +206,8 @@ int main(void) {
         &serial_statistics, &parallel_statistics,
         sizeof(serial_statistics)) == 0);
     CHECK(serial_statistics.tile_count == 2U);
+        CHECK(serial_statistics.encode_pass_count <= 5U &&
+            serial_statistics.achieved_quality >= 7000U);
 
     executor.parallel_for = pthread_parallel_for;
     CHECK(avifenc_encode_with_executor(

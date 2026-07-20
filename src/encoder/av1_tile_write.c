@@ -15,6 +15,7 @@ typedef struct {
     uint8_t *block_widths;
     uint8_t *block_heights;
     uint8_t *block_flags;
+    uint8_t *segment_ids;
     uint8_t *y_modes;
     uint8_t *uv_modes;
     uint8_t *palette_sizes_y;
@@ -30,6 +31,7 @@ typedef struct {
     uint16_t partition32[4][11];
     uint16_t partition64[4][11];
     uint16_t skip[3][3];
+    uint16_t segment_id[3][9];
 } AvifencAv1TileState;
 
 typedef struct {
@@ -84,6 +86,12 @@ static const uint16_t tile_default_skip[3][3] = {
     { 4576U, 32768U, 0U }
 };
 
+static const uint16_t tile_default_segment_id[3][9] = {
+    { 5622U, 7893U, 16093U, 18233U, 27809U, 28373U, 32533U, 32768U, 0U },
+    { 14274U, 18230U, 22557U, 24935U, 29980U, 30851U, 32344U, 32768U, 0U },
+    { 27527U, 28487U, 28723U, 28890U, 32397U, 32647U, 32679U, 32768U, 0U }
+};
+
 static int tile_size_multiply(size_t left, size_t right, size_t *result) {
     if (left != 0U && right > (size_t)-1 / left) return 0;
     *result = left * right;
@@ -121,9 +129,8 @@ static AvifencStatus tile_requirements(
     }
     mi_columns = 2U * ((source->width + 7U) >> 3U);
     mi_rows = 2U * ((source->height + 7U) >> 3U);
-    if (source->quantizer == 0U) return AVIFENC_UNSUPPORTED;
     if (!tile_size_multiply(mi_columns, mi_rows, &cells) ||
-        !tile_size_multiply(cells, 7U, &block_workspace) ||
+        !tile_size_multiply(cells, 8U, &block_workspace) ||
         avifenc_av1_transform_context_size(
             mi_columns, mi_rows, &transform_workspace) != AVIFENC_OK ||
         !tile_size_add(
@@ -163,8 +170,163 @@ static void tile_cdfs_init(AvifencAv1TileState *state) {
     avifdec_memory_copy(state->partition64, tile_default_partition64,
                         sizeof(state->partition64));
     avifdec_memory_copy(state->skip, tile_default_skip, sizeof(state->skip));
+    avifdec_memory_copy(state->segment_id, tile_default_segment_id,
+                        sizeof(state->segment_id));
     av1_intra_cdfs_init(&state->intra_cdfs);
     av1_palette_cdfs_init(&state->palette_cdfs);
+}
+
+static uint8_t tile_neg_deinterleave(uint8_t difference,
+                                     uint8_t reference,
+                                     uint8_t maximum) {
+    if (reference == 0U) return difference;
+    if (reference >= maximum - 1U) return (uint8_t)(maximum - difference - 1U);
+    if (2U * reference < maximum) {
+        if (difference <= 2U * reference) {
+            return (difference & 1U) != 0U
+                ? (uint8_t)(reference + ((difference + 1U) >> 1U))
+                : (uint8_t)(reference - (difference >> 1U));
+        }
+        return difference;
+    }
+    if (difference <= 2U * (maximum - reference - 1U)) {
+        return (difference & 1U) != 0U
+            ? (uint8_t)(reference + ((difference + 1U) >> 1U))
+            : (uint8_t)(reference - (difference >> 1U));
+    }
+    return (uint8_t)(maximum - difference - 1U);
+}
+
+static uint8_t tile_segment_difference(uint8_t segment,
+                                       uint8_t prediction) {
+    uint8_t difference;
+
+    for (difference = 0U; difference < 3U; ++difference) {
+        if (tile_neg_deinterleave(difference, prediction, 3U) == segment) {
+            return difference;
+        }
+    }
+    return 0U;
+}
+
+static uint8_t tile_select_segment(const AvifencAv1TileState *state,
+                                   uint32_t row,
+                                   uint32_t column,
+                                   uint32_t width_mi,
+                                   uint32_t height_mi) {
+    uint32_t maximum_activity = 0U;
+    unsigned int plane;
+
+    for (plane = 0U; plane < 3U; ++plane) {
+        const uint8_t *source = state->source->planes[plane];
+        size_t stride = state->source->strides[plane];
+        uint32_t shift = plane == 0U ? 0U : 1U;
+        uint32_t start_x = (column << 2U) >> shift;
+        uint32_t start_y = (row << 2U) >> shift;
+        uint32_t width = (width_mi << 2U) >> shift;
+        uint32_t height = (height_mi << 2U) >> shift;
+        uint32_t plane_width = state->source->width >> shift;
+        uint32_t plane_height = state->source->height >> shift;
+        uint32_t activity = 0U;
+        uint32_t edges = 0U;
+        uint32_t y;
+        uint32_t x;
+
+        for (y = 0U; y < height && start_y + y < plane_height; ++y) {
+            for (x = 0U; x < width && start_x + x < plane_width; ++x) {
+                uint8_t sample = source[
+                    (size_t)(start_y + y) * stride + start_x + x];
+
+                if (x != 0U) {
+                    uint8_t previous = source[
+                        (size_t)(start_y + y) * stride + start_x + x - 1U];
+                    activity += sample > previous ? sample - previous
+                                                  : previous - sample;
+                    ++edges;
+                }
+                if (y != 0U) {
+                    uint8_t previous = source[
+                        (size_t)(start_y + y - 1U) * stride + start_x + x];
+                    activity += sample > previous ? sample - previous
+                                                  : previous - sample;
+                    ++edges;
+                }
+            }
+        }
+        if (edges != 0U && activity / edges > maximum_activity) {
+            maximum_activity = activity / edges;
+        }
+    }
+    if (maximum_activity < 4U) return 1U;
+    if (maximum_activity > 24U) return 2U;
+    return 0U;
+}
+
+static AvifencStatus tile_write_segment_id(AvifencAv1TileState *state,
+                                           uint32_t row,
+                                           uint32_t column,
+                                           uint32_t width_mi,
+                                           uint32_t height_mi,
+                                           uint8_t segment) {
+    int upper_left = -1;
+    int upper = -1;
+    int left = -1;
+    uint8_t prediction;
+    unsigned int context;
+    AvifencStatus status;
+
+    if (row != 0U && column != 0U) {
+        upper_left = state->segment_ids[
+            (size_t)(row - 1U) * state->mi_columns + column - 1U];
+    }
+    if (row != 0U) {
+        upper = state->segment_ids[
+            (size_t)(row - 1U) * state->mi_columns + column];
+    }
+    if (column != 0U) {
+        left = state->segment_ids[(size_t)row * state->mi_columns + column - 1U];
+    }
+    if (upper < 0) prediction = left < 0 ? 0U : (uint8_t)left;
+    else if (left < 0) prediction = (uint8_t)upper;
+    else prediction = upper_left == upper ? (uint8_t)upper : (uint8_t)left;
+    if (upper_left < 0) context = 0U;
+    else if (upper_left == upper && upper_left == left) context = 2U;
+    else if (upper_left == upper || upper_left == left || upper == left) {
+        context = 1U;
+    } else {
+        context = 0U;
+    }
+    status = avifenc_av1_symbol_writer_write(
+        state->writer, state->segment_id[context], 8U,
+        tile_segment_difference(segment, prediction));
+    if (status == AVIFENC_OK) {
+        uint32_t y;
+        uint32_t x;
+
+        for (y = 0U; y < height_mi; ++y) {
+            for (x = 0U; x < width_mi; ++x) {
+                state->segment_ids[
+                    (size_t)(row + y) * state->mi_columns + column + x] =
+                    segment;
+            }
+        }
+    }
+    return status;
+}
+
+static void tile_set_effective_quantizer(AvifencAv1TileState *state,
+                                         uint8_t segment) {
+    int quantizer = state->source->quantizer;
+    unsigned int plane;
+
+    if (segment == 1U) quantizer += state->source->quantization.aq_strength;
+    if (segment == 2U) quantizer -= state->source->quantization.aq_strength;
+    if (quantizer < 1) quantizer = 1;
+    if (quantizer > 255) quantizer = 255;
+    state->quantizer = (uint16_t)quantizer;
+    for (plane = 0U; plane < 3U; ++plane) {
+        state->transform.dequant[plane].q_index = (uint8_t)quantizer;
+    }
 }
 
 static AvifencStatus tile_predict_plane_mode(AvifencAv1TileState *state,
@@ -490,7 +652,7 @@ static AvifencStatus tile_select_luma_mode(
             state->source->width, state->source->height,
             state->reconstruction->planes[0],
             state->reconstruction->strides[0],
-            (uint8_t)state->quantizer, 1, &block,
+            (uint8_t)state->quantizer, state->quantizer != 0U, &block,
             &distortion, &rate_cost);
         if (state->source->statistics != 0) {
             ++state->source->statistics->transform_trial_count;
@@ -519,9 +681,15 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
     uint16_t *y_mode_cdf = tile_y_mode_cdf(state, row, column);
     uint8_t y_mode = 0U;
     uint8_t uv_mode = 0U;
+    uint8_t segment = 0U;
     unsigned int skip_context = 0U;
-    AvifencStatus status = tile_select_luma_mode(
-        state, row, column, y_mode_cdf, &y_mode);
+    AvifencStatus status;
+
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        segment = tile_select_segment(state, row, column, 1U, 1U);
+        tile_set_effective_quantizer(state, segment);
+    }
+    status = tile_select_luma_mode(state, row, column, y_mode_cdf, &y_mode);
 
     if (status != AVIFENC_OK) return status;
     if (state->source->statistics != 0) {
@@ -536,6 +704,11 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
     status = avifenc_av1_symbol_writer_write(
         state->writer, state->skip[skip_context], 2U, 0U);
     if (status != AVIFENC_OK) return status;
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        status = tile_write_segment_id(
+            state, row, column, 1U, 1U, segment);
+        if (status != AVIFENC_OK) return status;
+    }
     status = avifenc_av1_symbol_writer_write(
         state->writer, y_mode_cdf, 13U, y_mode);
     if (status != AVIFENC_OK) return status;
@@ -584,7 +757,7 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
         state->source->width, state->source->height,
         state->reconstruction->planes[0],
         state->reconstruction->strides[0], (uint8_t)state->quantizer,
-        1, &transform_block);
+        state->quantizer != 0U, &transform_block);
     if (status != AVIFENC_OK) return status;
     if (state->source->statistics != 0) {
         ++state->source->statistics->transform_count;
@@ -606,6 +779,9 @@ static AvifencStatus tile_write_block(AvifencAv1TileState *state,
                 ++state->source->statistics->transform_count;
             }
         }
+    }
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        tile_set_effective_quantizer(state, 0U);
     }
     return status;
 }
@@ -1777,7 +1953,7 @@ static void tile_partition_restore(
     }
 }
 
-static AvifencStatus tile_trial_block_sized(
+static AvifencStatus tile_trial_block_sized_quantized(
     AvifencAv1TileState *state,
     uint32_t row,
     uint32_t column,
@@ -1825,6 +2001,28 @@ static AvifencStatus tile_trial_block_sized(
         &block, &distortion, &rate_cost);
     if (state->source->statistics != 0) {
         ++state->source->statistics->transform_trial_count;
+    }
+    return status;
+}
+
+static AvifencStatus tile_trial_block_sized(
+    AvifencAv1TileState *state,
+    uint32_t row,
+    uint32_t column,
+    uint32_t width_mi,
+    uint32_t height_mi,
+    uint64_t *score) {
+    AvifencStatus status;
+
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        tile_set_effective_quantizer(
+            state, tile_select_segment(
+                state, row, column, width_mi, height_mi));
+    }
+    status = tile_trial_block_sized_quantized(
+        state, row, column, width_mi, height_mi, score);
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        tile_set_effective_quantizer(state, 0U);
     }
     return status;
 }
@@ -1888,11 +2086,13 @@ static AvifencStatus tile_trial_partition(
     return status;
 }
 
-static AvifencStatus tile_write_block_sized(AvifencAv1TileState *state,
-                                            uint32_t row,
-                                            uint32_t column,
-                                            uint32_t width_mi,
-                                            uint32_t height_mi) {
+static AvifencStatus tile_write_block_sized_quantized(
+    AvifencAv1TileState *state,
+    uint32_t row,
+    uint32_t column,
+    uint32_t width_mi,
+    uint32_t height_mi,
+    uint8_t segment) {
     AvifencAv1TransformBlock transform_block;
     size_t index = (size_t)row * state->mi_columns + column;
     uint16_t *y_mode_cdf = tile_y_mode_cdf(state, row, column);
@@ -1983,6 +2183,11 @@ static AvifencStatus tile_write_block_sized(AvifencAv1TileState *state,
     status = avifenc_av1_symbol_writer_write(
         state->writer, state->skip[skip_context], 2U, 0U);
     if (status != AVIFENC_OK) return status;
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        status = tile_write_segment_id(
+            state, row, column, width_mi, height_mi, segment);
+        if (status != AVIFENC_OK) return status;
+    }
     status = avifenc_av1_symbol_writer_write(
         state->writer, y_mode_cdf, 13U, y_mode);
     if (status != AVIFENC_OK) return status;
@@ -2143,6 +2348,27 @@ static AvifencStatus tile_write_block_sized(AvifencAv1TileState *state,
         }
     }
     return AVIFENC_OK;
+}
+
+static AvifencStatus tile_write_block_sized(AvifencAv1TileState *state,
+                                            uint32_t row,
+                                            uint32_t column,
+                                            uint32_t width_mi,
+                                            uint32_t height_mi) {
+    uint8_t segment = 0U;
+    AvifencStatus status;
+
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        segment = tile_select_segment(
+            state, row, column, width_mi, height_mi);
+        tile_set_effective_quantizer(state, segment);
+    }
+    status = tile_write_block_sized_quantized(
+        state, row, column, width_mi, height_mi, segment);
+    if (state->source->quantization.adaptive_quantization != 0U) {
+        tile_set_effective_quantizer(state, 0U);
+    }
+    return status;
 }
 
 static int tile_partition_use_none(const AvifencAv1TileState *state,
@@ -2365,7 +2591,7 @@ static AvifencStatus tile_write_partition(AvifencAv1TileState *state,
     } else {
         return AVIFENC_UNSUPPORTED;
     }
-    if (has_rows && has_columns && block_mi <= 8U &&
+    if (state->quantizer != 0U && has_rows && has_columns && block_mi <= 8U &&
         ((uint64_t)column + block_mi) * 4U <= state->source->width &&
         ((uint64_t)row + block_mi) * 4U <= state->source->height) {
         status = tile_select_partition(
@@ -2492,7 +2718,8 @@ AvifencStatus avifenc_av1_tile_write(
     state.block_widths = (uint8_t *)workspace;
     state.block_heights = state.block_widths + cells;
     state.block_flags = state.block_heights + cells;
-    state.y_modes = state.block_flags + cells;
+    state.segment_ids = state.block_flags + cells;
+    state.y_modes = state.segment_ids + cells;
     state.uv_modes = state.y_modes + cells;
     state.palette_sizes_y = state.uv_modes + cells;
     state.palette_sizes_uv = state.palette_sizes_y + cells;
@@ -2506,8 +2733,14 @@ AvifencStatus avifenc_av1_tile_write(
         &state.transform, (uint8_t)source->quantizer,
         state.mi_columns, state.mi_rows,
         state.palette_map_uv + 16U * 16U,
-        workspace_size - 7U * cells - 32U * 32U * sizeof(uint16_t) -
+        workspace_size - 8U * cells - 32U * 32U * sizeof(uint16_t) -
             32U * 32U - 16U * 16U);
+    if (status != AVIFENC_OK) return status;
+    status = avifenc_av1_transform_state_set_quantization(
+        &state.transform, &source->quantization,
+        (uint8_t)source->quantizer,
+        state.transform.matrix_workspace,
+        3U * AV1_QM_TOTAL_SIZE);
     if (status != AVIFENC_OK) return status;
     for (row = 0U; row < state.mi_rows; row += 16U) {
         for (column = 0U; column < state.mi_columns; column += 16U) {

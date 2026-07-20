@@ -8,6 +8,7 @@ typedef struct {
     uint32_t height;
     AvifencColor color;
     uint16_t quantizer;
+    AvifencQuantization quantization;
 } AvifencAv1Config;
 
 typedef struct {

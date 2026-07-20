@@ -11,6 +11,7 @@ typedef struct {
     uint16_t quantizer;
     uint8_t speed;
     AvifencStatistics *statistics;
+    AvifencQuantization quantization;
 } AvifencAv1TileSource;
 
 typedef struct {

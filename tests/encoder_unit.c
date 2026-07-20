@@ -802,8 +802,8 @@ static int test_av1_transform_trial(void) {
             88U, 104U, 120U, 136U
       };
       uint16_t reconstruction[16];
-      uint8_t workspace[16];
-      uint8_t workspace_snapshot[16];
+      uint8_t workspace[16U + 3U * AV1_QM_TOTAL_SIZE];
+      uint8_t workspace_snapshot[16U + 3U * AV1_QM_TOTAL_SIZE];
       AvifencAv1TransformState state;
       AvifencAv1TransformState state_snapshot;
       AvifencAv1TransformBlock block;
@@ -873,13 +873,14 @@ static int test_av1_tile_writer(void) {
       static const uint32_t dimensions[][2] = {
             { 2U, 2U }, { 8U, 8U }, { 8U, 8U },
             { 10U, 6U }, { 66U, 66U }, { 32U, 32U }, { 32U, 32U },
-            { 32U, 32U }, { 32U, 32U }, { 16U, 16U }, { 16U, 16U }
+            { 32U, 32U }, { 32U, 32U }, { 16U, 16U }, { 16U, 16U },
+            { 16U, 16U }
       };
       static const uint8_t quantizers[] = {
-            128U, 255U, 1U, 60U, 100U, 96U, 96U, 96U, 96U, 96U, 96U
+            128U, 255U, 1U, 60U, 100U, 96U, 96U, 96U, 96U, 96U, 96U, 96U
       };
       static const uint8_t patterns[] = {
-            0U, 1U, 2U, 3U, 4U, 1U, 3U, 5U, 6U, 5U, 6U
+            0U, 1U, 2U, 3U, 4U, 1U, 3U, 5U, 6U, 5U, 6U, 6U
       };
       static uint8_t source_y[66U * 66U];
       static uint8_t source_u[33U * 33U];
@@ -895,9 +896,9 @@ static int test_av1_tile_writer(void) {
       uint8_t repeated_tile[8192U];
       uint8_t short_tile[8192U];
       uint8_t av1[9216U];
-      uint8_t tile_workspace[8192U];
+      uint8_t tile_workspace[32768U];
       AvifencAv1TileSource source = {
-            { 0 }, { 0 }, 0U, 0U, 128U, 0U, 0
+            { 0 }, { 0 }, 0U, 0U, 128U, 0U, 0, { 0 }
       };
       AvifencAv1TileReconstruction reconstruction = {
             { reconstructed_y, reconstructed_u, reconstructed_v },
@@ -943,6 +944,21 @@ static int test_av1_tile_writer(void) {
             source.width = dimensions[index][0];
             source.height = dimensions[index][1];
             source.quantizer = quantizers[index];
+            avifdec_memory_fill(
+                  &source.quantization, 0U, sizeof(source.quantization));
+            if (index == 11U) {
+                  source.quantization.delta_q_y_dc = -7;
+                  source.quantization.delta_q_u_dc = 3;
+                  source.quantization.delta_q_u_ac = -5;
+                  source.quantization.delta_q_v_dc = 9;
+                  source.quantization.delta_q_v_ac = 4;
+                  source.quantization.matrix_mode = 1U;
+                  source.quantization.matrix_levels[0] = 4U;
+                  source.quantization.matrix_levels[1] = 7U;
+                  source.quantization.matrix_levels[2] = 10U;
+                  source.quantization.adaptive_quantization = 1U;
+                  source.quantization.aq_strength = 12U;
+            }
             avifdec_memory_fill(source_y, 128U, sizeof(source_y));
             avifdec_memory_fill(source_u, 128U, sizeof(source_u));
             avifdec_memory_fill(source_v, 128U, sizeof(source_v));
@@ -958,6 +974,7 @@ static int test_av1_tile_writer(void) {
             config.width = source.width;
             config.height = source.height;
             config.quantizer = source.quantizer;
+            config.quantization = source.quantization;
             CHECK(avifenc_av1_tile_query(&source, &requirements) ==
                   AVIFENC_OK);
             CHECK(requirements.workspace_required <= sizeof(tile_workspace));
@@ -1040,6 +1057,7 @@ static int test_av1_tile_writer(void) {
             avifdec_memory_fill(&info, 0U, sizeof(info));
             CHECK(avifdec_av1_query(&span, 1U, 0, &info, &error) ==
                   AVIFDEC_OK);
+            if (index == 11U) CHECK(info.segmentation_enabled == 1U);
             CHECK(info.workspace_required <= sizeof(decode_workspace));
             image.strides[0] = source.width;
             image.strides[1] = source.width >> 1U;
@@ -1049,6 +1067,7 @@ static int test_av1_tile_writer(void) {
                   &span, 1U, 0, &info, decode_workspace,
                   sizeof(decode_workspace), &image, &trace, &error);
             CHECK(decode_status == AVIFDEC_OK);
+            if (index == 11U) CHECK(trace.block_count < 16U);
             if (index == 5U) {
                   CHECK(trace.block_count == 1U &&
                         trace.transform_size_mask ==
@@ -1135,7 +1154,7 @@ static int test_av1_tile_writer(void) {
       source.height = 2U;
       source.quantizer = 0U;
       CHECK(avifenc_av1_tile_query(&source, &requirements) ==
-            AVIFENC_UNSUPPORTED);
+            AVIFENC_OK);
       source.quantizer = 128U;
       CHECK(avifenc_av1_tile_query(0, &requirements) ==
             AVIFENC_INVALID_ARGUMENT);
@@ -1388,7 +1407,7 @@ static int test_public_contract(void) {
     CHECK(options.quantizer == AVIFENC_DEFAULT_QUANTIZER);
       CHECK(options.speed == AVIFENC_DEFAULT_SPEED);
     avifenc_options_default(0);
-    CHECK(text_equal(avifenc_version_string(), "0.1.0"));
+      CHECK(text_equal(avifenc_version_string(), "0.2.0"));
     CHECK(text_equal(avifenc_status_string(AVIFENC_OK), "ok"));
     CHECK(text_equal(avifenc_status_string((AvifencStatus)99),
                      "unknown error"));
@@ -1495,7 +1514,7 @@ static int test_query_validation(void) {
 }
 
 static int test_encode_boundaries(void) {
-    static unsigned char workspace[20000];
+      static unsigned char workspace[22000];
     static unsigned char decode_workspace[800000];
     static unsigned char output[10000];
       static unsigned char measured_output[10000];
@@ -1589,6 +1608,26 @@ static int test_encode_boundaries(void) {
           decoded.widths[2] == 1U && decoded.heights[2] == 1U &&
           decoded.bit_depth == 8U && decoded.subsampling_x == 1U &&
           decoded.subsampling_y == 1U);
+    options.quantizer = 0U;
+    CHECK(avifenc_query(&image, &options, &requirements, &error) ==
+          AVIFENC_OK);
+    CHECK(avifenc_encode(&image, &options, workspace,
+                         requirements.workspace_required,
+                         output, sizeof(output), &output_written, &error) ==
+          AVIFENC_OK);
+    avifdec_memory_fill(&info, 0U, sizeof(info));
+    CHECK(avifdec_query(output, output_written, 0, 0, 0,
+                        &info, &decode_error) == AVIFDEC_OK);
+    CHECK(info.base_q_index == 0U && info.coded_lossless == 1U);
+    CHECK(avifdec_decode(output, output_written, 0,
+                         decode_workspace, sizeof(decode_workspace),
+                         &decoded, 0, &decode_error) == AVIFDEC_OK);
+    CHECK(decoded_y[0] == image.planes[0][0] &&
+          decoded_y[1] == image.planes[0][1] &&
+          decoded_y[2] == image.planes[0][2] &&
+          decoded_y[3] == image.planes[0][3] &&
+          decoded_u[0] == image.planes[1][0] &&
+          decoded_v[0] == image.planes[2][0]);
     return 0;
 }
 
@@ -1893,6 +1932,55 @@ static int test_quality_controls(void) {
                         effort[2].transform_trial_count &&
                   effort[0].transform_trial_count >
                         effort[2].transform_trial_count);
+      }
+      {
+            AvifencStatistics lower_quality;
+            AvifencStatistics higher_quality;
+            AvifencStatistics target_size;
+            size_t lower_written;
+            size_t higher_written;
+            size_t size_written;
+
+            avifenc_options_default(&options);
+            options.speed = 0U;
+            options.rate_control.mode = 1U;
+            options.rate_control.target_quality = 9200U;
+            CHECK(avifenc_encode_ex(
+                        &image, &options, workspace, sizeof(workspace),
+                        output, sizeof(output), &lower_written,
+                        &lower_quality, &error) == AVIFENC_OK);
+            options.rate_control.target_quality = 9700U;
+            CHECK(avifenc_encode_ex(
+                        &image, &options, workspace, sizeof(workspace),
+                        repeated, sizeof(repeated), &higher_written,
+                        &higher_quality, &error) == AVIFENC_OK);
+            CHECK(higher_quality.selected_quantizer <=
+                        lower_quality.selected_quantizer &&
+                  higher_quality.achieved_quality >= 9700U &&
+                  lower_quality.achieved_quality >= 9200U &&
+                  higher_quality.encode_pass_count <= 9U &&
+                  lower_quality.encode_pass_count <= 9U);
+
+            avifenc_options_default(&options);
+            options.speed = 1U;
+            options.rate_control.mode = 2U;
+            options.rate_control.target_size = lower_written;
+            CHECK(avifenc_encode_ex(
+                        &image, &options, workspace, sizeof(workspace),
+                        baseline, sizeof(baseline), &size_written,
+                        &target_size, &error) == AVIFENC_OK);
+            CHECK(size_written <= options.rate_control.target_size &&
+                  options.rate_control.target_size - size_written <=
+                        options.rate_control.target_size / 10U + 32U &&
+                  target_size.encode_pass_count <= 7U);
+            options.rate_control.target_size = 1U;
+            size_written = 99U;
+            CHECK(avifenc_encode_ex(
+                        &image, &options, workspace, sizeof(workspace),
+                        baseline, sizeof(baseline), &size_written,
+                        &target_size, &error) == AVIFENC_LIMIT_EXCEEDED);
+            CHECK(size_written == 0U &&
+                  error.context == AVIFENC_CONTEXT_RATE_CONTROL);
       }
       return 0;
 }
