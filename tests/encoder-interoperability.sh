@@ -23,6 +23,13 @@ write_fixture() {
     chroma=$((luma / 4))
     : > "$output"
 
+    if test "$pattern" = row; then
+        total=$((luma + 2 * chroma))
+        dd if=/dev/zero bs="$total" count=1 2>/dev/null |
+            LC_ALL=C tr '\000' '\200' > "$output"
+        return
+    fi
+
     index=0
     while test "$index" -lt "$luma"; do
         column=$((index % width))
@@ -36,7 +43,7 @@ write_fixture() {
                     value=235
                 fi
                 ;;
-            detail) value=$(((column * 29 + row * 47 + index * 3) % 220 + 16)) ;;
+            detail|wide) value=$(((column * 29 + row * 47 + index * 3) % 220 + 16)) ;;
         esac
         octal=$(printf '%03o' "$value")
         printf "\\$octal" >> "$output"
@@ -48,8 +55,8 @@ write_fixture() {
         index=0
         while test "$index" -lt "$chroma"; do
             case $pattern:$plane in
-                detail:0) value=$(((index * 37) % 225 + 16)) ;;
-                detail:1) value=$(((index * 53) % 225 + 16)) ;;
+                detail:0|wide:0) value=$(((index * 37) % 225 + 16)) ;;
+                detail:1|wide:1) value=$(((index * 53) % 225 + 16)) ;;
                 *) value=128 ;;
             esac
             octal=$(printf '%03o' "$value")
@@ -96,7 +103,7 @@ test -n "$codecs" || {
 
 fixtures=0
 comparisons=0
-for specification in flat:2:2:1:2 edge:18:10:128:1 detail:64:48:224:0; do
+for specification in flat:2:2:1:2 edge:18:10:128:1 detail:64:48:224:0 wide:4160:2:128:2 row:2242:4098:255:2; do
     pattern=${specification%%:*}
     remainder=${specification#*:}
     width=${remainder%%:*}
@@ -120,6 +127,14 @@ for specification in flat:2:2:1:2 edge:18:10:128:1 detail:64:48:224:0; do
         echo "$encoded: encoder output is not deterministic" >&2
         exit 1
     }
+    if test "$pattern" = wide || test "$pattern" = row; then
+        "$encoder" --quantizer "$quantizer" --speed "$speed" --workers 2 \
+            "$width" "$height" "$source" "$prefix-workers.avif"
+        cmp "$encoded" "$prefix-workers.avif" || {
+            echo "$encoded: worker count changed encoder output" >&2
+            exit 1
+        }
+    fi
     check_metadata "$encoded" "$width" "$height"
     "$decoder" --raw "$encoded" "$ours" >/dev/null
 

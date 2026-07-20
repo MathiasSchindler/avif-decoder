@@ -22,10 +22,12 @@ project itself builds. It includes:
 - recursive BMFF and checked-in AVIF corpus traces.
 - encoder API validation, exact capacity and one-byte-short buffer checks,
   varied workspace alignment, deterministic output, reconstruction equality,
-  quality/search regressions, and strict plus sanitized image-input units;
+  quality/search regressions, hosted concurrent tile execution, and strict plus
+  sanitized image-input units;
 - deterministic raw YUV, PNG, and baseline JPEG CLI fixtures, including
-  oversized image fitting and freestanding binary dependency checks.
-- the eight-case encoder scorecard, which byte-compares output checksums,
+  preserved wide multi-tile dimensions, worker byte identity, and freestanding
+  binary dependency checks.
+- the nine-case encoder scorecard, which byte-compares output checksums,
   capacities, YUV quality metrics, structural edge error, and deterministic
   work counts against the checked-in cross-platform baseline, while also
   requiring exact encoder/decoder reconstruction checksums.
@@ -66,7 +68,7 @@ The additional coverage includes:
 - byte-exact width-1/width-4 grid comparisons on Linux/x86-64.
 - exact encoder reconstruction comparisons through FFmpeg, direct libaom, and
   every usable libavif decoder backend, plus ffprobe metadata validation and
-  repeated-encode determinism checks;
+  repeated-encode determinism checks, including wide multi-tile output;
 - 1,003 exact encoder transform vectors against libaom.
 
 ### Generated-table reproduction

@@ -13,4 +13,5 @@ if ! cmp "$baseline" "$actual"; then
     exit 1
 fi
 
-echo 'encoder scorecard: 8 deterministic cases match baseline'
+cases=$(wc -l < "$actual" | tr -d ' ')
+echo "encoder scorecard: $cases deterministic cases match baseline"

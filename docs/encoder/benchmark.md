@@ -4,7 +4,7 @@ The encoder scorecard makes speed, memory, output size, deterministic work, and 
 
 ## Corpus
 
-The runner uses seven deterministic generated sources and one checked-in CC0 photographic fixture:
+The runner uses eight deterministic generated sources and one checked-in CC0 photographic fixture:
 
 | Case | Dimensions | Quantizer | Speed | Coverage |
 | --- | ---: | ---: | ---: | --- |
@@ -15,6 +15,7 @@ The runner uses seven deterministic generated sources and one checked-in CC0 pho
 | `noise` | 64x48 | 128 | 2 | Deterministic high-frequency luma/chroma noise |
 | `chroma-detail` | 64x48 | 96 | 0 | Constant luma with alternating chroma detail |
 | `large-practical` | 1024x768 | 128 | 2 | Practical 0.1 upper routine size and sustained traversal |
+| `multi-tile-wide` | 8192x64 | 128 | 2 | Two balanced tile columns and parallel scaling |
 | `photograph` | 330x220 | 96 | 1 | `images/image-check/tribu.png` through the project PNG decoder |
 
 The corpus deliberately exercises all three speed levels. The one-megapixel
@@ -43,9 +44,18 @@ Increase repetitions when measuring time:
 ```sh
 BENCHMARK_ITERATIONS=20 make encoder-benchmark
 BENCHMARK_ITERATIONS=20 make encoder-benchmark-json
+build/host/encoder-benchmark --human --iterations 20 --workers 2
 ```
 
-The human table reports aggregate monotonic wall-clock milliseconds for the selected iteration count, throughput in megapixels per second, output bytes, luma PSNR, and prediction trials. The timed loop uses `avifenc_encode()` so optional statistics and reconstruction hashing do not distort the encoder baseline. JSON includes those timing fields plus the complete stable scorecard.
+The human table reports aggregate monotonic wall-clock milliseconds for the selected iteration count, throughput in megapixels per second, output bytes, luma PSNR, and prediction trials. The timed loop uses `avifenc_encode_with_executor()` with null statistics, so statistics collection and reconstruction hashing do not distort the encoder baseline. JSON includes those timing fields plus the complete stable scorecard.
+
+`--workers N` uses a hosted pthread executor for reproducible core scaling
+measurements without adding a production dependency. Stable JSON requires one
+worker so its workspace values remain cross-platform. On the named M4 Max host,
+the median of five 20-iteration runs for `multi-tile-wide` is 654.483 ms with
+one worker and 335.443 ms with two, a 1.95x speedup. Whole-corpus medians are
+1821.482 ms and 1502.577 ms respectively (1.21x); the other eight cases are
+legally single-tile and therefore serial.
 
 ## Stable metrics
 
@@ -73,6 +83,6 @@ Wall-clock timing is informative and never gates `make test`. The first referenc
 
 | Host | Toolchain | Iterations | Time per corpus | Throughput | Informational budget |
 | --- | --- | ---: | ---: | ---: | --- |
-| `Mac16,6`, Apple M4 Max, macOS 26.5.2 | Homebrew Clang 22.1.8, `-O2` | 20 | 58.533 ms | 14.942 MP/s | at most 75 ms and at least 11 MP/s |
+| `Mac16,6`, Apple M4 Max, macOS 26.5.2 | Homebrew Clang 22.1.8, `-O2` | 20 | 91.074 ms | 15.360 MP/s | at most 115 ms and at least 12 MP/s |
 
 Run timing on an otherwise idle named machine, use at least 20 iterations, and compare the median of five process runs. Add Linux/x86-64 reference rows when a stable named host is available. A budget miss prompts profiling; it does not justify weakening deterministic or quality gates.

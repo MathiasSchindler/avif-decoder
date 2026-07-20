@@ -66,20 +66,21 @@ reported through capability flags and `AVIFDEC_UNSUPPORTED`.
 
 The encoder core accepts one nonzero, even-sized 8-bit planar YUV420 frame and
 writes one Main-profile reduced-still key frame in a single-item AVIF. It uses
-one tile, 64x64 superblocks partitioned to 4x4 coding blocks, 4x4 DCT
+deterministic uniform tiles, 64x64 superblocks partitioned to 4x4 coding blocks, 4x4 DCT
 transforms, DC chroma prediction, and a deterministic bounded luma mode search.
 Quantizers 1 through 255 and speeds 0 through 2 are supported.
 
-Each dimension is at most 65,536. One-tile syntax further limits the image to
-64 superblock columns and 2,304 total superblocks. The encoder API does not
+Each dimension is at most 65,536. Images exceeding AV1's per-tile width or area
+limits are split into bounded tile columns and rows. The encoder API does not
 resize inputs. It performs no allocation or I/O and reports conservative
 caller-owned workspace and output capacities before encoding.
 
 The `avifenc` CLI additionally accepts non-interlaced 8-bit PNG and baseline
 8-bit JPEG. It converts decoded RGB to limited-range BT.709 YUV420, extends odd
-edges to even dimensions, and aspect-preservingly downsizes image files that
-exceed the one-tile limit. The core API remains planar and preserves the
-caller-supplied NCLX color fields.
+edges to even dimensions, and preserves supported source dimensions. The core
+API remains planar and preserves the caller-supplied NCLX color fields. The
+optional executor and CLI `--workers` setting parallelize independent tiles;
+Linux uses native worker threads and macOS currently falls back to serial.
 
 ## Known limitations
 

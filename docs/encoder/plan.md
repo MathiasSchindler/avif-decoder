@@ -9,7 +9,7 @@ ten ordered goals spanning **speed**, **features**, and **encoding quality**.
 | Goal | Primary outcome | Speed | Features | Quality | Status |
 | --- | --- | :---: | :---: | :---: | --- |
 | 1. Measurement and regression budgets | Reproducible decisions | Yes |  | Yes | Complete |
-| 2. Multi-tile encoding and bounded parallelism | Large images without resizing | Yes | Yes |  | Planned |
+| 2. Multi-tile encoding and bounded parallelism | Large images without resizing | Yes | Yes |  | Complete |
 | 3. Variable partitions and transforms | Better local adaptation | Yes | Yes | Yes | Planned |
 | 4. Complete intra and chroma prediction | Stronger still-image coding | Yes | Yes | Yes | Planned |
 | 5. Quantization, lossless, and rate control | Useful quality/size controls | Yes | Yes | Yes | Planned |
@@ -120,6 +120,16 @@ multi-tile output decodes exactly through the in-tree decoder, libavif, libaom,
 and FFmpeg, worker counts produce byte-identical files, and representative
 large images show useful multicore scaling without increasing serial output
 size or reducing quality.
+
+Implemented by the dimension-derived uniform tile layout in
+`src/encoder/av1_write.c`, executor-aware query and encode APIs, independent
+tile jobs and ordered serialization in `src/encoder/avifenc.c`, and the CLI's
+`--workers` adapter. Strict layout vectors, hosted concurrent sanitizer tests,
+CLI byte-identity tests, the nine-case scorecard, and external interoperability
+cover the contract. On the named M4 Max host, a hosted two-worker executor
+encodes the balanced 8192x64 case 1.95x faster than serial; the freestanding
+macOS substrate currently falls back to one worker, while Linux uses the
+existing native task pool.
 
 ## Goal 3: Variable partitions and transforms
 

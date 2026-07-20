@@ -69,14 +69,16 @@ grayscale-alpha, indexed, RGB, and RGBA images. JPEG input supports 8-bit
 baseline Huffman grayscale and YCbCr/RGB images with common 4:4:4, 4:2:2, and
 4:2:0 sampling. Progressive JPEG and interlaced PNG are rejected. RGB is
 converted to limited-range BT.709 YUV 4:2:0. Because the encoder contract
-requires even dimensions, an odd final row or column is repeated once. Images
-that exceed the current one-tile encoder limit are aspect-preservingly
-downscaled with nearest-neighbor sampling, and the CLI reports that adjustment.
+requires even dimensions, an odd final row or column is repeated once.
+Supported source dimensions are preserved and split into deterministic AV1
+tiles when one tile would exceed width or area limits.
 
 Quantizers 1 through 255 and speed levels 0 through 2 are supported. Speed 0
 searches DC, vertical, horizontal, smooth, and Paeth luma prediction; speed 1
 searches DC, vertical, and horizontal; speed 2 uses DC only. The current
-encoder uses one tile, DC chroma prediction, 4x4 blocks, and 4x4 transforms. It
+encoder uses DC chroma prediction, 4x4 blocks, and 4x4 transforms. `--workers`
+selects bounded tile parallelism independently of speed; Linux uses the native
+task pool and macOS currently falls back to serial. It
 is intended as a bounded interoperable baseline rather than a
 compression-efficiency replacement for libaom.
 

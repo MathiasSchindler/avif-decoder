@@ -12,6 +12,7 @@
 #define AVIFENC_DEFAULT_QUANTIZER 128U
 #define AVIFENC_DEFAULT_SPEED 0U
 #define AVIFENC_MAX_SPEED 2U
+#define AVIFENC_EXECUTOR_MAX_WORKERS 32U
 
 typedef enum {
     AVIFENC_OK = 0,
@@ -36,7 +37,8 @@ typedef enum {
     AVIFENC_CONTEXT_REQUIREMENTS,
     AVIFENC_CONTEXT_WORKSPACE,
     AVIFENC_CONTEXT_OUTPUT,
-    AVIFENC_CONTEXT_IMPLEMENTATION
+    AVIFENC_CONTEXT_IMPLEMENTATION,
+    AVIFENC_CONTEXT_EXECUTOR
 } AvifencErrorContext;
 
 typedef struct {
@@ -87,6 +89,25 @@ typedef struct {
     uint64_t reconstruction_checksum[3];
 } AvifencStatistics;
 
+typedef AvifencStatus (*AvifencParallelBody)(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg);
+
+typedef AvifencStatus (*AvifencParallelFor)(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifencParallelBody body,
+    void *arg);
+
+typedef struct {
+    void *user_data;
+    size_t worker_count;
+    AvifencParallelFor parallel_for;
+} AvifencExecutor;
+
 const char *avifenc_version_string(void);
 const char *avifenc_status_string(AvifencStatus status);
 const char *avifenc_error_context_string(AvifencErrorContext context);
@@ -101,6 +122,12 @@ AvifencStatus avifenc_query(const AvifencImage *image,
                             const AvifencOptions *options,
                             AvifencRequirements *requirements,
                             AvifencError *error);
+AvifencStatus avifenc_query_with_executor(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    const AvifencExecutor *executor,
+    AvifencRequirements *requirements,
+    AvifencError *error);
 
 /*
  * Encode one reduced-still-picture AVIF image. Capacities must meet the values
@@ -129,5 +156,17 @@ AvifencStatus avifenc_encode_ex(const AvifencImage *image,
                                 size_t *output_written,
                                 AvifencStatistics *statistics,
                                 AvifencError *error);
+
+AvifencStatus avifenc_encode_with_executor(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    const AvifencExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    void *output,
+    size_t output_capacity,
+    size_t *output_written,
+    AvifencStatistics *statistics,
+    AvifencError *error);
 
 #endif

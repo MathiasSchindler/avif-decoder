@@ -93,6 +93,7 @@ The CLI also reads dimensions directly from PNG and JPEG files:
 
 ```sh
 build/x86_64/avifenc --quantizer 96 --speed 1 photo.jpg photo.avif
+build/x86_64/avifenc --workers 4 artwork.png artwork.avif
 build/x86_64/avifenc artwork.png artwork.avif
 ```
 
@@ -104,19 +105,20 @@ profile and is discarded by image input.
 
 Image pixels are converted with integer arithmetic to limited-range BT.709
 YUV420. Odd source dimensions repeat the final row or column to satisfy the
-planar encoder's even-dimension contract. Inputs outside the one-tile limit are
-aspect-preservingly downscaled with nearest-neighbor sampling, with a notice on
-standard error. Raw YUV input is never resized.
+planar encoder's even-dimension contract. Supported dimensions are preserved;
+raw YUV and image-file inputs are never resized.
 
 Speed 0, the default, evaluates DC, vertical, horizontal, smooth, and Paeth
 luma prediction. Speed 1 evaluates DC, vertical, and horizontal. Speed 2 uses
 the fixed-DC baseline. All levels retain DC chroma prediction and 4x4 blocks
 and transforms; speed changes search work, not the supported file format.
 
-The first-release encoder writes one 8-bit Main-profile reduced-still key frame
-with one tile. Alpha, lossless mode, grids, sequences, inter prediction, rate
-control, and target-size encoding are unsupported. See
-[`api.md`](api.md) for exact one-tile limits and caller-owned buffer contracts.
+The encoder writes one 8-bit Main-profile reduced-still key frame with a
+deterministic uniform tile layout. `--workers 1..32` is orthogonal to speed and
+uses the existing task pool where platform worker threads are supported;
+unsupported substrates fall back to serial. Alpha, lossless mode, grids,
+sequences, inter prediction, rate control, and target-size encoding are
+unsupported. See [`api.md`](api.md) for caller-owned buffer contracts.
 
 ## Output formats
 

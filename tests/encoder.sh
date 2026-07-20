@@ -11,7 +11,7 @@ output=$($binary --version)
 test "$output" = 'avifenc 0.1.0'
 output=$($binary --help)
 case "$output" in
-    *'usage: avifenc [--quantizer 1..255] [--speed 0..2] WIDTH HEIGHT INPUT.yuv OUTPUT.avif'*) ;;
+    *'usage: avifenc [--quantizer 1..255] [--speed 0..2] [--workers 1..32] WIDTH HEIGHT INPUT.yuv OUTPUT.avif'*) ;;
     *) echo 'encoder help is missing the command contract' >&2; exit 1 ;;
 esac
 case "$output" in
@@ -86,6 +86,19 @@ for fixture in flat:2:2 ramp:10:6 sharp:10:6 chroma:10:6; do
     fi
 done
 
+wide_yuv="$tmp_dir/wide-4160x2.yuv"
+wide_serial="$tmp_dir/wide-serial.avif"
+wide_parallel="$tmp_dir/wide-parallel.avif"
+write_fixture "$wide_yuv" 4160 2 ramp
+$binary --speed 2 4160 2 "$wide_yuv" "$wide_serial"
+$binary --speed 2 --workers 2 4160 2 "$wide_yuv" "$wide_parallel"
+cmp "$wide_serial" "$wide_parallel"
+output=$($decoder "$wide_parallel")
+printf '%s\n' "$output" | grep -q '^width=4160$'
+printf '%s\n' "$output" | grep -q '^height=2$'
+printf '%s\n' "$output" | grep -q '^tile_columns=2$'
+printf '%s\n' "$output" | grep -q '^tile_rows=1$'
+
 for source in images/image-check/tribu.png images/chalk.jpg; do
     name=${source##*/}
     avif="$tmp_dir/$name.avif"
@@ -125,6 +138,19 @@ test "$exit_code" -eq 2
 case "$output" in
     *'invalid argument: dimensions'*) ;;
     *) echo 'odd dimensions returned the wrong error' >&2; exit 1 ;;
+esac
+
+if output=$($binary --workers 0 2 2 "$tmp_dir/flat-2x2.yuv" \
+        "$tmp_dir/workers.avif" 2>&1); then
+    echo 'zero encoder workers were accepted' >&2
+    exit 1
+else
+    exit_code=$?
+fi
+test "$exit_code" -eq 2
+case "$output" in
+    *'invalid worker count'*) ;;
+    *) echo 'zero workers returned the wrong error' >&2; exit 1 ;;
 esac
 
 if output=$($binary --quantizer 256 2 2 "$tmp_dir/flat-2x2.yuv" \

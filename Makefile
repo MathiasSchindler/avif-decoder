@@ -14,6 +14,7 @@ STRICT_UNIT := $(BUILD_DIR)/unit
 HOST_UNIT := build/host/unit
 ENCODER_STRICT_UNIT := $(BUILD_DIR)/encoder-unit
 ENCODER_HOST_UNIT := build/host/encoder-unit
+ENCODER_PARALLEL_UNIT := build/host/encoder-parallel-unit
 IMAGE_INPUT_STRICT_UNIT := $(BUILD_DIR)/image-input-unit
 IMAGE_INPUT_HOST_UNIT := build/host/image-input-unit
 ENCODER_BENCHMARK := build/host/encoder-benchmark
@@ -121,7 +122,8 @@ ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_TEST_HEADERS := $(wildcard src/*.h src/*.inc src/encoder/*.h \
 	src/shared/*.h)
 ENCODER_C_SOURCES := src/encoder/main.c $(ENCODER_CORE_C_SOURCES) \
-	$(IMAGE_INPUT_C_SOURCES) $(PLATFORM_DIR)/io.c
+	$(IMAGE_INPUT_C_SOURCES) src/task_pool.c $(PLATFORM_DIR)/thread.c \
+	$(PLATFORM_DIR)/io.c
 RUNTIME_C_SOURCES := src/task_pool.c $(PLATFORM_DIR)/thread.c
 C_SOURCES := src/main.c $(CORE_C_SOURCES) $(RUNTIME_C_SOURCES) \
 	$(PLATFORM_DIR)/io.c
@@ -245,6 +247,12 @@ $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
 	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_unit.c \
 		$(ENCODER_TEST_C_SOURCES) -o $@
 
+$(ENCODER_PARALLEL_UNIT): tests/encoder_parallel.c \
+		$(ENCODER_TEST_C_SOURCES) $(ENCODER_TEST_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/encoder_parallel.c \
+		$(ENCODER_TEST_C_SOURCES) -pthread -o $@
+
 $(IMAGE_INPUT_HOST_UNIT): tests/image_input_unit.c $(IMAGE_INPUT_C_SOURCES) \
 		src/encoder/image_input.h src/base.c src/base.h
 	@mkdir -p $(@D)
@@ -257,7 +265,8 @@ $(ENCODER_BENCHMARK): tests/encoder_benchmark.c \
 	@mkdir -p $(@D)
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
 		-Isrc -Isrc/shared tests/encoder_benchmark.c \
-		$(ENCODER_TEST_C_SOURCES) $(IMAGE_INPUT_C_SOURCES) -lm -o $@
+		$(ENCODER_TEST_C_SOURCES) $(IMAGE_INPUT_C_SOURCES) \
+		-lm -pthread -o $@
 
 encoder-benchmark: $(ENCODER_BENCHMARK)
 	$(ENCODER_BENCHMARK) --human --iterations $(BENCHMARK_ITERATIONS)
@@ -380,10 +389,12 @@ test: test-encoder $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) \
 	sh tests/corpus.sh $(TARGET)
 
 test-encoder: $(TARGET) $(ENCODER_TARGET) $(ENCODER_STRICT_UNIT) \
-		$(ENCODER_HOST_UNIT) $(IMAGE_INPUT_STRICT_UNIT) $(IMAGE_INPUT_HOST_UNIT) \
+		$(ENCODER_HOST_UNIT) $(ENCODER_PARALLEL_UNIT) \
+		$(IMAGE_INPUT_STRICT_UNIT) $(IMAGE_INPUT_HOST_UNIT) \
 		$(ENCODER_BENCHMARK)
 	$(ENCODER_STRICT_UNIT)
 	$(ENCODER_HOST_UNIT)
+	$(ENCODER_PARALLEL_UNIT)
 	$(IMAGE_INPUT_STRICT_UNIT)
 	$(IMAGE_INPUT_HOST_UNIT)
 	sh tests/encoder.sh $(ENCODER_TARGET) $(TARGET)

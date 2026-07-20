@@ -26,13 +26,9 @@ The sister encoder API is declared in
 
 The encoder produces one reduced-still AV1 key frame in a single-item AVIF.
 Input dimensions must be nonzero and even, each no greater than
-`AVIFENC_MAX_DIMENSION` (65,536). The one-tile writer additionally requires at
-most 64 superblock columns and 2,304 total 64x64 superblocks:
-
-```text
-ceil(width / 64) <= 64
-ceil(width / 64) * ceil(height / 64) <= 2304
-```
+`AVIFENC_MAX_DIMENSION` (65,536). A deterministic uniform AV1 tile layout is
+selected from the dimensions. One tile is retained whenever legal; larger
+images use bounded tile columns and rows without resizing.
 
 Plane strides are measured in bytes. Y is full resolution; U and V are each
 half width and half height. `AvifencColor` is written as NCLX/AV1 color
@@ -43,7 +39,7 @@ Quantizers 1 through 255 and speed levels 0 through `AVIFENC_MAX_SPEED` (2)
 are supported. Quantizer 0, including lossless encoding, returns
 `AVIFENC_UNSUPPORTED`. Speed 0 searches DC, vertical, horizontal, smooth, and
 Paeth luma predictors; speed 1 searches DC, vertical, and horizontal; speed 2
-retains the fixed-DC baseline. Every speed uses DC chroma prediction, one tile,
+retains the fixed-DC baseline. Every speed uses DC chroma prediction,
 4x4 blocks, and 4x4 DCT transforms. Lower quantizers generally preserve more
 detail and increase output size. Speed changes bounded search work, not the
 format surface or memory requirement.
@@ -65,6 +61,15 @@ contain no timers or platform state, so callers can compare coding work across
 runs and architectures. Passing null disables reporting;
 `avifenc_encode()` is the source-compatible wrapper.
 
+`avifenc_query_with_executor()` and `avifenc_encode_with_executor()` accept an
+optional caller-owned `AvifencExecutor`. Its synchronous `parallel_for` follows
+the decoder executor contract: every index is invoked exactly once, calls
+sharing a worker index do not overlap, and the callback returns only after all
+work completes. Worker counts are 1 through
+`AVIFENC_EXECUTOR_MAX_WORKERS` (32). Query includes one private tile scratch
+span per advertised worker. Tile layout and output bytes are independent of
+worker count; serial and parallel calls produce identical files and statistics.
+
 Encoder failures distinguish invalid arguments, checked arithmetic overflow,
 implementation limits, insufficient workspace, insufficient output,
 and valid but unsupported requests. `AvifencError` identifies the failing
@@ -73,10 +78,9 @@ context and, for capacity errors, records the required and provided sizes.
 The CLI is an adapter around this planar API. Raw input is tightly packed Y,
 then U, then V. PNG and baseline JPEG input is decoded by project-owned
 freestanding code and converted to limited-range BT.709 YUV420 with integer
-arithmetic. Odd image dimensions repeat the last row or column. Image inputs
-outside the one-tile limit are aspect-preservingly downscaled with
-nearest-neighbor sampling; the planar API itself returns `AVIFENC_UNSUPPORTED`
-instead of resizing. Progressive JPEG and interlaced PNG are unsupported.
+arithmetic. Odd image dimensions repeat the last row or column. Supported
+image dimensions are preserved. Progressive JPEG and interlaced PNG are
+unsupported.
 
 ## Still images
 

@@ -2,12 +2,11 @@
 #include "encoder/image_input.h"
 #include "base.h"
 #include "platform.h"
+#include "task_pool.h"
 #include <stddef.h>
 #include <stdint.h>
 
 #define AVIFENC_CLI_MAX_INPUT_SIZE (1024U * 1024U * 1024U)
-#define AVIFENC_CLI_MAX_TILE_COLUMNS 64U
-#define AVIFENC_CLI_MAX_TILE_SUPERBLOCKS 2304U
 
 static size_t text_length(const char *text) {
     size_t length = 0U;
@@ -142,14 +141,10 @@ static uint8_t color_red_difference(uint8_t red,
 }
 
 static int image_dimensions_supported(uint32_t width, uint32_t height) {
-    uint32_t superblock_columns = (width + 63U) / 64U;
-    uint32_t superblock_rows = (height + 63U) / 64U;
-
     return width != 0U && height != 0U &&
         (width & 1U) == 0U && (height & 1U) == 0U &&
-        superblock_columns <= AVIFENC_CLI_MAX_TILE_COLUMNS &&
-        (uint64_t)superblock_columns * superblock_rows <=
-            AVIFENC_CLI_MAX_TILE_SUPERBLOCKS;
+        width <= AVIFENC_MAX_DIMENSION &&
+        height <= AVIFENC_MAX_DIMENSION;
 }
 
 static void image_fit_dimensions(uint32_t source_width,
@@ -159,34 +154,7 @@ static void image_fit_dimensions(uint32_t source_width,
     uint32_t width = (source_width + 1U) & ~1U;
     uint32_t height = (source_height + 1U) & ~1U;
 
-    if (!image_dimensions_supported(width, height)) {
-        uint32_t low = 1U;
-        uint32_t high = 65536U;
-        uint32_t best_width = 2U;
-        uint32_t best_height = 2U;
-
-        while (low <= high) {
-            uint32_t scale = low + (high - low) / 2U;
-            uint32_t candidate_width = (uint32_t)(
-                ((uint64_t)source_width * scale) / 65536U) & ~1U;
-            uint32_t candidate_height = (uint32_t)(
-                ((uint64_t)source_height * scale) / 65536U) & ~1U;
-
-            if (candidate_width < 2U) candidate_width = 2U;
-            if (candidate_height < 2U) candidate_height = 2U;
-            if (image_dimensions_supported(
-                    candidate_width, candidate_height)) {
-                best_width = candidate_width;
-                best_height = candidate_height;
-                low = scale + 1U;
-            } else {
-                if (scale == 0U) break;
-                high = scale - 1U;
-            }
-        }
-        width = best_width;
-        height = best_height;
-    }
+    if (!image_dimensions_supported(width, height)) width = height = 0U;
     *width_out = width;
     *height_out = height;
 }
@@ -274,12 +242,48 @@ static int write_text(int fd, const char *text) {
     return write_bytes(fd, text, text_length(text));
 }
 
+typedef struct {
+    AvifencParallelBody body;
+    void *arg;
+} EncoderCliParallelCall;
+
+static int encoder_cli_parallel_body(
+    size_t begin,
+    size_t end,
+    unsigned int worker_index,
+    void *arg) {
+    EncoderCliParallelCall *call = (EncoderCliParallelCall *)arg;
+
+    return (int)call->body(begin, end, worker_index, call->arg);
+}
+
+static AvifencStatus encoder_cli_parallel_for(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifencParallelBody body,
+    void *arg) {
+    EncoderCliParallelCall call;
+    int status;
+
+    if (user_data == 0 || body == 0) return AVIFENC_INVALID_ARGUMENT;
+    call.body = body;
+    call.arg = arg;
+    status = rt_parallel_for(
+        (RtTaskPool *)user_data, count, min_chunk,
+        encoder_cli_parallel_body, &call);
+    if (status < (int)AVIFENC_OK || status > (int)AVIFENC_UNSUPPORTED) {
+        return AVIFENC_INVALID_ARGUMENT;
+    }
+    return (AvifencStatus)status;
+}
+
 static void write_usage(int fd) {
     (void)write_text(
         fd,
-        "usage: avifenc [--quantizer 1..255] [--speed 0..2] "
+        "usage: avifenc [--quantizer 1..255] [--speed 0..2] [--workers 1..32] "
         "WIDTH HEIGHT INPUT.yuv OUTPUT.avif\n"
-        "       avifenc [--quantizer 1..255] [--speed 0..2] "
+        "       avifenc [--quantizer 1..255] [--speed 0..2] [--workers 1..32] "
         "INPUT.png|jpg|jpeg OUTPUT.avif\n"
         "       avifenc --help\n"
         "       avifenc --version\n");
@@ -318,6 +322,11 @@ int main(int argc, char **argv) {
     size_t output_written = 0U;
     uint32_t quantizer = AVIFENC_DEFAULT_QUANTIZER;
     uint32_t speed = AVIFENC_DEFAULT_SPEED;
+    uint32_t requested_workers = 1U;
+    RtTaskPool task_pool;
+    AvifencExecutor executor;
+    const AvifencExecutor *encode_executor = 0;
+    int task_pool_initialized = 0;
     int input_fd = -1;
     int output_fd = -1;
     const char *output_path;
@@ -346,6 +355,13 @@ int main(int argc, char **argv) {
             if (!text_to_u32(argv[argument + 1], &speed) ||
                 speed > UINT8_MAX) {
                 (void)write_text(2, "avifenc: invalid speed\n");
+                return 2;
+            }
+        } else if (text_equal(argv[argument], "--workers")) {
+            if (!text_to_u32(argv[argument + 1], &requested_workers) ||
+                requested_workers == 0U ||
+                requested_workers > AVIFENC_EXECUTOR_MAX_WORKERS) {
+                (void)write_text(2, "avifenc: invalid worker count\n");
                 return 2;
             }
         } else {
@@ -390,11 +406,10 @@ int main(int argc, char **argv) {
         image_fit_dimensions(
             source_info.width, source_info.height,
             &image.width, &image.height);
-        if (image.width + 1U < source_info.width ||
-            image.height + 1U < source_info.height) {
-            (void)write_text(
-                2,
-                "avifenc: image exceeds one-tile limit; downscaling\n");
+        if (image.width == 0U || image.height == 0U) {
+            (void)write_text(2, "avifenc: image dimensions exceed limit\n");
+            result = 2;
+            goto cleanup;
         }
         rgb_size = source_info.output_size;
         image_workspace_size = source_info.workspace_size;
@@ -432,10 +447,23 @@ int main(int argc, char **argv) {
     avifenc_options_default(&options);
     options.quantizer = (uint16_t)quantizer;
     options.speed = (uint8_t)speed;
-    status = avifenc_query(&image, &options, &requirements, &error);
+    if (requested_workers > 1U) {
+        if (rt_task_pool_init(&task_pool, requested_workers) != 0) {
+            (void)write_text(2, "avifenc: failed to initialize workers\n");
+            goto cleanup;
+        }
+        task_pool_initialized = 1;
+        executor.user_data = &task_pool;
+        executor.worker_count = rt_task_pool_width(&task_pool);
+        executor.parallel_for = encoder_cli_parallel_for;
+        encode_executor = &executor;
+    }
+    status = avifenc_query_with_executor(
+        &image, &options, encode_executor, &requirements, &error);
     if (status != AVIFENC_OK) {
         (void)write_error(status, &error);
-        return 2;
+        result = 2;
+        goto cleanup;
     }
     if (!avifdec_size_multiply(image.width, image.height, &luma_size) ||
         !avifdec_size_multiply(
@@ -500,10 +528,11 @@ int main(int argc, char **argv) {
         (void)write_text(2, "avifenc: out of memory: encode buffers\n");
         goto cleanup;
     }
-    status = avifenc_encode(
-        &image, &options, workspace, requirements.workspace_required,
+    status = avifenc_encode_with_executor(
+        &image, &options, encode_executor,
+        workspace, requirements.workspace_required,
         output, requirements.output_capacity_required,
-        &output_written, &error);
+        &output_written, 0, &error);
     if (status != AVIFENC_OK) {
         (void)write_error(status, &error);
         goto cleanup;
@@ -524,6 +553,7 @@ int main(int argc, char **argv) {
     result = 0;
 
 cleanup:
+    if (task_pool_initialized) rt_task_pool_destroy(&task_pool);
     if (input_fd >= 0) (void)platform_close(input_fd);
     if (output_fd >= 0) (void)platform_close(output_fd);
     if (output != 0) {

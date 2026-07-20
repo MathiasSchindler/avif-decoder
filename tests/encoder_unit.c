@@ -723,6 +723,28 @@ static int test_av1_header_writer(void) {
       config.width = 4098U;
       avifenc_byte_writer_init_sizing(&sizing);
       CHECK(avifenc_av1_write(&sizing, &config) == AVIFENC_UNSUPPORTED);
+      {
+            AvifencAv1TileLayout layout;
+
+            CHECK(avifenc_av1_tile_layout(
+                        4096U, 2U, &layout) == AVIFENC_OK &&
+                  layout.columns == 1U && layout.rows == 1U);
+            CHECK(avifenc_av1_tile_layout(
+                        4098U, 2U, &layout) == AVIFENC_OK &&
+                  layout.columns == 2U && layout.rows == 1U &&
+                  layout.columns_log2 == 1U);
+            CHECK(avifenc_av1_tile_layout(
+                        8192U, 64U, &layout) == AVIFENC_OK &&
+                  layout.columns == 2U && layout.tile_width_sb == 64U);
+            CHECK(avifenc_av1_tile_layout(
+                        2242U, 4098U, &layout) == AVIFENC_OK &&
+                  layout.columns == 1U && layout.rows == 2U &&
+                  layout.rows_log2 == 1U);
+            CHECK(avifenc_av1_tile_layout(
+                        4098U, 4482U, &layout) == AVIFENC_OK &&
+                  layout.columns == 2U && layout.rows == 2U &&
+                  layout.columns_log2 == 1U && layout.rows_log2 == 1U);
+      }
       config.width = 2U;
       config.quantizer = 256U;
       avifenc_byte_writer_init_sizing(&sizing);
@@ -1822,5 +1844,7 @@ int main(int argc, char **argv) {
     if (result != 0) return result;
       result = test_encode_boundaries();
       if (result != 0) return result;
-      return test_quality_controls();
+      result = test_quality_controls();
+      if (result != 0) return result;
+      return 0;
 }

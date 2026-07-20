@@ -5,6 +5,7 @@
 #include "avifdec.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,73 @@ typedef struct {
     uint64_t pixels_per_second;
 } BenchmarkResult;
 
+static void benchmark_fail(const char *message);
+
+typedef struct {
+    AvifencParallelBody body;
+    void *arg;
+    size_t begin;
+    size_t end;
+    size_t worker_index;
+    AvifencStatus status;
+} BenchmarkThreadWork;
+
+static void *benchmark_thread_worker(void *arg) {
+    BenchmarkThreadWork *work = (BenchmarkThreadWork *)arg;
+
+    work->status = work->body(
+        work->begin, work->end, work->worker_index, work->arg);
+    return NULL;
+}
+
+static AvifencStatus benchmark_parallel_for(
+    void *user_data,
+    size_t count,
+    size_t min_chunk,
+    AvifencParallelBody body,
+    void *arg) {
+    size_t advertised_workers;
+    size_t worker_count;
+    pthread_t threads[AVIFENC_EXECUTOR_MAX_WORKERS - 1U];
+    BenchmarkThreadWork work[AVIFENC_EXECUTOR_MAX_WORKERS];
+    size_t index;
+
+    if (user_data == NULL || min_chunk == 0U || body == NULL) {
+        return AVIFENC_INVALID_ARGUMENT;
+    }
+    advertised_workers = *(const size_t *)user_data;
+    if (advertised_workers == 0U ||
+        advertised_workers > AVIFENC_EXECUTOR_MAX_WORKERS) {
+        return AVIFENC_INVALID_ARGUMENT;
+    }
+    worker_count = advertised_workers < count ? advertised_workers : count;
+    for (index = 0U; index < worker_count; ++index) {
+        work[index].body = body;
+        work[index].arg = arg;
+        work[index].begin = index * count / worker_count;
+        work[index].end = (index + 1U) * count / worker_count;
+        work[index].worker_index = index;
+        work[index].status = AVIFENC_OK;
+    }
+    for (index = 1U; index < worker_count; ++index) {
+        if (pthread_create(
+                &threads[index - 1U], NULL,
+                benchmark_thread_worker, &work[index]) != 0) {
+            benchmark_fail("cannot create benchmark worker");
+        }
+    }
+    (void)benchmark_thread_worker(&work[0]);
+    for (index = 1U; index < worker_count; ++index) {
+        if (pthread_join(threads[index - 1U], NULL) != 0) {
+            benchmark_fail("cannot join benchmark worker");
+        }
+    }
+    for (index = 0U; index < worker_count; ++index) {
+        if (work[index].status != AVIFENC_OK) return work[index].status;
+    }
+    return AVIFENC_OK;
+}
+
 static const BenchmarkCase benchmark_cases[] = {
     { "minimum", BENCHMARK_MINIMUM, 2U, 2U, 96U, 0U },
     { "gradient", BENCHMARK_GRADIENT, 64U, 48U, 96U, 0U },
@@ -57,6 +125,7 @@ static const BenchmarkCase benchmark_cases[] = {
     { "noise", BENCHMARK_NOISE, 64U, 48U, 128U, 2U },
     { "chroma-detail", BENCHMARK_CHROMA, 64U, 48U, 96U, 0U },
     { "large-practical", BENCHMARK_LARGE, 1024U, 768U, 128U, 2U },
+    { "multi-tile-wide", BENCHMARK_LARGE, 8192U, 64U, 128U, 2U },
     { "photograph", BENCHMARK_PHOTO, 330U, 220U, 96U, 1U }
 };
 
@@ -452,6 +521,7 @@ static uint64_t benchmark_elapsed_ns(const struct timespec *start,
 
 static void benchmark_run_case(const BenchmarkCase *definition,
                                unsigned int iterations,
+                               const AvifencExecutor *executor,
                                BenchmarkResult *result) {
     BenchmarkSource source;
     AvifencOptions options;
@@ -478,8 +548,9 @@ static void benchmark_run_case(const BenchmarkCase *definition,
     options.speed = definition->speed;
     (void)memset(result, 0, sizeof(*result));
     result->definition = definition;
-    if (avifenc_query(
-            &source.image, &options, &result->requirements, &error) !=
+        if (avifenc_query_with_executor(
+            &source.image, &options, executor,
+            &result->requirements, &error) !=
         AVIFENC_OK) {
         benchmark_fail("encoder query failed");
     }
@@ -487,8 +558,8 @@ static void benchmark_run_case(const BenchmarkCase *definition,
         result->requirements.workspace_required);
     output = (uint8_t *)benchmark_allocate(
         result->requirements.output_capacity_required);
-    if (avifenc_encode_ex(
-            &source.image, &options,
+        if (avifenc_encode_with_executor(
+            &source.image, &options, executor,
             workspace, result->requirements.workspace_required,
             output, result->requirements.output_capacity_required,
             &output_written, &result->statistics, &error) != AVIFENC_OK) {
@@ -498,11 +569,11 @@ static void benchmark_run_case(const BenchmarkCase *definition,
         benchmark_fail("cannot read monotonic clock");
     }
     for (iteration = 0U; iteration < iterations; ++iteration) {
-        if (avifenc_encode(
-                &source.image, &options,
+        if (avifenc_encode_with_executor(
+            &source.image, &options, executor,
                 workspace, result->requirements.workspace_required,
                 output, result->requirements.output_capacity_required,
-                &output_written, &error) != AVIFENC_OK) {
+            &output_written, 0, &error) != AVIFENC_OK) {
             benchmark_fail("encoder operation failed");
         }
     }
@@ -675,6 +746,9 @@ static unsigned int benchmark_parse_iterations(const char *text) {
 int main(int argc, char **argv) {
     enum { OUTPUT_HUMAN, OUTPUT_JSON, OUTPUT_STABLE_JSON } output = OUTPUT_HUMAN;
     unsigned int iterations = 1U;
+    size_t workers = 1U;
+    AvifencExecutor executor;
+    const AvifencExecutor *encode_executor = NULL;
     uint64_t total_ns = 0U;
     uint64_t total_pixels = 0U;
     size_t index;
@@ -690,11 +764,26 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[argument], "--iterations") == 0 &&
                    argument + 1 < argc) {
             iterations = benchmark_parse_iterations(argv[++argument]);
+        } else if (strcmp(argv[argument], "--workers") == 0 &&
+                   argument + 1 < argc) {
+            workers = benchmark_parse_iterations(argv[++argument]);
+            if (workers > AVIFENC_EXECUTOR_MAX_WORKERS) {
+                benchmark_fail("workers must be in 1..32");
+            }
         } else {
             benchmark_fail(
                 "usage: encoder-benchmark [--human|--json|--stable-json] "
-                "[--iterations N]");
+                "[--iterations N] [--workers N]");
         }
+    }
+    if (output == OUTPUT_STABLE_JSON && workers != 1U) {
+        benchmark_fail("stable JSON requires one worker");
+    }
+    if (workers > 1U) {
+        executor.user_data = &workers;
+        executor.worker_count = workers;
+        executor.parallel_for = benchmark_parallel_for;
+        encode_executor = &executor;
     }
     if (output == OUTPUT_HUMAN) benchmark_print_human_header(iterations);
     for (index = 0U;
@@ -702,7 +791,8 @@ int main(int argc, char **argv) {
          ++index) {
         BenchmarkResult result;
 
-        benchmark_run_case(&benchmark_cases[index], iterations, &result);
+        benchmark_run_case(
+            &benchmark_cases[index], iterations, encode_executor, &result);
         total_ns += result.elapsed_ns;
         total_pixels += (uint64_t)benchmark_cases[index].width *
             benchmark_cases[index].height * iterations;
@@ -717,13 +807,15 @@ int main(int argc, char **argv) {
         double throughput = total_ns == 0U ? 0.0 :
             ((double)total_pixels * 1000.0) / (double)total_ns;
 
-        (void)printf("total: %.3f ms, %.3f MP/s\n", total_ms, throughput);
+        (void)printf(
+            "total: %.3f ms, %.3f MP/s, workers=%zu\n",
+            total_ms, throughput, workers);
     } else if (output == OUTPUT_JSON) {
         (void)printf(
             "{\"type\":\"summary\",\"platform\":\"%s\","
-            "\"iterations\":%u,\"elapsed_ns\":%llu,"
+            "\"iterations\":%u,\"workers\":%zu,\"elapsed_ns\":%llu,"
             "\"megapixels_per_second_milli\":%llu}\n",
-            benchmark_platform(), iterations,
+            benchmark_platform(), iterations, workers,
             (unsigned long long)total_ns,
             (unsigned long long)(total_ns == 0U ? 0U :
                 (total_pixels * 1000000ULL / total_ns)));

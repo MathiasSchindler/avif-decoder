@@ -2,9 +2,10 @@
 #include "avifdec.h"
 #include "base.h"
 
-#define ENCODER_FUZZ_MAX_DIMENSION 32U
+#define ENCODER_FUZZ_MAX_WIDTH 4160U
+#define ENCODER_FUZZ_MAX_HEIGHT 32U
 #define ENCODER_FUZZ_MAX_PIXELS \
-    ((size_t)ENCODER_FUZZ_MAX_DIMENSION * ENCODER_FUZZ_MAX_DIMENSION)
+    ((size_t)ENCODER_FUZZ_MAX_WIDTH * ENCODER_FUZZ_MAX_HEIGHT)
 #define ENCODER_FUZZ_WORKSPACE_SIZE (2U * 1024U * 1024U)
 #define ENCODER_FUZZ_OUTPUT_SIZE (512U * 1024U)
 #define ENCODER_FUZZ_DECODE_WORKSPACE_SIZE (8U * 1024U * 1024U)
@@ -75,15 +76,18 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
     AvifdecImageInfo decoded_info;
     AvifdecImage decoded = {
         { fuzz_decoded_y, fuzz_decoded_u, fuzz_decoded_v },
-        { ENCODER_FUZZ_MAX_DIMENSION,
-          ENCODER_FUZZ_MAX_DIMENSION / 2U,
-          ENCODER_FUZZ_MAX_DIMENSION / 2U },
+                { ENCODER_FUZZ_MAX_WIDTH,
+                    ENCODER_FUZZ_MAX_WIDTH / 2U,
+                    ENCODER_FUZZ_MAX_WIDTH / 2U },
         { 0U, 0U, 0U }, { 0U, 0U, 0U }, 0U, 0U, 0U, 0U,
         0, 0U, 0U, 0U, 0U, 0U, 0U
     };
     AvifdecError decode_error;
-    uint32_t width = 2U + 2U * (fuzz_byte(data, size, 0U) % 16U);
-    uint32_t height = 2U + 2U * (fuzz_byte(data, size, 1U) % 16U);
+    int wide = fuzz_byte(data, size, 0U) == 255U;
+    uint32_t width = wide
+        ? 4098U : 2U + 2U * (fuzz_byte(data, size, 0U) % 16U);
+    uint32_t height = wide
+        ? 2U : 2U + 2U * (fuzz_byte(data, size, 1U) % 16U);
     size_t luma_size = (size_t)width * height;
     size_t chroma_size = (size_t)(width / 2U) * (height / 2U);
     size_t workspace_offset =
@@ -161,12 +165,13 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
         fuzz_output + workspace_offset,
         requirements.output_capacity_required,
         &output_written, &error) == AVIFENC_OK);
-    fuzz_require(avifenc_encode(
+    status = avifenc_encode(
         &image, &options, fuzz_workspace_repeat + repeat_offset,
         requirements.workspace_required,
         fuzz_output_repeat + repeat_offset,
         requirements.output_capacity_required,
-        &repeated_written, &error) == AVIFENC_OK);
+        &repeated_written, &error);
+    fuzz_require(status == AVIFENC_OK);
     fuzz_require(output_written == repeated_written && output_written != 0U &&
                  avifdec_memory_compare(
                      fuzz_output + workspace_offset,

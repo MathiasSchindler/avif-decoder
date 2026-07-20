@@ -8,10 +8,26 @@
 #define AVIFENC_TEMP_BYTES_PER_PIXEL 16U
 
 typedef struct {
+    AvifencAv1TileSource source;
+    AvifencAv1TileReconstruction reconstruction;
+    AvifencAv1TileRequirements requirements;
+    AvifencAv1TilePayload payload;
+    size_t payload_capacity;
+    AvifencStatistics statistics;
+    AvifencStatus status;
+} AvifencTileJob;
+
+typedef struct {
     AvifencAv1TileSource tile_source;
     AvifencAv1TileRequirements tile_requirements;
+    AvifencAv1TileLayout tile_layout;
     AvifencAv1TileReconstruction reconstruction;
+    AvifencTileJob *tile_jobs;
+    AvifencAv1TilePayload *tile_payloads;
+    size_t tile_count;
+    size_t worker_count;
     void *tile_workspace;
+    size_t tile_workspace_stride;
     uint8_t *tile_payload;
     size_t tile_payload_capacity;
     uint8_t *av1_payload;
@@ -76,6 +92,7 @@ const char *avifenc_error_context_string(AvifencErrorContext context) {
         case AVIFENC_CONTEXT_WORKSPACE: return "workspace";
         case AVIFENC_CONTEXT_OUTPUT: return "output";
         case AVIFENC_CONTEXT_IMPLEMENTATION: return "encoder implementation";
+        case AVIFENC_CONTEXT_EXECUTOR: return "executor";
     }
     return "unknown context";
 }
@@ -128,9 +145,50 @@ static uint64_t avifenc_reconstruction_checksum(const uint16_t *plane,
     return checksum;
 }
 
+static int avifenc_executor_valid(const AvifencExecutor *executor) {
+    return executor == 0 ||
+        (executor->parallel_for != 0 && executor->worker_count != 0U &&
+         executor->worker_count <= AVIFENC_EXECUTOR_MAX_WORKERS);
+}
+
+static void avifenc_tile_source_init(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    const AvifencAv1TileLayout *layout,
+    size_t tile_index,
+    AvifencAv1TileSource *source,
+    uint32_t *x_offset,
+    uint32_t *y_offset) {
+    uint32_t tile_column = (uint32_t)(tile_index % layout->columns);
+    uint32_t tile_row = (uint32_t)(tile_index / layout->columns);
+    uint32_t x = tile_column * layout->tile_width_sb * 64U;
+    uint32_t y = tile_row * layout->tile_height_sb * 64U;
+    uint32_t tile_width = layout->tile_width_sb * 64U;
+    uint32_t tile_height = layout->tile_height_sb * 64U;
+
+    if (tile_width > image->width - x) tile_width = image->width - x;
+    if (tile_height > image->height - y) tile_height = image->height - y;
+    source->planes[0] = image->planes[0] + (size_t)y * image->strides[0] + x;
+    source->planes[1] = image->planes[1] +
+        (size_t)(y / 2U) * image->strides[1] + x / 2U;
+    source->planes[2] = image->planes[2] +
+        (size_t)(y / 2U) * image->strides[2] + x / 2U;
+    source->strides[0] = image->strides[0];
+    source->strides[1] = image->strides[1];
+    source->strides[2] = image->strides[2];
+    source->width = tile_width;
+    source->height = tile_height;
+    source->quantizer = options->quantizer;
+    source->speed = options->speed;
+    source->statistics = 0;
+    *x_offset = x;
+    *y_offset = y;
+}
+
 static AvifencStatus avifenc_assembly_layout(
     const AvifencImage *image,
     const AvifencOptions *options,
+    size_t requested_workers,
     AvifdecArena *arena,
     AvifencAssembly *assembly) {
     static const uint8_t placeholder = 0U;
@@ -140,6 +198,9 @@ static AvifencStatus avifenc_assembly_layout(
     size_t pixel_count;
     size_t temporary_capacity;
     size_t av1_overhead;
+    size_t tile_payload_total = 0U;
+    size_t tile_workspace_max = 0U;
+    size_t tile_index;
     unsigned int plane;
     AvifencStatus status;
 
@@ -153,6 +214,12 @@ static AvifencStatus avifenc_assembly_layout(
     assembly->tile_source.height = image->height;
     assembly->tile_source.quantizer = options->quantizer;
     assembly->tile_source.speed = options->speed;
+    status = avifenc_av1_tile_layout(
+        image->width, image->height, &assembly->tile_layout);
+    if (status != AVIFENC_OK) return status;
+    assembly->tile_count =
+        (size_t)assembly->tile_layout.columns * assembly->tile_layout.rows;
+    assembly->worker_count = requested_workers;
     status = avifenc_av1_tile_query(
         &assembly->tile_source, &assembly->tile_requirements);
     if (status != AVIFENC_OK) return status;
@@ -169,16 +236,63 @@ static AvifencStatus avifenc_assembly_layout(
     av1_config.height = image->height;
     av1_config.color = image->color;
     av1_config.quantizer = options->quantizer;
-    avifenc_byte_writer_init_sizing(&sizing);
-    status = avifenc_av1_write_with_tile(
-        &sizing, &av1_config, &placeholder, 1U);
-    if (status != AVIFENC_OK) return status;
-    if (avifenc_byte_writer_size(&sizing) < 1U) return AVIFENC_OVERFLOW;
-    av1_overhead = avifenc_byte_writer_size(&sizing) - 1U;
-    if (!avifdec_size_add(
-            temporary_capacity, av1_overhead,
-            &assembly->av1_payload_capacity)) {
-        return AVIFENC_OVERFLOW;
+    if (assembly->tile_count == 1U) {
+        avifenc_byte_writer_init_sizing(&sizing);
+        status = avifenc_av1_write_with_tile(
+            &sizing, &av1_config, &placeholder, 1U);
+        if (status != AVIFENC_OK) return status;
+        if (avifenc_byte_writer_size(&sizing) < 1U) return AVIFENC_OVERFLOW;
+        av1_overhead = avifenc_byte_writer_size(&sizing) - 1U;
+        if (!avifdec_size_add(
+                temporary_capacity, av1_overhead,
+                &assembly->av1_payload_capacity)) {
+            return AVIFENC_OVERFLOW;
+        }
+    } else {
+        for (tile_index = 0U;
+             tile_index < assembly->tile_count; ++tile_index) {
+            AvifencAv1TileSource tile_source;
+            AvifencAv1TileRequirements tile_requirements;
+            uint32_t x_offset;
+            uint32_t y_offset;
+            size_t tile_pixels;
+            size_t tile_capacity;
+
+            avifenc_tile_source_init(
+                image, options, &assembly->tile_layout, tile_index,
+                &tile_source, &x_offset, &y_offset);
+            status = avifenc_av1_tile_query(
+                &tile_source, &tile_requirements);
+            if (status != AVIFENC_OK) return status;
+            if (tile_requirements.workspace_required > tile_workspace_max) {
+                tile_workspace_max = tile_requirements.workspace_required;
+            }
+            if (!avifdec_size_multiply(
+                    tile_source.width, tile_source.height, &tile_pixels) ||
+                !avifdec_size_multiply(
+                    tile_pixels, AVIFENC_TEMP_BYTES_PER_PIXEL,
+                    &tile_capacity) ||
+                !avifdec_size_add(
+                    tile_capacity, AVIFENC_TEMP_FIXED_ALLOWANCE,
+                    &tile_capacity) ||
+                !avifdec_size_add(
+                    tile_payload_total, tile_capacity,
+                    &tile_payload_total)) {
+                return AVIFENC_OVERFLOW;
+            }
+        }
+        assembly->tile_workspace_stride = tile_workspace_max;
+        assembly->tile_layout.tile_size_bytes = 4U;
+        if (!avifdec_size_multiply(
+                assembly->tile_count - 1U, 4U, &av1_overhead) ||
+            !avifdec_size_add(av1_overhead, 1U, &av1_overhead) ||
+            !avifdec_size_add(
+                av1_overhead, AVIFENC_TEMP_FIXED_ALLOWANCE, &av1_overhead) ||
+            !avifdec_size_add(
+                tile_payload_total, av1_overhead,
+                &assembly->av1_payload_capacity)) {
+            return AVIFENC_OVERFLOW;
+        }
     }
     for (plane = 0U; plane < 3U; ++plane) {
         size_t samples;
@@ -200,17 +314,97 @@ static AvifencStatus avifenc_assembly_layout(
             (uint16_t *)avifdec_arena_allocate(
                 arena, bytes, _Alignof(uint16_t));
     }
-    assembly->tile_workspace = avifdec_arena_allocate(
-        arena, assembly->tile_requirements.workspace_required, 1U);
-    assembly->tile_payload = (uint8_t *)avifdec_arena_allocate(
-        arena, assembly->tile_payload_capacity, 1U);
+    if (assembly->tile_count == 1U) {
+        assembly->tile_workspace = avifdec_arena_allocate(
+            arena, assembly->tile_requirements.workspace_required, 1U);
+        assembly->tile_payload = (uint8_t *)avifdec_arena_allocate(
+            arena, assembly->tile_payload_capacity, 1U);
+    } else {
+        size_t scratch_bytes;
+
+        assembly->tile_jobs = (AvifencTileJob *)avifdec_arena_allocate(
+            arena, assembly->tile_count * sizeof(*assembly->tile_jobs),
+            _Alignof(AvifencTileJob));
+        assembly->tile_payloads =
+            (AvifencAv1TilePayload *)avifdec_arena_allocate(
+                arena,
+                assembly->tile_count * sizeof(*assembly->tile_payloads),
+                _Alignof(AvifencAv1TilePayload));
+        if (!avifdec_size_multiply(
+                assembly->tile_workspace_stride, assembly->worker_count,
+                &scratch_bytes)) {
+            return AVIFENC_OVERFLOW;
+        }
+        assembly->tile_workspace = avifdec_arena_allocate(
+            arena, scratch_bytes, 1U);
+        for (tile_index = 0U;
+             tile_index < assembly->tile_count; ++tile_index) {
+            AvifencAv1TileSource tile_source;
+            AvifencAv1TileRequirements tile_requirements;
+            uint32_t x_offset;
+            uint32_t y_offset;
+            size_t tile_pixels;
+            size_t tile_capacity;
+            uint8_t *payload;
+
+            avifenc_tile_source_init(
+                image, options, &assembly->tile_layout, tile_index,
+                &tile_source, &x_offset, &y_offset);
+            status = avifenc_av1_tile_query(
+                &tile_source, &tile_requirements);
+            if (status != AVIFENC_OK) return status;
+            if (!avifdec_size_multiply(
+                    tile_source.width, tile_source.height, &tile_pixels) ||
+                !avifdec_size_multiply(
+                    tile_pixels, AVIFENC_TEMP_BYTES_PER_PIXEL,
+                    &tile_capacity) ||
+                !avifdec_size_add(
+                    tile_capacity, AVIFENC_TEMP_FIXED_ALLOWANCE,
+                    &tile_capacity)) {
+                return AVIFENC_OVERFLOW;
+            }
+            payload = (uint8_t *)avifdec_arena_allocate(
+                arena, tile_capacity, 1U);
+            if (!arena->sizing_only && assembly->tile_jobs != 0 &&
+                assembly->tile_payloads != 0) {
+                AvifencTileJob *job = &assembly->tile_jobs[tile_index];
+
+                avifdec_memory_fill(job, 0U, sizeof(*job));
+                job->source = tile_source;
+                job->requirements = tile_requirements;
+                job->payload.data = payload;
+                job->payload_capacity = tile_capacity;
+                for (plane = 0U; plane < 3U; ++plane) {
+                    uint32_t plane_x = plane == 0U
+                        ? x_offset : x_offset / 2U;
+                    uint32_t plane_y = plane == 0U
+                        ? y_offset : y_offset / 2U;
+
+                    job->reconstruction.planes[plane] =
+                        assembly->reconstruction.planes[plane] +
+                        (size_t)plane_y *
+                            assembly->reconstruction.strides[plane] +
+                        plane_x;
+                    job->reconstruction.strides[plane] =
+                        assembly->reconstruction.strides[plane];
+                    job->reconstruction.widths[plane] =
+                        tile_requirements.reconstruction_widths[plane];
+                    job->reconstruction.heights[plane] =
+                        tile_requirements.reconstruction_heights[plane];
+                }
+                assembly->tile_payloads[tile_index] = job->payload;
+            }
+        }
+    }
     assembly->av1_payload = (uint8_t *)avifdec_arena_allocate(
         arena, assembly->av1_payload_capacity, 1U);
     if (arena->status == AVIFDEC_OVERFLOW) return AVIFENC_OVERFLOW;
     if (arena->status != AVIFDEC_OK) return AVIFENC_OUT_OF_MEMORY;
     assembly->workspace_required = avifdec_arena_required(arena);
     if (!avifdec_size_add(
-            assembly->workspace_required, _Alignof(uint16_t) - 1U,
+            assembly->workspace_required,
+            (assembly->tile_count == 1U
+                ? _Alignof(uint16_t) : _Alignof(AvifencTileJob)) - 1U,
             &assembly->workspace_required)) {
         return AVIFENC_OVERFLOW;
     }
@@ -231,10 +425,12 @@ static AvifencStatus avifenc_assembly_layout(
     return AVIFENC_OK;
 }
 
-AvifencStatus avifenc_query(const AvifencImage *image,
-                            const AvifencOptions *options,
-                            AvifencRequirements *requirements,
-                            AvifencError *error) {
+AvifencStatus avifenc_query_with_executor(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    const AvifencExecutor *executor,
+    AvifencRequirements *requirements,
+    AvifencError *error) {
     AvifencStatus status;
     AvifencAssembly assembly;
     AvifdecArena sizing;
@@ -253,6 +449,12 @@ AvifencStatus avifenc_query(const AvifencImage *image,
     if (options == 0) {
         return avifenc_fail(error, AVIFENC_INVALID_ARGUMENT,
                             AVIFENC_CONTEXT_OPTIONS, 1U, 0U);
+    }
+    if (!avifenc_executor_valid(executor)) {
+        return avifenc_fail(
+            error, AVIFENC_INVALID_ARGUMENT, AVIFENC_CONTEXT_EXECUTOR,
+            AVIFENC_EXECUTOR_MAX_WORKERS,
+            executor == 0 ? 0U : executor->worker_count);
     }
     if (image->width == 0U || image->height == 0U ||
         (image->width & 1U) != 0U || (image->height & 1U) != 0U) {
@@ -308,7 +510,9 @@ AvifencStatus avifenc_query(const AvifencImage *image,
 
     avifdec_memory_fill(&assembly, 0U, sizeof(assembly));
     avifdec_arena_init_sizing(&sizing);
-    status = avifenc_assembly_layout(image, options, &sizing, &assembly);
+    status = avifenc_assembly_layout(
+        image, options, executor == 0 ? 1U : executor->worker_count,
+        &sizing, &assembly);
     if (status != AVIFENC_OK) {
         requirements->workspace_required = 0U;
         requirements->output_capacity_required = 0U;
@@ -325,15 +529,87 @@ AvifencStatus avifenc_query(const AvifencImage *image,
     return AVIFENC_OK;
 }
 
-AvifencStatus avifenc_encode_ex(const AvifencImage *image,
-                                const AvifencOptions *options,
-                                void *workspace,
-                                size_t workspace_size,
-                                void *output,
-                                size_t output_capacity,
-                                size_t *output_written,
-                                AvifencStatistics *statistics,
-                                AvifencError *error) {
+AvifencStatus avifenc_query(const AvifencImage *image,
+                            const AvifencOptions *options,
+                            AvifencRequirements *requirements,
+                            AvifencError *error) {
+    return avifenc_query_with_executor(
+        image, options, 0, requirements, error);
+}
+
+typedef struct {
+    AvifencAssembly *assembly;
+    int collect_statistics;
+} AvifencParallelTiles;
+
+static AvifencStatus avifenc_encode_tile_range(
+    size_t begin,
+    size_t end,
+    size_t worker_index,
+    void *arg) {
+    AvifencParallelTiles *parallel = (AvifencParallelTiles *)arg;
+    size_t tile_index;
+
+    if (parallel == 0 || parallel->assembly == 0 ||
+        worker_index >= parallel->assembly->worker_count ||
+        begin > end || end > parallel->assembly->tile_count) {
+        return AVIFENC_INVALID_ARGUMENT;
+    }
+    for (tile_index = begin; tile_index < end; ++tile_index) {
+        AvifencTileJob *job = &parallel->assembly->tile_jobs[tile_index];
+        AvifencAv1SymbolWriter symbol_writer;
+        uint8_t *worker_workspace =
+            (uint8_t *)parallel->assembly->tile_workspace +
+            worker_index * parallel->assembly->tile_workspace_stride;
+
+        avifdec_memory_fill(&job->statistics, 0U, sizeof(job->statistics));
+        job->source.statistics = parallel->collect_statistics
+            ? &job->statistics : 0;
+        avifenc_av1_symbol_writer_init(
+            &symbol_writer, (void *)job->payload.data,
+            job->payload_capacity, 1);
+        job->status = avifenc_av1_tile_write(
+            &symbol_writer, &job->source, &job->reconstruction,
+            worker_workspace, job->requirements.workspace_required);
+        if (job->status == AVIFENC_OK) {
+            job->payload.size =
+                avifenc_av1_symbol_writer_size(&symbol_writer);
+            parallel->assembly->tile_payloads[tile_index] = job->payload;
+            if (parallel->collect_statistics) {
+                job->statistics.entropy_symbol_count =
+                    symbol_writer.symbol_count;
+                job->statistics.literal_bit_count =
+                    symbol_writer.literal_bit_count;
+            }
+        }
+    }
+    return AVIFENC_OK;
+}
+
+static void avifenc_statistics_add(AvifencStatistics *total,
+                                   const AvifencStatistics *part) {
+    total->tile_count += part->tile_count;
+    total->partition_node_count += part->partition_node_count;
+    total->block_count += part->block_count;
+    total->prediction_trial_count += part->prediction_trial_count;
+    total->transform_trial_count += part->transform_trial_count;
+    total->transform_count += part->transform_count;
+    total->entropy_symbol_count += part->entropy_symbol_count;
+    total->literal_bit_count += part->literal_bit_count;
+    total->filter_unit_count += part->filter_unit_count;
+}
+
+AvifencStatus avifenc_encode_with_executor(
+    const AvifencImage *image,
+    const AvifencOptions *options,
+    const AvifencExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    void *output,
+    size_t output_capacity,
+    size_t *output_written,
+    AvifencStatistics *statistics,
+    AvifencError *error) {
     AvifencRequirements requirements;
     AvifencAssembly assembly;
     AvifencAv1SymbolWriter symbol_writer;
@@ -354,7 +630,8 @@ AvifencStatus avifenc_encode_ex(const AvifencImage *image,
                             AVIFENC_CONTEXT_OUTPUT, 1U, 0U);
     }
     *output_written = 0U;
-    status = avifenc_query(image, options, &requirements, error);
+    status = avifenc_query_with_executor(
+        image, options, executor, &requirements, error);
     if (status != AVIFENC_OK) return status;
     if (workspace_size < requirements.workspace_required) {
         return avifenc_fail(error, AVIFENC_OUT_OF_MEMORY,
@@ -382,29 +659,85 @@ AvifencStatus avifenc_encode_ex(const AvifencImage *image,
     }
     avifdec_memory_fill(&assembly, 0U, sizeof(assembly));
     avifdec_arena_init(&arena, workspace, workspace_size);
-    status = avifenc_assembly_layout(image, options, &arena, &assembly);
+    status = avifenc_assembly_layout(
+        image, options, executor == 0 ? 1U : executor->worker_count,
+        &arena, &assembly);
     if (status != AVIFENC_OK) {
         return avifenc_fail(error, status, AVIFENC_CONTEXT_WORKSPACE,
                             requirements.workspace_required, workspace_size);
     }
-    avifenc_av1_symbol_writer_init(
-        &symbol_writer, assembly.tile_payload,
-        assembly.tile_payload_capacity, 1);
-    assembly.tile_source.statistics = statistics;
-    status = avifenc_av1_tile_write(
-        &symbol_writer, &assembly.tile_source, &assembly.reconstruction,
-        assembly.tile_workspace,
-        assembly.tile_requirements.workspace_required);
-    if (status != AVIFENC_OK) {
-        return avifenc_fail(error, status, AVIFENC_CONTEXT_IMPLEMENTATION,
-                            assembly.tile_payload_capacity,
-                            avifenc_av1_symbol_writer_size(&symbol_writer));
+    if (assembly.tile_count == 1U) {
+        avifenc_av1_symbol_writer_init(
+            &symbol_writer, assembly.tile_payload,
+            assembly.tile_payload_capacity, 1);
+        assembly.tile_source.statistics = statistics;
+        status = avifenc_av1_tile_write(
+            &symbol_writer, &assembly.tile_source, &assembly.reconstruction,
+            assembly.tile_workspace,
+            assembly.tile_requirements.workspace_required);
+        if (status != AVIFENC_OK) {
+            return avifenc_fail(
+                error, status, AVIFENC_CONTEXT_IMPLEMENTATION,
+                assembly.tile_payload_capacity,
+                avifenc_av1_symbol_writer_size(&symbol_writer));
+        }
+        if (statistics != 0) {
+            statistics->entropy_symbol_count = symbol_writer.symbol_count;
+            statistics->literal_bit_count = symbol_writer.literal_bit_count;
+        }
+        tile_payload_size = avifenc_av1_symbol_writer_size(&symbol_writer);
+    } else {
+        AvifencParallelTiles parallel;
+        size_t tile_index;
+        size_t maximum_size = 0U;
+
+        parallel.assembly = &assembly;
+        parallel.collect_statistics = statistics != 0;
+        if (executor != 0 && executor->worker_count > 1U) {
+            status = executor->parallel_for(
+                executor->user_data, assembly.tile_count, 1U,
+                avifenc_encode_tile_range, &parallel);
+        } else {
+            status = avifenc_encode_tile_range(
+                0U, assembly.tile_count, 0U, &parallel);
+        }
+        if (status != AVIFENC_OK) {
+            return avifenc_fail(
+                error, status, AVIFENC_CONTEXT_EXECUTOR,
+                assembly.tile_count, 0U);
+        }
+        for (tile_index = 0U;
+             tile_index < assembly.tile_count; ++tile_index) {
+            AvifencTileJob *job = &assembly.tile_jobs[tile_index];
+
+            if (job->status != AVIFENC_OK) {
+                return avifenc_fail(
+                    error, job->status, AVIFENC_CONTEXT_IMPLEMENTATION,
+                    job->payload_capacity, job->payload.size);
+            }
+            if (job->payload.size > maximum_size) {
+                maximum_size = job->payload.size;
+            }
+            if (statistics != 0) {
+                avifenc_statistics_add(statistics, &job->statistics);
+            }
+        }
+        assembly.tile_layout.tile_size_bytes = 1U;
+        maximum_size = maximum_size == 0U ? 0U : maximum_size - 1U;
+        while (maximum_size > 255U) {
+            ++assembly.tile_layout.tile_size_bytes;
+            maximum_size >>= 8U;
+        }
+        if (assembly.tile_layout.tile_size_bytes > 4U) {
+            return avifenc_fail(
+                error, AVIFENC_LIMIT_EXCEEDED,
+                AVIFENC_CONTEXT_IMPLEMENTATION, 4U,
+                assembly.tile_layout.tile_size_bytes);
+        }
     }
     if (statistics != 0) {
         unsigned int plane;
 
-        statistics->entropy_symbol_count = symbol_writer.symbol_count;
-        statistics->literal_bit_count = symbol_writer.literal_bit_count;
         for (plane = 0U; plane < 3U; ++plane) {
             statistics->reconstruction_checksum[plane] =
                 avifenc_reconstruction_checksum(
@@ -414,16 +747,21 @@ AvifencStatus avifenc_encode_ex(const AvifencImage *image,
                     plane == 0U ? image->height : image->height / 2U);
         }
     }
-    tile_payload_size = avifenc_av1_symbol_writer_size(&symbol_writer);
     av1_config.width = image->width;
     av1_config.height = image->height;
     av1_config.color = image->color;
     av1_config.quantizer = options->quantizer;
     avifenc_byte_writer_init(
         &byte_writer, assembly.av1_payload, assembly.av1_payload_capacity);
-    status = avifenc_av1_write_with_tile(
-        &byte_writer, &av1_config,
-        assembly.tile_payload, tile_payload_size);
+    if (assembly.tile_count == 1U) {
+        status = avifenc_av1_write_with_tile(
+            &byte_writer, &av1_config,
+            assembly.tile_payload, tile_payload_size);
+    } else {
+        status = avifenc_av1_write_with_tiles(
+            &byte_writer, &av1_config, &assembly.tile_layout,
+            assembly.tile_payloads, assembly.tile_count);
+    }
     if (status != AVIFENC_OK) {
         return avifenc_fail(error, status, AVIFENC_CONTEXT_IMPLEMENTATION,
                             assembly.av1_payload_capacity,
@@ -445,6 +783,20 @@ AvifencStatus avifenc_encode_ex(const AvifencImage *image,
     }
     *output_written = avifenc_byte_writer_size(&byte_writer);
     return AVIFENC_OK;
+}
+
+AvifencStatus avifenc_encode_ex(const AvifencImage *image,
+                                const AvifencOptions *options,
+                                void *workspace,
+                                size_t workspace_size,
+                                void *output,
+                                size_t output_capacity,
+                                size_t *output_written,
+                                AvifencStatistics *statistics,
+                                AvifencError *error) {
+    return avifenc_encode_with_executor(
+        image, options, 0, workspace, workspace_size, output,
+        output_capacity, output_written, statistics, error);
 }
 
 AvifencStatus avifenc_encode(const AvifencImage *image,
