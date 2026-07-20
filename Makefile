@@ -118,6 +118,8 @@ IMAGE_INPUT_C_SOURCES := src/encoder/image_input.c
 ENCODER_CORE_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) src/base.c \
 	src/shared/av1_cdf.c src/av1_symbol.c src/av1_coeff.c \
 	src/av1_intra.c src/av1_predict.c src/av1_recon.c src/av1_tile_cdf.c
+WASM_C_SOURCES := $(CORE_C_SOURCES) $(ENCODER_MODULE_C_SOURCES) \
+	$(IMAGE_INPUT_C_SOURCES)
 ENCODER_TEST_C_SOURCES := $(ENCODER_MODULE_C_SOURCES) $(CORE_C_SOURCES)
 ENCODER_TEST_HEADERS := $(wildcard src/*.h src/*.inc src/encoder/*.h \
 	src/shared/*.h)
@@ -328,15 +330,17 @@ encoder-fuzz-campaign: $(ENCODER_FUZZ_TARGET) encoder-fuzz-seeds
 		-artifact_prefix=$(FUZZ_BUILD_DIR)/ \
 		$(ENCODER_FUZZ_CORPUS)
 
-$(WASM_LOADER): wasm/avif_wasm.c $(CORE_C_SOURCES) src/avifdec.h
+$(WASM_LOADER): wasm/avif_wasm.c $(WASM_C_SOURCES) src/avifdec.h \
+		src/encoder/avifenc.h src/encoder/image_input.h
 	@mkdir -p $(@D)
-	emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc \
-		wasm/avif_wasm.c $(CORE_C_SOURCES) --no-entry \
+	emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror \
+		-Isrc -Isrc/shared \
+		wasm/avif_wasm.c $(WASM_C_SOURCES) --no-entry \
 		-sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createAvifDecoder \
 		-sENVIRONMENT=web,worker -sFILESYSTEM=0 -sALLOW_MEMORY_GROWTH=1 \
 		-sINITIAL_MEMORY=16777216 -sMAXIMUM_MEMORY=1073741824 \
 		-sSTACK_SIZE=8388608 -sSTACK_OVERFLOW_CHECK=2 \
-		-sEXPORTED_FUNCTIONS='["_malloc","_free","_avif_wasm_decode","_avif_wasm_reset","_avif_wasm_pixel_pointer","_avif_wasm_pixel_bytes","_avif_wasm_width","_avif_wasm_height","_avif_wasm_source_width","_avif_wasm_source_height","_avif_wasm_bit_depth","_avif_wasm_has_alpha","_avif_wasm_stage","_avif_wasm_error_offset","_avif_wasm_error_context"]' \
+		-sEXPORTED_FUNCTIONS='["_malloc","_free","_avif_wasm_decode","_avif_wasm_encode","_avif_wasm_reset","_avif_wasm_pixel_pointer","_avif_wasm_pixel_bytes","_avif_wasm_width","_avif_wasm_height","_avif_wasm_source_width","_avif_wasm_source_height","_avif_wasm_bit_depth","_avif_wasm_has_alpha","_avif_wasm_stage","_avif_wasm_error_offset","_avif_wasm_error_context","_avif_wasm_encoded_pointer","_avif_wasm_encoded_bytes","_avif_wasm_encoded_width","_avif_wasm_encoded_height","_avif_wasm_encoder_stage","_avif_wasm_encoder_error_context"]' \
 		-sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' -o $@
 
 $(WASM_BUILD_DIR)/%: wasm/%

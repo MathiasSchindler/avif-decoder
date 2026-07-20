@@ -118,6 +118,27 @@ h1 {
     transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
+.mode-switch {
+    display: inline-grid;
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+    margin-bottom: 12px;
+    padding: 3px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: #e5e9e7;
+}
+
+.mode-switch button {
+    min-height: 34px;
+    border: 0;
+    background: transparent;
+}
+
+.mode-switch button[aria-selected="true"] {
+    color: white;
+    background: var(--ink);
+}
+
 .workspace.is-dragging {
     border-color: var(--signal);
     box-shadow: 0 0 0 3px rgba(230, 74, 46, 0.2), var(--shadow);
@@ -171,6 +192,45 @@ h1 {
     height: 1px;
     overflow: hidden;
     clip: rect(0 0 0 0);
+}
+
+.encoder-options {
+    display: grid;
+    grid-template-columns: auto minmax(180px, 1fr) auto minmax(130px, auto);
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: #f8f9f8;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.encoder-options label:first-child {
+    display: flex;
+    gap: 8px;
+}
+
+.encoder-options output {
+    min-width: 3ch;
+    color: var(--signal-dark);
+    font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+    text-align: right;
+}
+
+.encoder-options input[type="range"] {
+    width: 100%;
+    accent-color: var(--signal);
+}
+
+.encoder-options select {
+    min-height: 34px;
+    padding: 5px 28px 5px 9px;
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    color: var(--ink);
+    background: white;
+    font: inherit;
 }
 
 button,
@@ -315,6 +375,10 @@ canvas {
     .toolbar {
         align-items: stretch;
         flex-direction: column;
+    }
+
+    .encoder-options {
+        grid-template-columns: auto 1fr;
     }
 
     .actions > * {

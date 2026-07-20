@@ -4,21 +4,28 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>AVIF Decoder Lab</title>
+    <title>AVIF Codec Lab</title>
     <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
     <header>
-        <a class="wordmark" href="./">AVIF Decoder <span>Lab</span></a>
+        <a class="wordmark" href="./">AVIF Codec <span>Lab</span></a>
         <div class="runtime"><i></i> WebAssembly</div>
     </header>
 
     <main>
         <section class="intro" aria-labelledby="title">
-            <p class="eyebrow">Local image inspection</p>
-            <h1 id="title">Open an AVIF.</h1>
-            <p>Decoded in this browser by the freestanding C implementation.</p>
+            <p class="eyebrow">Local image conversion</p>
+            <h1 id="title">Decode. Encode.</h1>
+            <p>AVIF processing in this browser by the freestanding C implementation.</p>
         </section>
+
+        <div class="mode-switch" role="tablist" aria-label="Conversion mode">
+            <button id="decode-mode" type="button" role="tab"
+                    aria-selected="true">Decode AVIF</button>
+            <button id="encode-mode" type="button" role="tab"
+                    aria-selected="false">Encode AVIF</button>
+        </div>
 
         <section id="drop-target" class="workspace">
             <div class="toolbar">
@@ -27,16 +34,30 @@
                     <span id="details">AVIF still images up to 128 MiB</span>
                 </div>
                 <div class="actions">
-                    <label class="file-button" for="file-input">Choose AVIF</label>
+                    <label id="file-label" class="file-button" for="file-input">Choose AVIF</label>
                     <input id="file-input" type="file" accept=".avif,image/avif">
                     <button id="save-button" type="button" disabled>Save PNG</button>
                 </div>
             </div>
 
+            <div id="encoder-options" class="encoder-options" hidden>
+                <label for="quantizer">
+                    <span>Quantizer</span>
+                    <output id="quantizer-value" for="quantizer">128</output>
+                </label>
+                <input id="quantizer" type="range" min="0" max="255" value="128">
+                <label for="speed">Speed</label>
+                <select id="speed">
+                    <option value="0">Best</option>
+                    <option value="1">Balanced</option>
+                    <option value="2">Fast</option>
+                </select>
+            </div>
+
             <div class="stage">
                 <div id="placeholder" class="placeholder">
                     <span class="file-mark" aria-hidden="true">AVIF</span>
-                    <strong>Drop a file here</strong>
+                    <strong id="drop-message">Drop an AVIF here</strong>
                 </div>
                 <canvas id="preview" hidden></canvas>
             </div>
