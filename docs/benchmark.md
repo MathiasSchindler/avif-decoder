@@ -96,6 +96,47 @@ FFmpeg's native `av1` decoder was excluded. On this host it selected the
 VideoToolbox path, reported that hardware AV1 decoding was unavailable, exited
 with status 69, and emitted zero bytes.
 
+## Optimization rerun
+
+The comparison was repeated later on 2026-07-20 using the optimized working
+tree based on repository revision
+`b25f2a12a2a35197dacd0750a5df28dba00f9929`. The measured
+`build/arm64/avifdec` executable had SHA-256
+`cfe1a68e06f4de4a2efe9503026e01107ee7a7ee9a36a219168b8424d7c25de7`.
+The host, operating system, compiler, third-party decoder versions, fixture
+bytes, warm-up policy, worker count, randomized ordering, and run counts were
+unchanged. Before timing, the raw planar payload from every implementation was
+compared byte-for-byte for all four files; sizes and SHA-256 hashes matched
+exactly.
+
+### Current median elapsed time
+
+| Image | Repository CLI | libavif + dav1d | libavif + libaom | FFmpeg + dav1d | CLI / libavif+dav1d |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.5 MP, 8-bit 4:2:0 lossy | 123.414 ms | 15.833 ms | 25.462 ms | 41.884 ms | 7.79x |
+| 11.2 MP, 8-bit 4:2:0 lossy | 540.202 ms | 48.245 ms | 74.007 ms | 110.126 ms | 11.20x |
+| 4.2 MP, 8-bit 4:4:4 lossless | 692.272 ms | 304.148 ms | 432.521 ms | 611.774 ms | 2.28x |
+| 30.1 MP, 10-bit 4:2:0 lossy | 1,899.416 ms | 204.364 ms | 327.984 ms | 416.143 ms | 9.29x |
+
+Third-party medians moved by approximately 0.9% to 2.7%, providing a useful
+measure of run-to-run and system variation. The repository decoder moved much
+further:
+
+| Image | Original repository CLI | Current repository CLI | Time reduction | Original gap | Current gap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.5 MP, 8-bit 4:2:0 lossy | 193.890 ms | 123.414 ms | 36.3% | 12.40x | 7.79x |
+| 11.2 MP, 8-bit 4:2:0 lossy | 862.060 ms | 540.202 ms | 37.3% | 18.22x | 11.20x |
+| 4.2 MP, 8-bit 4:4:4 lossless | 825.153 ms | 692.272 ms | 16.1% | 2.76x | 2.28x |
+| 30.1 MP, 10-bit 4:2:0 lossy | 2,662.876 ms | 1,899.416 ms | 28.7% | 13.15x | 9.29x |
+
+The lossy geometric-mean gap to libavif+dav1d fell from 14.38x to 9.33x. The
+all-case geometric-mean gap fell from 9.52x to 6.56x. The largest contributors
+are normal output decoding no longer performing diagnostic trace hashing and
+the new ARM64 residual-add and common inverse-DCT kernels. The original CLI
+numbers include diagnostics, while the current default does not; this is an
+intentional production-path change rather than an equal-work microbenchmark.
+Both snapshots use the same documented command line.
+
 ## Null-trace core API
 
 At the revision measured above, the command-line decoder passed a non-null
@@ -150,17 +191,30 @@ Peak RSS was measured with `/usr/bin/time -l` after one warm run.
 The repository decoder is close to libaom in peak memory on these workloads,
 but uses substantially more memory than dav1d.
 
+The optimization rerun produced effectively unchanged peak-RSS results:
+
+| Image | Repository CLI | libavif + dav1d | libavif + libaom | FFmpeg + dav1d |
+| --- | ---: | ---: | ---: | ---: |
+| 11.2 MP, 8-bit 4:2:0 lossy | 151.6 MiB | 24.3 MiB | 152.9 MiB | 53.7 MiB |
+| 30.1 MP, 10-bit 4:2:0 lossy | 403.5 MiB | 105.8 MiB | 442.0 MiB | 204.9 MiB |
+
+The measured speed gains therefore came without a material still-image RSS
+change. Native worker widths above one can improve wall time further, but are
+excluded here to preserve the original one-worker comparison.
+
 ## Interpretation
 
-For ordinary lossy 4:2:0 still images, the current scalar decoder core is
-approximately 8x to 12x slower than the measured libavif+dav1d command. The
-lossless 4:4:4 case narrows to about 2.2x. CLI tracing and startup account for
-approximately 19% to 35% of repository CLI elapsed time, but do not explain the
-main difference.
+The original snapshot found ordinary lossy decoding approximately 8x to 12x
+slower at the null-trace core API and the lossless case approximately 2.2x
+slower. The current production CLI is 7.79x to 11.20x slower than
+libavif+dav1d on the three lossy still images and 2.28x slower on the lossless
+case. This is a substantial shift, but most pixel and entropy paths remain
+scalar.
 
-No NEON, SIMD, or architecture-specific decode routines were found in `src/`.
-dav1d and libaom both contain extensively optimized architecture-specific
-kernels. SIMD coverage, hot-loop specialization, and workspace traffic are
-therefore the leading areas for further profiling. These measurements should
-be rerun after optimization work and should not be compared across machines or
-codec versions without recording a new environment section.
+The decoder now has ARM64 kernels for residual addition and common 8-bit
+inverse DCT sizes, plus optional native macOS workers. dav1d and libaom still
+have much broader architecture-specific coverage. Extending exact-tested DSP
+coverage, profiling larger entropy/coefficient operation boundaries, and
+reducing filter and workspace traffic remain the leading serial-performance
+opportunities. Measurements should not be compared across machines or codec
+versions without recording a new environment section.
