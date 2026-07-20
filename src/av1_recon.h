@@ -28,6 +28,7 @@ typedef enum {
 
 uint16_t av1_recon_dc_quant(uint8_t bit_depth, int q_index);
 uint16_t av1_recon_ac_quant(uint8_t bit_depth, int q_index);
+int32_t av1_recon_cos128(int angle);
 AvifdecStatus av1_recon_qmatrix_decode(uint8_t level,
                                        uint8_t chroma,
                                        uint8_t *matrix,

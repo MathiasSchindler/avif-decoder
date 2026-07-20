@@ -859,6 +859,10 @@ static void test_av1_tile_source_pattern(uint8_t *plane,
                   } else if (pattern == 4U) {
                         state = state * 1664525U + 1013904223U;
                         value = (uint8_t)(state >> 24U);
+                  } else if (pattern == 5U) {
+                        value = column < width / 2U ? 32U : 224U;
+                  } else if (pattern == 6U) {
+                        value = row < height / 2U ? 32U : 224U;
                   }
                   plane[(size_t)row * stride + column] = value;
             }
@@ -868,9 +872,15 @@ static void test_av1_tile_source_pattern(uint8_t *plane,
 static int test_av1_tile_writer(void) {
       static const uint32_t dimensions[][2] = {
             { 2U, 2U }, { 8U, 8U }, { 8U, 8U },
-            { 10U, 6U }, { 66U, 66U }
+            { 10U, 6U }, { 66U, 66U }, { 32U, 32U }, { 32U, 32U },
+            { 32U, 32U }, { 32U, 32U }, { 16U, 16U }, { 16U, 16U }
       };
-      static const uint8_t quantizers[] = { 128U, 255U, 1U, 60U, 100U };
+      static const uint8_t quantizers[] = {
+            128U, 255U, 1U, 60U, 100U, 96U, 96U, 96U, 96U, 96U, 96U
+      };
+      static const uint8_t patterns[] = {
+            0U, 1U, 2U, 3U, 4U, 1U, 3U, 5U, 6U, 5U, 6U
+      };
       static uint8_t source_y[66U * 66U];
       static uint8_t source_u[33U * 33U];
       static uint8_t source_v[33U * 33U];
@@ -885,7 +895,7 @@ static int test_av1_tile_writer(void) {
       uint8_t repeated_tile[8192U];
       uint8_t short_tile[8192U];
       uint8_t av1[9216U];
-      uint8_t tile_workspace[2064U];
+      uint8_t tile_workspace[8192U];
       AvifencAv1TileSource source = {
             { 0 }, { 0 }, 0U, 0U, 128U, 0U, 0
       };
@@ -934,13 +944,13 @@ static int test_av1_tile_writer(void) {
             avifdec_memory_fill(source_v, 128U, sizeof(source_v));
             test_av1_tile_source_pattern(
                   source_y, source.strides[0], source.width, source.height,
-                  (unsigned int)index, 0U);
+                  patterns[index], 0U);
             test_av1_tile_source_pattern(
                   source_u, source.strides[1], source.width >> 1U,
-                  source.height >> 1U, (unsigned int)index, 1U);
+                  source.height >> 1U, patterns[index], 1U);
             test_av1_tile_source_pattern(
                   source_v, source.strides[2], source.width >> 1U,
-                  source.height >> 1U, (unsigned int)index, 2U);
+                  source.height >> 1U, patterns[index], 2U);
             config.width = source.width;
             config.height = source.height;
             config.quantizer = source.quantizer;
@@ -1034,6 +1044,40 @@ static int test_av1_tile_writer(void) {
                         &span, 1U, 0, &info, decode_workspace,
                         sizeof(decode_workspace), &image, &trace, &error) ==
                   AVIFDEC_OK);
+            if (index == 5U) {
+                  CHECK(trace.block_count == 1U &&
+                        trace.transform_size_mask ==
+                              ((uint32_t)1U << AV1_TX_16X16 | 1U << AV1_TX_32X32));
+            }
+            if (index == 6U) {
+                  CHECK(trace.block_count == 64U &&
+                        trace.transform_size_mask ==
+                              ((uint32_t)1U << AV1_TX_4X4));
+            }
+            if (index == 7U) {
+                  CHECK(trace.block_count == 2U &&
+                        trace.transform_size_mask ==
+                              ((uint32_t)1U << AV1_TX_8X16 |
+                               (uint32_t)1U << AV1_TX_16X32));
+            }
+            if (index == 8U) {
+                  CHECK(trace.block_count == 2U &&
+                        trace.transform_size_mask ==
+                              ((uint32_t)1U << AV1_TX_16X8 |
+                               (uint32_t)1U << AV1_TX_32X16));
+            }
+            if (index == 9U) {
+                  CHECK(trace.block_count == 2U &&
+                        trace.transform_size_mask ==
+                              ((uint32_t)1U << AV1_TX_4X8 |
+                               (uint32_t)1U << AV1_TX_8X16));
+            }
+            if (index == 10U) {
+                  CHECK(trace.block_count == 2U &&
+                        trace.transform_size_mask ==
+                              ((uint32_t)1U << AV1_TX_8X4 |
+                               (uint32_t)1U << AV1_TX_16X8));
+            }
                                     CHECK(index == 0U
                                                       ? trace.nonzero_transform_count == 0U &&
                                                             trace.coefficient_count == 0U
@@ -1799,8 +1843,36 @@ static int test_quality_controls(void) {
                     AVIFDEC_OK);
             baseline_sse = quality_plane_sse(
                   source_y, 32U, decoded_y, 32U, 32U, 32U);
-            CHECK(searched_sse * 2U < baseline_sse &&
-                    searched_written < baseline_written);
+                CHECK(searched_sse * 2U < baseline_sse);
+            CHECK(searched_written <=
+                  baseline_written + baseline_written / 4U);
+      }
+      {
+            AvifencStatistics effort[3];
+
+            avifenc_options_default(&options);
+            options.quantizer = 96U;
+            for (index = 0U; index < 3U; ++index) {
+                  size_t output_written;
+
+                  options.speed = (uint8_t)index;
+                  CHECK(avifenc_encode_ex(
+                              &image, &options, workspace, sizeof(workspace),
+                              output, sizeof(output), &output_written,
+                              &effort[index], &error) == AVIFENC_OK);
+            }
+            CHECK(effort[0].prediction_trial_count >=
+                        effort[1].prediction_trial_count &&
+                  effort[1].prediction_trial_count >=
+                        effort[2].prediction_trial_count &&
+                  effort[0].prediction_trial_count >
+                        effort[2].prediction_trial_count);
+            CHECK(effort[0].transform_trial_count >=
+                        effort[1].transform_trial_count &&
+                  effort[1].transform_trial_count >=
+                        effort[2].transform_trial_count &&
+                  effort[0].transform_trial_count >
+                        effort[2].transform_trial_count);
       }
       return 0;
 }

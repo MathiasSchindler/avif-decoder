@@ -20,7 +20,7 @@ The runner uses eight deterministic generated sources and one checked-in CC0 pho
 
 The corpus deliberately exercises all three speed levels. The one-megapixel
 `large-practical` case is the largest routine regression input considered
-practical for the 0.1 encoder's fixed 4x4 traversal, not the syntax maximum;
+practical for the 0.1 encoder's bounded partition traversal, not the syntax maximum;
 larger timing belongs in an explicit profiling campaign rather than every
 `make test` run.
 
@@ -76,6 +76,14 @@ Structural edge error is the sum of absolute differences between source and reco
 `avifenc_encode_ex()` supplies operation counts through `AvifencStatistics`. `avifenc_encode()` remains the source-compatible wrapper and produces the same bytes. Statistics are cleared on entry, valid after success, and optional.
 
 The scorecard script regenerates stable JSON and byte-compares it with the checked-in baseline. A difference can represent a bug, an intentional coding change, or a real quality improvement; it always requires review. Update the baseline only after inspecting every changed size, checksum, quality metric, capacity, and work count, then run `make test` and the applicable external interoperability suite.
+
+The Goal 3 baseline demonstrates the intended adaptation. Relative to the
+fixed-4x4 baseline, `gradient` is 25.3% smaller with 33.4% lower luma SSE and
+`chroma-detail` is 38.6% smaller with lower U and V SSE. `text-edge` is 1.7%
+smaller with a 0.8% luma-SSE trade, and `photograph` is 8.2% smaller with a
+1.5% luma-SSE trade. Noise and both large speed-2 cases retain identical bytes
+and quality. Workspace grows by a bounded 2 KiB per active tile worker for
+partition candidate reconstruction checkpoints.
 
 ## Named timing reference
 

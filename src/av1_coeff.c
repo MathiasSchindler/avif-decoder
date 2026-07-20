@@ -152,7 +152,7 @@ static Av1CoeffScan av1_coeff_get_scan(Av1TxSize tx_size,
 
 #undef AV1_SCAN
 
-static unsigned int av1_coeff_txb_skip_context(
+static unsigned int av1_coeff_txb_skip_context_internal(
     const Av1CoeffPlaneContext *context,
     unsigned int plane,
     size_t x4,
@@ -209,7 +209,7 @@ static unsigned int av1_coeff_txb_skip_context(
     }
 }
 
-static unsigned int av1_coeff_dc_sign_context(
+static unsigned int av1_coeff_dc_sign_context_internal(
     const Av1CoeffPlaneContext *context,
     size_t x4,
     size_t y4,
@@ -231,12 +231,12 @@ static unsigned int av1_coeff_dc_sign_context(
     return dc_sign < 0 ? 1U : dc_sign > 0 ? 2U : 0U;
 }
 
-static unsigned int av1_coeff_base_context(Av1TxSize tx_size,
-                                           Av1TxType tx_type,
-                                           const uint32_t levels[AV1_MAX_SEG_EOB],
-                                           size_t pos,
-                                           size_t scan_index,
-                                           int is_eob) {
+unsigned int av1_coeff_base_context(Av1TxSize tx_size,
+                                    Av1TxType tx_type,
+                                    const uint32_t *levels,
+                                    size_t pos,
+                                    size_t scan_index,
+                                    int is_eob) {
     Av1TxSize adjusted = (Av1TxSize)av1_adjusted_tx_size[tx_size];
     const Av1TxSizeInfo *tx = &av1_tx_size_info[adjusted];
     Av1TxClass tx_class = av1_coeff_tx_class(tx_type);
@@ -278,10 +278,10 @@ static unsigned int av1_coeff_base_context(Av1TxSize tx_size,
     return context + av1_coeff_base_pos_ctx_offset[index];
 }
 
-static unsigned int av1_coeff_br_context(Av1TxSize tx_size,
-                                         Av1TxType tx_type,
-                                         const uint32_t levels[AV1_MAX_SEG_EOB],
-                                         size_t pos) {
+unsigned int av1_coeff_br_context(Av1TxSize tx_size,
+                                  Av1TxType tx_type,
+                                  const uint32_t *levels,
+                                  size_t pos) {
     Av1TxSize adjusted = (Av1TxSize)av1_adjusted_tx_size[tx_size];
     const Av1TxSizeInfo *tx = &av1_tx_size_info[adjusted];
     Av1TxClass tx_class = av1_coeff_tx_class(tx_type);
@@ -310,13 +310,14 @@ static unsigned int av1_coeff_br_context(Av1TxSize tx_size,
     return magnitude + (row == 0U ? 7U : 14U);
 }
 
-static void av1_coeff_store_context(Av1CoeffPlaneContext *context,
-                                    size_t x4,
-                                    size_t y4,
-                                    size_t w4,
-                                    size_t h4,
-                                    uint8_t cul_level,
-                                    uint8_t dc_category) {
+static void av1_coeff_store_context_internal(
+    Av1CoeffPlaneContext *context,
+    size_t x4,
+    size_t y4,
+    size_t w4,
+    size_t h4,
+    uint8_t cul_level,
+    uint8_t dc_category) {
     size_t index;
 
     for (index = 0U; index < w4 && x4 + index < context->width4; ++index) {
@@ -327,6 +328,73 @@ static void av1_coeff_store_context(Av1CoeffPlaneContext *context,
         context->left_level_context[y4 + index] = cul_level;
         context->left_dc_context[y4 + index] = dc_category;
     }
+}
+
+AvifdecStatus av1_coeff_coding_info(Av1TxSize tx_size,
+                                    Av1TxType tx_type,
+                                    Av1CoeffCodingInfo *info) {
+    const Av1TxSizeInfo *tx;
+    Av1CoeffScan scan;
+
+    if (info == 0 || tx_size >= AV1_TX_SIZES_ALL ||
+        tx_type >= AV1_TX_TYPES) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    tx = &av1_tx_size_info[tx_size];
+    scan = av1_coeff_get_scan(tx_size, tx_type);
+    info->scan = scan.values;
+    info->scan_count = scan.count;
+    info->segment_eob = tx_size == AV1_TX_16X64 ||
+            tx_size == AV1_TX_64X16
+        ? 512U : (size_t)tx->width * tx->height;
+    if (info->segment_eob > AV1_MAX_SEG_EOB) {
+        info->segment_eob = AV1_MAX_SEG_EOB;
+    }
+    info->width4 = tx->width >> 2U;
+    info->height4 = tx->height >> 2U;
+    info->tx_size_context = (av1_tx_size_sqr[tx_size] +
+                             av1_tx_size_sqr_up[tx_size] + 1U) >> 1U;
+    return scan.count < info->segment_eob
+        ? AVIFDEC_INVALID_DATA : AVIFDEC_OK;
+}
+
+unsigned int av1_coeff_txb_skip_context(
+    const Av1CoeffPlaneContext *context,
+    unsigned int plane,
+    size_t x4,
+    size_t y4,
+    size_t block_width,
+    size_t block_height,
+    Av1TxSize tx_size) {
+    const Av1TxSizeInfo *tx = &av1_tx_size_info[tx_size];
+
+    return av1_coeff_txb_skip_context_internal(
+        context, plane, x4, y4, tx->width >> 2U, tx->height >> 2U,
+        block_width, block_height, tx);
+}
+
+unsigned int av1_coeff_dc_sign_context(
+    const Av1CoeffPlaneContext *context,
+    size_t x4,
+    size_t y4,
+    Av1TxSize tx_size) {
+    const Av1TxSizeInfo *tx = &av1_tx_size_info[tx_size];
+
+    return av1_coeff_dc_sign_context_internal(
+        context, x4, y4, tx->width >> 2U, tx->height >> 2U);
+}
+
+void av1_coeff_store_context(Av1CoeffPlaneContext *context,
+                             size_t x4,
+                             size_t y4,
+                             Av1TxSize tx_size,
+                             uint8_t cul_level,
+                             uint8_t dc_category) {
+    const Av1TxSizeInfo *tx = &av1_tx_size_info[tx_size];
+
+    av1_coeff_store_context_internal(
+        context, x4, y4, tx->width >> 2U, tx->height >> 2U,
+        cul_level, dc_category);
 }
 
 unsigned int av1_coeff_q_context(uint8_t base_q_index) {
@@ -486,14 +554,15 @@ AvifdecStatus av1_coeff_parse_block_select(
     tx_size_context = (av1_tx_size_sqr[tx_size] +
                        av1_tx_size_sqr_up[tx_size] + 1U) >> 1;
     plane_type = plane > 0U;
-    skip_context = av1_coeff_txb_skip_context(context, plane, x4, y4, w4, h4,
-                                               plane_block_width,
-                                               plane_block_height, tx);
+    skip_context = av1_coeff_txb_skip_context_internal(
+        context, plane, x4, y4, w4, h4,
+        plane_block_width, plane_block_height, tx);
     all_zero = av1_symbol_read(decoder,
                                cdfs->txb_skip[tx_size_context][skip_context], 2U);
     if (decoder->status != AVIFDEC_OK) return decoder->status;
     if (all_zero != 0U) {
-        av1_coeff_store_context(context, x4, y4, w4, h4, 0U, 0U);
+        av1_coeff_store_context_internal(
+            context, x4, y4, w4, h4, 0U, 0U);
         return AVIFDEC_OK;
     }
     avifdec_memory_fill(levels, 0U, segment_eob * sizeof(levels[0]));
@@ -620,7 +689,7 @@ AvifdecStatus av1_coeff_parse_block_select(
 
         if (level != 0U) {
             if (coefficient == 0U) {
-                unsigned int dc_context = av1_coeff_dc_sign_context(
+                unsigned int dc_context = av1_coeff_dc_sign_context_internal(
                     context, x4, y4, w4, h4);
                 sign = av1_symbol_read(decoder,
                     cdfs->dc_sign[plane_type][dc_context], 2U);
@@ -666,8 +735,9 @@ AvifdecStatus av1_coeff_parse_block_select(
                                         : (int32_t)magnitude;
         }
     }
-    av1_coeff_store_context(context, x4, y4, w4, h4,
-                            result->cul_level, result->dc_category);
+    av1_coeff_store_context_internal(context, x4, y4, w4, h4,
+                                     result->cul_level,
+                                     result->dc_category);
     return AVIFDEC_OK;
 }
 

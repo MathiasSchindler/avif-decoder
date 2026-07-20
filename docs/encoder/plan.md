@@ -10,7 +10,7 @@ ten ordered goals spanning **speed**, **features**, and **encoding quality**.
 | --- | --- | :---: | :---: | :---: | --- |
 | 1. Measurement and regression budgets | Reproducible decisions | Yes |  | Yes | Complete |
 | 2. Multi-tile encoding and bounded parallelism | Large images without resizing | Yes | Yes |  | Complete |
-| 3. Variable partitions and transforms | Better local adaptation | Yes | Yes | Yes | Planned |
+| 3. Variable partitions and transforms | Better local adaptation | Yes | Yes | Yes | Complete |
 | 4. Complete intra and chroma prediction | Stronger still-image coding | Yes | Yes | Yes | Planned |
 | 5. Quantization, lossless, and rate control | Useful quality/size controls | Yes | Yes | Yes | Planned |
 | 6. In-loop filters and restoration | Better reconstruction per byte | Yes | Yes | Yes | Planned |
@@ -153,6 +153,21 @@ This goal is complete when all supported edge geometries round-trip exactly,
 larger smooth regions use larger blocks/transforms, detailed regions retain
 smaller units, speed levels have monotonic work budgets, and the corpus improves
 rate-distortion results without an unbounded time or workspace increase.
+
+Implemented by bounded `NONE`, `SPLIT`, `HORZ`, and `VERT` selection for fully
+visible blocks through 32x32, with activity pruning before deterministic
+rate-distortion trials. Each node evaluates only one partition level; only the
+committed split recurses. A fixed 2 KiB caller-workspace checkpoint isolates
+luma reconstruction while local checkpoints isolate coding-block state, and
+transform trials leave coefficient state unchanged. Speed 0, 1, and 2 use
+monotonically narrower mode and partition trial budgets.
+
+The transform path supports DCT_DCT at 4x4, 8x8, 16x16, 32x32, and the six
+2:1 shapes from 4x8 through 32x16. Focused sanitizer vectors cover smooth,
+detailed, vertical-edge, horizontal-edge, padded-edge, workspace-alignment,
+and deterministic reconstruction behavior. The nine-case scorecard records
+the reviewed rate-distortion and work changes; external FFmpeg, libaom, dav1d,
+and libavif comparisons decode both rectangular orientations exactly.
 
 ## Goal 4: Complete intra and chroma prediction
 

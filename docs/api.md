@@ -39,13 +39,18 @@ Quantizers 1 through 255 and speed levels 0 through `AVIFENC_MAX_SPEED` (2)
 are supported. Quantizer 0, including lossless encoding, returns
 `AVIFENC_UNSUPPORTED`. Speed 0 searches DC, vertical, horizontal, smooth, and
 Paeth luma predictors; speed 1 searches DC, vertical, and horizontal; speed 2
-retains the fixed-DC baseline. Every speed uses DC chroma prediction,
-4x4 blocks, and 4x4 DCT transforms. Lower quantizers generally preserve more
-detail and increase output size. Speed changes bounded search work, not the
-format surface or memory requirement.
+retains the fixed-DC baseline. Every speed uses DC chroma prediction and may
+emit square blocks and DCT transforms through 32x32. Speeds 0 and 1 additionally
+evaluate activity-qualified horizontal and vertical partitions with the six
+2:1 DCT shapes from 4x8 through 32x16; speed 2 follows a classification-only
+partition path. Lower quantizers generally preserve more detail and increase
+output size. Speed changes bounded search work, not the format surface or
+memory requirement.
 
 `avifenc_query()` returns conservative capacities that are independent of
-source pixel values and speed. `avifenc_encode()` accepts an unaligned
+source pixel values and speed. The workspace includes a fixed 2 KiB partition
+trial reconstruction checkpoint in addition to coding and transform contexts.
+`avifenc_encode()` accepts an unaligned
 workspace, requires capacities at least as large as the query result, sets
 `output_written` to the exact encoded length on success, and sets it to zero on
 failure. The core performs no allocation or file I/O. Repeated calls with the

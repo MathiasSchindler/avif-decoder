@@ -22,7 +22,8 @@ project itself builds. It includes:
 - recursive BMFF and checked-in AVIF corpus traces.
 - encoder API validation, exact capacity and one-byte-short buffer checks,
   varied workspace alignment, deterministic output, reconstruction equality,
-  quality/search regressions, hosted concurrent tile execution, and strict plus
+  quality/search regressions, monotonic speed budgets, square and rectangular
+  transform-size selection, hosted concurrent tile execution, and strict plus
   sanitized image-input units;
 - deterministic raw YUV, PNG, and baseline JPEG CLI fixtures, including
   preserved wide multi-tile dimensions, worker byte identity, and freestanding
@@ -31,6 +32,11 @@ project itself builds. It includes:
   capacities, YUV quality metrics, structural edge error, and deterministic
   work counts against the checked-in cross-platform baseline, while also
   requiring exact encoder/decoder reconstruction checksums.
+
+  `make encoder-fuzz-smoke` runs 1,000 sanitizer-backed encoder mutations. The
+  external encoder interoperability script covers six fixtures and 24 exact
+  decode comparisons through FFmpeg, libaom, and the available libavif aom and
+  dav1d backends, including fully visible horizontal and vertical rectangles.
 
 `make test-encoder` runs only the encoder portion when a shorter iteration is
 useful. It is already included by `make test`.

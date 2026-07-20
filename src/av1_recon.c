@@ -237,7 +237,7 @@ static unsigned int av1_recon_brev(unsigned int bits, unsigned int value) {
     return result;
 }
 
-static int32_t av1_recon_cos128(int angle) {
+int32_t av1_recon_cos128(int angle) {
     return av1_cos128_full[(unsigned int)angle & 255U];
 }
 

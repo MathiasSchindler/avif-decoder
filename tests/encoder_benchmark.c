@@ -541,6 +541,7 @@ static void benchmark_run_case(const BenchmarkCase *definition,
     struct timespec end;
     unsigned int iteration;
     unsigned int plane;
+    AvifencStatus encode_status;
 
     benchmark_source_create(definition, &source);
     avifenc_options_default(&options);
@@ -558,11 +559,23 @@ static void benchmark_run_case(const BenchmarkCase *definition,
         result->requirements.workspace_required);
     output = (uint8_t *)benchmark_allocate(
         result->requirements.output_capacity_required);
-        if (avifenc_encode_with_executor(
+    encode_status = avifenc_encode_with_executor(
             &source.image, &options, executor,
             workspace, result->requirements.workspace_required,
             output, result->requirements.output_capacity_required,
-            &output_written, &result->statistics, &error) != AVIFENC_OK) {
+            &output_written, &result->statistics, &error);
+    if (encode_status != AVIFENC_OK) {
+        (void)fprintf(
+            stderr, "encoder benchmark case %s: status %u, context %u, "
+                    "required %zu, provided %zu, nodes %llu, blocks %llu, "
+                    "prediction trials %llu, transform trials %llu\n",
+            definition->name, (unsigned int)encode_status,
+            (unsigned int)error.context, error.required_size,
+                error.provided_size,
+                (unsigned long long)result->statistics.partition_node_count,
+                (unsigned long long)result->statistics.block_count,
+                (unsigned long long)result->statistics.prediction_trial_count,
+                (unsigned long long)result->statistics.transform_trial_count);
         benchmark_fail("encoder statistics operation failed");
     }
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {

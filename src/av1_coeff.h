@@ -88,6 +88,15 @@ typedef struct {
 } Av1CoeffBlockResult;
 
 typedef struct {
+    const uint16_t *scan;
+    size_t scan_count;
+    size_t segment_eob;
+    size_t width4;
+    size_t height4;
+    unsigned int tx_size_context;
+} Av1CoeffCodingInfo;
+
+typedef struct {
     uint16_t txb_skip[AV1_TX_SIZE_CONTEXTS][AV1_TXB_SKIP_CONTEXTS][3];
     uint16_t eob_pt_16[AV1_PLANE_TYPES][2][6];
     uint16_t eob_pt_32[AV1_PLANE_TYPES][2][7];
@@ -117,6 +126,38 @@ extern const Av1TxSizeInfo av1_tx_size_info[AV1_TX_SIZES_ALL];
 unsigned int av1_coeff_q_context(uint8_t base_q_index);
 void av1_coeff_cdfs_init(Av1CoeffCdfs *cdfs, uint8_t base_q_index);
 uint64_t av1_coeff_cdfs_checksum(const Av1CoeffCdfs *cdfs);
+AvifdecStatus av1_coeff_coding_info(Av1TxSize tx_size,
+                                    Av1TxType tx_type,
+                                    Av1CoeffCodingInfo *info);
+unsigned int av1_coeff_txb_skip_context(
+    const Av1CoeffPlaneContext *context,
+    unsigned int plane,
+    size_t x4,
+    size_t y4,
+    size_t block_width,
+    size_t block_height,
+    Av1TxSize tx_size);
+unsigned int av1_coeff_dc_sign_context(
+    const Av1CoeffPlaneContext *context,
+    size_t x4,
+    size_t y4,
+    Av1TxSize tx_size);
+unsigned int av1_coeff_base_context(Av1TxSize tx_size,
+                                    Av1TxType tx_type,
+                                    const uint32_t *levels,
+                                    size_t position,
+                                    size_t scan_index,
+                                    int is_eob);
+unsigned int av1_coeff_br_context(Av1TxSize tx_size,
+                                  Av1TxType tx_type,
+                                  const uint32_t *levels,
+                                  size_t position);
+void av1_coeff_store_context(Av1CoeffPlaneContext *context,
+                             size_t x4,
+                             size_t y4,
+                             Av1TxSize tx_size,
+                             uint8_t cul_level,
+                             uint8_t dc_category);
 AvifdecStatus av1_coeff_context_init(Av1CoeffContextState *state,
                                      const Av1CoeffPlaneContext plane[3]);
 AvifdecStatus av1_coeff_parse_block(Av1SymbolDecoder *decoder,

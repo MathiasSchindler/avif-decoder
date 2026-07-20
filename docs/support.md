@@ -66,8 +66,11 @@ reported through capability flags and `AVIFDEC_UNSUPPORTED`.
 
 The encoder core accepts one nonzero, even-sized 8-bit planar YUV420 frame and
 writes one Main-profile reduced-still key frame in a single-item AVIF. It uses
-deterministic uniform tiles, 64x64 superblocks partitioned to 4x4 coding blocks, 4x4 DCT
-transforms, DC chroma prediction, and a deterministic bounded luma mode search.
+deterministic uniform tiles and bounded recursive square, horizontal, and
+vertical partition decisions through 32x32 coding blocks. DCT transforms cover
+4x4, 8x8, 16x16, 32x32, and the 4x8, 8x4, 8x16, 16x8, 16x32, and 32x16
+shapes needed by YUV420 rectangular blocks. It uses DC chroma prediction and a
+deterministic bounded luma mode and rate-distortion search.
 Quantizers 1 through 255 and speeds 0 through 2 are supported.
 
 Each dimension is at most 65,536. Images exceeding AV1's per-tile width or area

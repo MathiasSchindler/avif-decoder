@@ -43,6 +43,13 @@ write_fixture() {
                     value=235
                 fi
                 ;;
+            hedge)
+                if test "$row" -lt $((height / 2)); then
+                    value=16
+                else
+                    value=235
+                fi
+                ;;
             detail|wide) value=$(((column * 29 + row * 47 + index * 3) % 220 + 16)) ;;
         esac
         octal=$(printf '%03o' "$value")
@@ -103,7 +110,7 @@ test -n "$codecs" || {
 
 fixtures=0
 comparisons=0
-for specification in flat:2:2:1:2 edge:18:10:128:1 detail:64:48:224:0 wide:4160:2:128:2 row:2242:4098:255:2; do
+for specification in flat:2:2:1:2 edge:32:32:128:1 hedge:32:32:128:1 detail:64:48:224:0 wide:4160:2:128:2 row:2242:4098:255:2; do
     pattern=${specification%%:*}
     remainder=${specification#*:}
     width=${remainder%%:*}
