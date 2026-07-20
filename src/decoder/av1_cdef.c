@@ -127,19 +127,24 @@ AvifdecStatus av1_cdef_find_direction(const uint16_t *source,
 
 static int av1_cdef_constrain(int difference,
                               unsigned int threshold,
-                              unsigned int damping) {
+                              unsigned int damping_adjustment) {
     unsigned int magnitude;
-    unsigned int damping_adjustment;
     int constrained;
 
     if (threshold == 0U) return 0;
     magnitude = (unsigned int)av1_cdef_abs(difference);
-    damping_adjustment = av1_cdef_floor_log2(threshold);
-    damping_adjustment = damping > damping_adjustment
-                         ? damping - damping_adjustment : 0U;
     constrained = (int)threshold - (int)(magnitude >> damping_adjustment);
     constrained = av1_cdef_clip(0, (int)magnitude, constrained);
     return difference < 0 ? -constrained : constrained;
+}
+
+static unsigned int av1_cdef_damping_adjustment(unsigned int threshold,
+                                                 unsigned int damping) {
+    unsigned int adjustment;
+
+    if (threshold == 0U) return 0U;
+    adjustment = av1_cdef_floor_log2(threshold);
+    return damping > adjustment ? damping - adjustment : 0U;
 }
 
 static int av1_cdef_available(const Av1CdefParams *params,
@@ -213,13 +218,104 @@ static AvifdecStatus av1_cdef_filter_block(
     unsigned int coeff_shift = params->bit_depth - 8U;
     unsigned int tap_set = (primary_strength >> coeff_shift) & 1U;
     int clipping_required = primary_strength != 0U && secondary_strength != 0U;
+    unsigned int primary_damping_adjustment;
+    unsigned int secondary_damping_adjustment;
     int interior;
     unsigned int row;
     unsigned int column;
 
     if (direction >= 8U) return AVIFDEC_INVALID_ARGUMENT;
+    primary_damping_adjustment =
+        av1_cdef_damping_adjustment(primary_strength, damping);
+    secondary_damping_adjustment =
+        av1_cdef_damping_adjustment(secondary_strength, damping);
     interior = av1_cdef_block_interior(params, x0, y0, width, height,
                                        sub_x, sub_y);
+    if (interior) {
+        ptrdiff_t primary_offsets[2];
+        ptrdiff_t secondary_offsets[2][2];
+        ptrdiff_t plane_stride = (ptrdiff_t)input->stride[plane];
+        unsigned int distance;
+
+        for (distance = 0U; distance < 2U; ++distance) {
+            unsigned int secondary_index = 0U;
+            int direction_offset;
+
+            primary_offsets[distance] =
+                (ptrdiff_t)directions[direction][distance][0] * plane_stride +
+                (ptrdiff_t)directions[direction][distance][1];
+            for (direction_offset = -2; direction_offset <= 2;
+                 direction_offset += 4) {
+                unsigned int secondary_direction =
+                    (direction + (unsigned int)direction_offset) & 7U;
+                secondary_offsets[secondary_index][distance] =
+                    (ptrdiff_t)directions[secondary_direction][distance][0] *
+                        plane_stride +
+                    (ptrdiff_t)directions[secondary_direction][distance][1];
+                ++secondary_index;
+            }
+        }
+        for (row = 0U; row < height; ++row) {
+            for (column = 0U; column < width; ++column) {
+                uint32_t destination_x = x0 + column;
+                uint32_t destination_y = y0 + row;
+                const uint16_t *center_pointer;
+                int center;
+                int minimum;
+                int maximum;
+                int sum = 0;
+
+                if (destination_x >= output->width[plane] ||
+                    destination_y >= output->height[plane]) continue;
+                center_pointer = input->data[plane] +
+                    (size_t)destination_y * input->stride[plane] +
+                    destination_x;
+                center = *center_pointer;
+                minimum = center;
+                maximum = center;
+                for (distance = 0U; distance < 2U; ++distance) {
+                    int sign;
+
+                    for (sign = -1; sign <= 1; sign += 2) {
+                        unsigned int secondary_index;
+                        int sample = center_pointer[
+                            (ptrdiff_t)sign * primary_offsets[distance]];
+
+                        sum += (int)primary_taps[tap_set][distance] *
+                            av1_cdef_constrain(
+                                sample - center, primary_strength,
+                                primary_damping_adjustment);
+                        if (clipping_required) {
+                            if (sample < minimum) minimum = sample;
+                            if (sample > maximum) maximum = sample;
+                        }
+                        for (secondary_index = 0U; secondary_index < 2U;
+                             ++secondary_index) {
+                            sample = center_pointer[
+                                (ptrdiff_t)sign *
+                                secondary_offsets[secondary_index][distance]];
+                            sum += (int)secondary_taps[distance] *
+                                av1_cdef_constrain(
+                                    sample - center, secondary_strength,
+                                    secondary_damping_adjustment);
+                            if (clipping_required) {
+                                if (sample < minimum) minimum = sample;
+                                if (sample > maximum) maximum = sample;
+                            }
+                        }
+                    }
+                }
+                center += av1_cdef_arshift(8 + sum - (sum < 0), 4U);
+                if (clipping_required) {
+                    center = av1_cdef_clip(minimum, maximum, center);
+                }
+                output->data[plane][
+                    (size_t)destination_y * output->stride[plane] +
+                    destination_x] = (uint16_t)center;
+            }
+        }
+        return AVIFDEC_OK;
+    }
     for (row = 0U; row < height; ++row) {
         for (column = 0U; column < width; ++column) {
             uint32_t destination_x = x0 + column;
@@ -245,15 +341,15 @@ static AvifdecStatus av1_cdef_filter_block(
                         sign * directions[direction][distance][1];
                     int direction_offset;
 
-                    if (interior || av1_cdef_available(params, primary_x,
-                                                        primary_y, sub_x,
-                                                        sub_y)) {
+                    if (av1_cdef_available(params, primary_x, primary_y,
+                                           sub_x, sub_y)) {
                         int sample = input->data[plane][
                             (size_t)primary_y * input->stride[plane] +
                             (size_t)primary_x];
                         sum += (int)primary_taps[tap_set][distance] *
                             av1_cdef_constrain(sample - center,
-                                               primary_strength, damping);
+                                primary_strength,
+                                primary_damping_adjustment);
                         if (clipping_required) {
                             if (sample < minimum) minimum = sample;
                             if (sample > maximum) maximum = sample;
@@ -275,7 +371,8 @@ static AvifdecStatus av1_cdef_filter_block(
                                 (size_t)secondary_x];
                             sum += (int)secondary_taps[distance] *
                                 av1_cdef_constrain(sample - center,
-                                                   secondary_strength, damping);
+                                    secondary_strength,
+                                    secondary_damping_adjustment);
                             if (clipping_required) {
                                 if (sample < minimum) minimum = sample;
                                 if (sample > maximum) maximum = sample;

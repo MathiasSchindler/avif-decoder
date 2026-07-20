@@ -179,6 +179,34 @@ On the same host, five interleaved warm runs measured the new default against
 | 11.2 MP, 8-bit 4:2:0 lossy | 589.108 ms | 898.393 ms | 1.53x | 34.4% |
 | 30.1 MP, 10-bit 4:2:0 lossy | 1,890.896 ms | 2,697.202 ms | 1.43x | 29.9% |
 
+## Portable CDEF interior-kernel A/B
+
+A later same-machine, same-toolchain A/B retained the existing
+full-neighborhood proof and added a dedicated interior CDEF kernel. It
+precomputes signed tap offsets, leaves the boundary slow path unchanged, and
+hoists the primary and secondary damping adjustments once per block.
+
+Both executables used one worker and raw output to `/dev/null`. Each was warmed
+before seeded, interleaved timing: 9 rounds per corpus image and 7 rounds for
+the CDEF-active fixture. The saved baseline executable SHA-256 was
+`ce066f8ffeb0f3bb14fa714817cdfd8924e3efe7696ff152cae88aa9cafa8443`;
+the optimized executable SHA-256 was
+`266f3c31a6d9319113d591c340d9cf28e1add0a2767f0b8b8c80cb1f2cfad0a8`.
+
+| Workload | Saved-baseline median | Interior-kernel median | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP, 8-bit 4:2:0 lossy | 120.604 ms | 107.705 ms | -10.70% |
+| 11.2 MP, 8-bit 4:2:0 lossy | 540.200 ms | 482.485 ms | -10.68% |
+| 4.2 MP, 8-bit 4:4:4 lossless | 670.057 ms | 663.904 ms | -0.92% (near noise) |
+| 30.1 MP, 10-bit 4:2:0 lossy | 1,887.100 ms | 1,587.646 ms | -15.87% |
+| 4096x4096 CDEF-active | 1,587.873 ms | 1,360.671 ms | -14.31% |
+
+Raw output was byte-identical between executables for every input. Because the
+original active-fixture source was absent, that fixture was regenerated from
+the local `images/pastell.jpg` with the settings recorded in
+[`profiling.md`](profiling.md). These figures are only a same-build A/B; do not
+compare them across machines, compiler/decoder versions, or earlier tables.
+
 ## Peak resident memory
 
 Peak RSS was measured with `/usr/bin/time -l` after one warm run.

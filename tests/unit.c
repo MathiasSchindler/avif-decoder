@@ -3529,6 +3529,226 @@ static int test_av1_partition_engine(void) {
     return 0;
 }
 
+static unsigned int test_cdef_direction_line(unsigned int direction,
+                                             unsigned int row,
+                                             unsigned int column) {
+    switch (direction) {
+        case 0U: return row + column;
+        case 1U: return row + column / 2U;
+        case 2U: return row;
+        case 3U: return 3U + row - column / 2U;
+        case 4U: return 7U + row - column;
+        case 5U: return 3U - row / 2U + column;
+        case 6U: return column;
+        default: return row / 2U + column;
+    }
+}
+
+static int test_av1_cdef_interior(void) {
+    static const uint8_t subsampling[3][2] = {
+        { 0U, 0U }, { 1U, 0U }, { 1U, 1U }
+    };
+    uint16_t source[3][32U * 24U];
+    uint16_t destination[3][32U * 24U];
+    Av1BlockCell cells[8U * 6U];
+    Av1BlockState blocks;
+    Av1FramePlanes input;
+    Av1FramePlanes output;
+    Av1CdefParams params;
+    uint8_t indices[8U * 6U];
+    uint8_t primary[1];
+    uint8_t secondary[1];
+    unsigned int depth_index;
+    unsigned int subsampling_index;
+    unsigned int strength_case;
+    unsigned int index;
+
+    avifdec_memory_fill(cells, 0U, sizeof(cells));
+    avifdec_memory_fill(indices, 0U, sizeof(indices));
+    for (index = 0U; index < 8U * 6U; ++index) {
+        cells[index].width = 2U;
+        cells[index].height = 2U;
+    }
+    avifdec_memory_fill(&blocks, 0U, sizeof(blocks));
+    blocks.mi_rows = 6U;
+    blocks.mi_columns = 8U;
+    blocks.cells = cells;
+    blocks.cell_capacity = 8U * 6U;
+
+    for (depth_index = 0U; depth_index < 3U; ++depth_index) {
+        uint8_t bit_depth = (uint8_t)(8U + 2U * depth_index);
+        unsigned int coeff_shift = bit_depth - 8U;
+
+        for (subsampling_index = 0U; subsampling_index < 3U;
+             ++subsampling_index) {
+            uint8_t sub_x = subsampling[subsampling_index][0];
+            uint8_t sub_y = subsampling[subsampling_index][1];
+
+            for (strength_case = 0U; strength_case < 4U; ++strength_case) {
+                unsigned int direction_count =
+                    strength_case == 0U ? 8U : 1U;
+                unsigned int direction;
+
+                primary[0] = strength_case < 2U ? 8U : 0U;
+                secondary[0] =
+                    strength_case == 0U || strength_case == 2U ? 4U : 0U;
+                for (direction = 0U; direction < direction_count;
+                     ++direction) {
+                    unsigned int plane;
+                    unsigned int changed = 0U;
+                    uint8_t detected_direction;
+                    uint32_t variance;
+
+                    avifdec_memory_fill(&input, 0U, sizeof(input));
+                    avifdec_memory_fill(&output, 0U, sizeof(output));
+                    avifdec_memory_fill(&params, 0U, sizeof(params));
+                    for (plane = 0U; plane < 3U; ++plane) {
+                        unsigned int plane_sub_x = plane == 0U ? 0U : sub_x;
+                        unsigned int plane_sub_y = plane == 0U ? 0U : sub_y;
+                        unsigned int stride = 32U >> plane_sub_x;
+                        unsigned int backing_height = 24U >> plane_sub_y;
+                        unsigned int width =
+                            (30U + ((1U << plane_sub_x) - 1U)) >> plane_sub_x;
+                        unsigned int height =
+                            (22U + ((1U << plane_sub_y) - 1U)) >> plane_sub_y;
+                        unsigned int block_width = 8U >> plane_sub_x;
+                        unsigned int block_height = 8U >> plane_sub_y;
+                        unsigned int row;
+                        unsigned int column;
+
+                        input.data[plane] = source[plane];
+                        input.stride[plane] = stride;
+                        input.width[plane] = width;
+                        input.height[plane] = height;
+                        output.data[plane] = destination[plane];
+                        output.stride[plane] = stride;
+                        output.width[plane] = width;
+                        output.height[plane] = height;
+                        for (row = 0U; row < backing_height; ++row) {
+                            for (column = 0U; column < stride; ++column) {
+                                unsigned int local_row = row % block_height;
+                                unsigned int local_column =
+                                    column % block_width;
+                                unsigned int value;
+
+                                if (plane == 0U) {
+                                    value = 48U + 10U *
+                                        test_cdef_direction_line(
+                                            direction, local_row, local_column) +
+                                        ((local_row * 5U +
+                                          local_column * 3U) & 3U) +
+                                        (local_row == 3U &&
+                                         local_column == 4U ? 6U : 0U);
+                                } else {
+                                    value = 40U +
+                                        ((local_row * 31U +
+                                          local_column * 17U + plane * 29U +
+                                          direction * 7U) & 127U);
+                                }
+                                source[plane][row * stride + column] =
+                                    (uint16_t)(value << coeff_shift);
+                                destination[plane][row * stride + column] = 0U;
+                            }
+                        }
+                    }
+                    params.frame_width = 30U;
+                    params.frame_height = 22U;
+                    params.mi_rows = 6U;
+                    params.mi_columns = 8U;
+                    params.bit_depth = bit_depth;
+                    params.subsampling_x = sub_x;
+                    params.subsampling_y = sub_y;
+                    params.damping = 3U;
+                    params.y_pri_strength = primary;
+                    params.y_sec_strength = secondary;
+                    params.uv_pri_strength = primary;
+                    params.uv_sec_strength = secondary;
+                    params.indices = indices;
+                    params.index_capacity = sizeof(indices);
+                    CHECK(av1_cdef_find_direction(
+                              source[0] + 8U * 32U + 8U, 32U, bit_depth,
+                              &detected_direction, &variance) == AVIFDEC_OK);
+                    CHECK(detected_direction == direction && variance != 0U);
+                    CHECK(av1_cdef_frame(
+                              &output, &input, &blocks, &params) == AVIFDEC_OK);
+
+                    for (plane = 0U; plane < 3U; ++plane) {
+                        unsigned int plane_sub_x = plane == 0U ? 0U : sub_x;
+                        unsigned int plane_sub_y = plane == 0U ? 0U : sub_y;
+                        unsigned int stride = 32U >> plane_sub_x;
+                        unsigned int width = output.width[plane];
+                        unsigned int height = output.height[plane];
+                        unsigned int block_width = 8U >> plane_sub_x;
+                        unsigned int block_height = 8U >> plane_sub_y;
+                        unsigned int middle_x = 8U >> plane_sub_x;
+                        unsigned int middle_y = 8U >> plane_sub_y;
+                        unsigned int right_x = 24U >> plane_sub_x;
+                        unsigned int bottom_y = 16U >> plane_sub_y;
+                        unsigned int comparable_right =
+                            (32U >> plane_sub_x) - right_x - 2U;
+                        unsigned int comparable_bottom =
+                            (24U >> plane_sub_y) - bottom_y - 2U;
+                        unsigned int row;
+                        unsigned int column;
+
+                        for (row = 0U; row < block_height; ++row) {
+                            for (column = 2U; column < block_width; ++column) {
+                                CHECK(destination[plane][
+                                          (middle_y + row) * stride + column] ==
+                                      destination[plane][
+                                          (middle_y + row) * stride +
+                                          middle_x + column]);
+                            }
+                        }
+                        for (row = 2U; row < block_height; ++row) {
+                            for (column = 0U; column < block_width; ++column) {
+                                CHECK(destination[plane][
+                                          row * stride + middle_x + column] ==
+                                      destination[plane][
+                                          (middle_y + row) * stride +
+                                          middle_x + column]);
+                            }
+                        }
+                        for (row = 0U; row < block_height; ++row) {
+                            for (column = 0U; column < comparable_right;
+                                 ++column) {
+                                CHECK(destination[plane][
+                                          (middle_y + row) * stride +
+                                          right_x + column] ==
+                                      destination[plane][
+                                          (middle_y + row) * stride +
+                                          middle_x + column]);
+                            }
+                        }
+                        for (row = 0U; row < comparable_bottom; ++row) {
+                            for (column = 0U; column < block_width; ++column) {
+                                CHECK(destination[plane][
+                                          (bottom_y + row) * stride +
+                                          middle_x + column] ==
+                                      destination[plane][
+                                          (middle_y + row) * stride +
+                                          middle_x + column]);
+                            }
+                        }
+                        for (row = 0U; row < height; ++row) {
+                            for (column = 0U; column < width; ++column) {
+                                changed += source[plane][row * stride + column] !=
+                                    destination[plane][row * stride + column];
+                            }
+                        }
+                    }
+                    if (strength_case == 3U) {
+                        CHECK(changed == 0U);
+                    } else if (strength_case == 0U) {
+                        CHECK(changed != 0U);
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static int test_av1_cdef(void) {
     uint16_t source[16U * 16U];
     uint16_t destination[16U * 16U];
@@ -4663,6 +4883,8 @@ int main(int argc, char **argv) {
     result = test_av1_loop_filter();
     if (result != 0) return result;
     result = test_av1_cdef();
+    if (result != 0) return result;
+    result = test_av1_cdef_interior();
     if (result != 0) return result;
     result = test_av1_superres();
     if (result != 0) return result;

@@ -576,6 +576,48 @@ measurement noise for every non-grain workload. The clean x86-64 static PIE
 is 373,648 bytes, 8,192 bytes above the prior 365,456-byte baseline; its
 text/read-only column is 362,797 bytes.
 
+## Portable CDEF interior kernel
+
+The existing four-corner proof already establishes that a block's complete
+CDEF tap neighborhood is available. A dedicated, platform-independent interior
+kernel now uses that proof with precomputed signed tap offsets. Boundary blocks
+continue through the unchanged availability-checking slow path. Primary and
+secondary damping adjustments are also computed once per block rather than for
+every constrained tap.
+
+The active fixture was generated from the available local `images/pastell.jpg`
+because the original `images/tribu-large.jpg` source used by the historical
+profile was absent:
+
+```sh
+magick images/pastell.jpg -gravity center -crop 4096x4096+0+0 \
+    +repage -quality 92 build/filter-active.jpg
+avifenc --codec aom --jobs 1 --speed 4 --qcolor 35 \
+    --advanced enable-cdef=1 --advanced enable-restoration=1 \
+    build/filter-active.jpg build/filter-active-restoration.avif
+```
+
+One-worker raw decodes wrote to `/dev/null`. After warm-up, a seeded schedule
+interleaved the saved baseline and optimized executable for 9 rounds for each
+input in the four-image corpus and 7 rounds on the active fixture. Their SHA-256
+hashes were
+`ce066f8ffeb0f3bb14fa714817cdfd8924e3efe7696ff152cae88aa9cafa8443`
+and
+`266f3c31a6d9319113d591c340d9cf28e1add0a2767f0b8b8c80cb1f2cfad0a8`,
+respectively.
+
+| Workload | Saved-baseline median | Optimized median | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP lossy 4:2:0 | 120.604 ms | 107.705 ms | -10.70% |
+| 11.2 MP lossy 4:2:0 | 540.200 ms | 482.485 ms | -10.68% |
+| 4.2 MP lossless 4:4:4 | 670.057 ms | 663.904 ms | -0.92% (near noise) |
+| 30.1 MP lossy 4:2:0 | 1,887.100 ms | 1,587.646 ms | -15.87% |
+| 4096x4096 CDEF-active | 1,587.873 ms | 1,360.671 ms | -14.31% |
+
+All raw output was byte-identical. Treat these numbers only as this same-build
+A/B; comparisons across machines, compilers, codec versions, or historical
+tables are not valid.
+
 ## Validation
 
 Run the complete suite without overriding `CFLAGS` on the `make test` command line:
