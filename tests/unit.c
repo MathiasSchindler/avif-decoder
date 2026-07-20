@@ -3316,6 +3316,10 @@ static int test_av1_dsp_inverse_dct4(void) {
         av1_dsp_inverse_dct4(input, actual);
         CHECK(avifdec_memory_compare(
             expected, actual, sizeof(expected)) == 0);
+        av1_dsp_inverse_dct4_clamped_c(input, expected, 18U, 16U);
+        av1_dsp_inverse_dct4_clamped(input, actual, 18U, 16U);
+        CHECK(avifdec_memory_compare(
+            expected, actual, sizeof(expected)) == 0);
     }
     return 0;
 }
@@ -3342,6 +3346,10 @@ static int test_av1_dsp_inverse_dct8(void) {
         }
         av1_dsp_inverse_dct8_c(input, expected);
         av1_dsp_inverse_dct8(input, actual);
+        CHECK(avifdec_memory_compare(
+            expected, actual, sizeof(expected)) == 0);
+        av1_dsp_inverse_dct8_clamped_c(input, expected, 18U, 16U);
+        av1_dsp_inverse_dct8_clamped(input, actual, 18U, 16U);
         CHECK(avifdec_memory_compare(
             expected, actual, sizeof(expected)) == 0);
     }
@@ -3372,6 +3380,44 @@ static int test_av1_dsp_inverse_dct16(void) {
         av1_dsp_inverse_dct16(input, actual);
         CHECK(avifdec_memory_compare(
             expected, actual, sizeof(expected)) == 0);
+    }
+    return 0;
+}
+
+static int test_av1_dsp_inverse_wht4(void) {
+    static const unsigned int clamp_ranges[] = { 16U, 18U };
+    int32_t input[16];
+    int32_t expected[16];
+    int32_t actual[16];
+    uint32_t random = 0xa4093822U;
+    size_t clamp_index;
+    unsigned int iteration;
+    size_t index;
+
+    for (clamp_index = 0U;
+         clamp_index < sizeof(clamp_ranges) / sizeof(clamp_ranges[0]);
+         ++clamp_index) {
+        for (iteration = 0U; iteration < 4096U; ++iteration) {
+            for (index = 0U; index < 16U; ++index) {
+                random = random * 1664525U + 1013904223U;
+                input[index] =
+                    (int32_t)(random & 0x1fffffU) - 0x100000;
+            }
+            if (iteration == 0U) {
+                for (index = 0U; index < 16U; ++index) input[index] = 0;
+            } else if (iteration == 1U) {
+                for (index = 0U; index < 16U; ++index) {
+                    input[index] =
+                        (index & 1U) != 0U ? -0x100000 : 0xfffff;
+                }
+            }
+            av1_dsp_inverse_wht4_c(
+                input, expected, clamp_ranges[clamp_index]);
+            av1_dsp_inverse_wht4(
+                input, actual, clamp_ranges[clamp_index]);
+            CHECK(avifdec_memory_compare(
+                expected, actual, sizeof(expected)) == 0);
+        }
     }
     return 0;
 }
@@ -4955,6 +5001,8 @@ int main(int argc, char **argv) {
     result = test_av1_dsp_inverse_dct8();
     if (result != 0) return result;
     result = test_av1_dsp_inverse_dct16();
+    if (result != 0) return result;
+    result = test_av1_dsp_inverse_wht4();
     if (result != 0) return result;
     result = test_av1_loop_filter();
     if (result != 0) return result;

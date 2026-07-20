@@ -268,19 +268,57 @@ allocated plane set: 7,372,800, 33,816,576, 25,165,824, and 90,316,800 bytes in
 corpus order. On the 11.2 MP and 30.1 MP cases, current same-build peak RSS fell
 by 32.13 MiB and 86.16 MiB, respectively.
 
+## ARM64 hotspot optimization pass
+
+A further profile-guided pass targeted the remaining CDEF, inverse-transform,
+loop-filter, and lossless entropy hotspots. The saved full-decoder executable
+above, SHA-256
+`72b2b3a8f5b58e42fa6aa6fd24c359e532e16cb1e38d69cb75df0fa6bf972168`,
+was the baseline. The integrated executable had SHA-256
+`b3374ccf5d8ee1f5a1edfb7b5ad6f15f99ba96b29033d3cac144c01f067da528`.
+
+Both executables used one worker and raw output to `/dev/null`. Each workload
+received one warm-up per executable. A schedule seeded with `20260720`
+interleaved the two executables for 9 rounds per corpus image and 7 rounds for
+the active-filter fixture.
+
+| Workload | Saved baseline | Hotspot optimized | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP, 8-bit 4:2:0 lossy | 100.519 ms | 68.158 ms | -32.19% |
+| 11.2 MP, 8-bit 4:2:0 lossy | 446.635 ms | 291.629 ms | -34.71% |
+| 4.2 MP, 8-bit 4:4:4 lossless | 635.063 ms | 548.779 ms | -13.59% |
+| 30.1 MP, 10-bit 4:2:0 lossy | 1,485.632 ms | 896.861 ms | -39.63% |
+| 4096x4096 active filters | 1,313.324 ms | 833.158 ms | -36.56% |
+
+The geometric-mean time reduction across the four-image corpus was 30.68%.
+Raw output was byte-identical between executables for all five inputs. The
+optimized executable grew from 442,256 to 458,912 bytes, an increase of 16,656
+bytes or 3.77%.
+
+The retained work adds ARM64 vector paths for interior CDEF blocks and
+four-adjacent-sample loop-filter edges, a 4x4 lossless WHT, and clamp-exact
+10-bit 4x4 and 8x8 DCT-DCT transforms. Boundary and partial filter blocks,
+12-bit filters, and unsupported transform types and sizes retain scalar
+fallbacks. Portable entropy improvements read common one- and two-byte
+normalization spans directly and specialize the exact four-symbol CDF update.
+The table is the integrated result; it is not an additive decomposition of
+the individual changes.
+
 ## Interpretation
 
 The original snapshot found ordinary lossy decoding approximately 8x to 12x
 slower at the null-trace core API and the lossless case approximately 2.2x
-slower. The current production CLI is 7.79x to 11.20x slower than
+slower. The earlier optimization-rerun CLI was 7.79x to 11.20x slower than
 libavif+dav1d on the three lossy still images and 2.28x slower on the lossless
-case. This is a substantial shift, but most pixel and entropy paths remain
-scalar.
+case. The later same-build passes substantially improve that executable, but
+did not rerun every third-party decoder; no updated cross-decoder ratio is
+inferred from those A/B results.
 
-The decoder now has ARM64 kernels for residual addition and common 8-bit
-inverse DCT sizes, plus optional native macOS workers. dav1d and libaom still
-have much broader architecture-specific coverage. Extending exact-tested DSP
-coverage, profiling larger entropy/coefficient operation boundaries, and
-reducing filter and workspace traffic remain the leading serial-performance
-opportunities. Measurements should not be compared across machines or codec
-versions without recording a new environment section.
+The decoder now has ARM64 kernels for residual addition, common 8- and 10-bit
+inverse transforms, CDEF, and loop filtering, plus optional native macOS
+workers. Portable entropy normalization and CDF work also improves every
+architecture. dav1d and libaom still have much broader architecture-specific
+coverage. Further optimization should begin with a new flat profile of this
+integrated executable rather than extrapolate from the hotspots addressed
+above. Measurements should not be compared across machines or codec versions
+without recording a new environment section.

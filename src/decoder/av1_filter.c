@@ -211,6 +211,348 @@ AvifdecStatus av1_loop_filter_sample(uint16_t *q0,
     return AVIFDEC_OK;
 }
 
+#if defined(AVIFDEC_AARCH64_NEON)
+typedef uint16_t Av1FilterU16x4
+    __attribute__((ext_vector_type(4), aligned(2)));
+typedef int16_t Av1FilterI16x4
+    __attribute__((ext_vector_type(4), aligned(2)));
+
+static Av1FilterU16x4 av1_filter_load4(const uint16_t *base,
+                                      ptrdiff_t lane_step) {
+    Av1FilterU16x4 value;
+
+    if (lane_step == 1) {
+        __builtin_memcpy(&value, base, sizeof(value));
+    } else {
+        value = (Av1FilterU16x4){
+            base[0], base[lane_step], base[2 * lane_step],
+            base[3 * lane_step]
+        };
+    }
+    return value;
+}
+
+static void av1_filter_store4(uint16_t *base,
+                              ptrdiff_t lane_step,
+                              Av1FilterU16x4 value) {
+    if (lane_step == 1) {
+        __builtin_memcpy(base, &value, sizeof(value));
+    } else {
+        base[0] = value[0];
+        base[lane_step] = value[1];
+        base[2 * lane_step] = value[2];
+        base[3 * lane_step] = value[3];
+    }
+}
+
+static Av1FilterU16x4 av1_filter_absdiff4(Av1FilterU16x4 first,
+                                         Av1FilterU16x4 second) {
+    return first > second ? first - second : second - first;
+}
+
+static Av1FilterU16x4 av1_filter_greater4(Av1FilterU16x4 first,
+                                         Av1FilterU16x4 second) {
+    return __builtin_convertvector(first > second, Av1FilterU16x4);
+}
+
+static Av1FilterU16x4 av1_filter_less_equal4(Av1FilterU16x4 first,
+                                            Av1FilterU16x4 second) {
+    return __builtin_convertvector(first <= second, Av1FilterU16x4);
+}
+
+static Av1FilterI16x4 av1_filter_clip4(Av1FilterI16x4 value,
+                                      int low,
+                                      int high) {
+    Av1FilterI16x4 minimum = (Av1FilterI16x4)low;
+    Av1FilterI16x4 maximum = (Av1FilterI16x4)high;
+
+    value = value < minimum ? minimum : value;
+    return value > maximum ? maximum : value;
+}
+
+static void av1_loop_filter_4_neon(uint16_t *q0,
+                                   ptrdiff_t lane_step,
+                                   ptrdiff_t tap_step,
+                                   unsigned int plane,
+                                   unsigned int filter_size,
+                                   unsigned int limit,
+                                   unsigned int blimit,
+                                   unsigned int thresh,
+                                   uint8_t bit_depth) {
+    Av1FilterU16x4 p[7];
+    Av1FilterU16x4 q[7];
+    Av1FilterU16x4 result_p[7];
+    Av1FilterU16x4 result_q[7];
+    Av1FilterU16x4 mask;
+    Av1FilterU16x4 flat = (Av1FilterU16x4)0xffffU;
+    Av1FilterU16x4 flat2 = (Av1FilterU16x4)0xffffU;
+    Av1FilterU16x4 hev;
+    unsigned int filter_length;
+    unsigned int shift = bit_depth - 8U;
+    unsigned int threshold_bd = 1U << shift;
+    unsigned int tap_count = filter_size == 4U ? 2U :
+                             (filter_size == 8U ? 4U : 7U);
+    unsigned int index;
+
+    for (index = 0U; index < tap_count; ++index) {
+        q[index] = av1_filter_load4(q0 + (ptrdiff_t)index * tap_step,
+                                    lane_step);
+        p[index] = av1_filter_load4(
+            q0 - (ptrdiff_t)(index + 1U) * tap_step, lane_step);
+        result_p[index] = p[index];
+        result_q[index] = q[index];
+    }
+    hev = av1_filter_greater4(
+              av1_filter_absdiff4(p[1], p[0]),
+              (Av1FilterU16x4)(thresh << shift)) |
+          av1_filter_greater4(
+              av1_filter_absdiff4(q[1], q[0]),
+              (Av1FilterU16x4)(thresh << shift));
+    filter_length = filter_size == 4U ? 4U :
+                    (plane == 0U ? filter_size : 6U);
+    mask = av1_filter_greater4(
+               av1_filter_absdiff4(p[1], p[0]),
+               (Av1FilterU16x4)(limit << shift)) |
+           av1_filter_greater4(
+               av1_filter_absdiff4(q[1], q[0]),
+               (Av1FilterU16x4)(limit << shift)) |
+           av1_filter_greater4(
+               2U * av1_filter_absdiff4(p[0], q[0]) +
+                   (av1_filter_absdiff4(p[1], q[1]) >> 1U),
+               (Av1FilterU16x4)(blimit << shift));
+    if (filter_length >= 6U) {
+        mask |= av1_filter_greater4(
+                    av1_filter_absdiff4(p[2], p[1]),
+                    (Av1FilterU16x4)(limit << shift)) |
+                av1_filter_greater4(
+                    av1_filter_absdiff4(q[2], q[1]),
+                    (Av1FilterU16x4)(limit << shift));
+    }
+    if (filter_length >= 8U) {
+        mask |= av1_filter_greater4(
+                    av1_filter_absdiff4(p[3], p[2]),
+                    (Av1FilterU16x4)(limit << shift)) |
+                av1_filter_greater4(
+                    av1_filter_absdiff4(q[3], q[2]),
+                    (Av1FilterU16x4)(limit << shift));
+    }
+    if (mask[0] && mask[1] && mask[2] && mask[3]) return;
+    if (filter_size >= 8U) {
+        flat &= av1_filter_less_equal4(
+            av1_filter_absdiff4(p[1], p[0]),
+            (Av1FilterU16x4)threshold_bd);
+        flat &= av1_filter_less_equal4(
+            av1_filter_absdiff4(q[1], q[0]),
+            (Av1FilterU16x4)threshold_bd);
+        flat &= av1_filter_less_equal4(
+            av1_filter_absdiff4(p[2], p[0]),
+            (Av1FilterU16x4)threshold_bd);
+        flat &= av1_filter_less_equal4(
+            av1_filter_absdiff4(q[2], q[0]),
+            (Av1FilterU16x4)threshold_bd);
+        if (filter_length >= 8U) {
+            flat &= av1_filter_less_equal4(
+                av1_filter_absdiff4(p[3], p[0]),
+                (Av1FilterU16x4)threshold_bd);
+            flat &= av1_filter_less_equal4(
+                av1_filter_absdiff4(q[3], q[0]),
+                (Av1FilterU16x4)threshold_bd);
+        }
+    }
+    if (filter_size >= 16U) {
+        for (index = 4U; index < 7U; ++index) {
+            flat2 &= av1_filter_less_equal4(
+                av1_filter_absdiff4(p[index], p[0]),
+                (Av1FilterU16x4)threshold_bd);
+            flat2 &= av1_filter_less_equal4(
+                av1_filter_absdiff4(q[index], q[0]),
+                (Av1FilterU16x4)threshold_bd);
+        }
+    }
+    {
+        int offset = 0x80 << shift;
+        int low = -(1 << (bit_depth - 1U));
+        int high = (1 << (bit_depth - 1U)) - 1;
+        Av1FilterI16x4 ps1 =
+            __builtin_convertvector(p[1], Av1FilterI16x4) -
+            (Av1FilterI16x4)offset;
+        Av1FilterI16x4 ps0 =
+            __builtin_convertvector(p[0], Av1FilterI16x4) -
+            (Av1FilterI16x4)offset;
+        Av1FilterI16x4 qs0 =
+            __builtin_convertvector(q[0], Av1FilterI16x4) -
+            (Av1FilterI16x4)offset;
+        Av1FilterI16x4 qs1 =
+            __builtin_convertvector(q[1], Av1FilterI16x4) -
+            (Av1FilterI16x4)offset;
+        Av1FilterI16x4 filter = hev ?
+            av1_filter_clip4(ps1 - qs1, low, high) :
+            (Av1FilterI16x4)0;
+        Av1FilterI16x4 filter1;
+        Av1FilterI16x4 filter2;
+        Av1FilterI16x4 secondary;
+        Av1FilterU16x4 active = ~mask;
+
+        filter = av1_filter_clip4(filter + 3 * (qs0 - ps0), low, high);
+        filter1 = av1_filter_clip4(filter + 4, low, high) >> 3U;
+        filter2 = av1_filter_clip4(filter + 3, low, high) >> 3U;
+        secondary = (filter1 + 1) >> 1U;
+        if (filter_size != 4U) active &= ~flat;
+        result_q[0] = active ?
+            __builtin_convertvector(
+                av1_filter_clip4(qs0 - filter1, low, high) +
+                    (Av1FilterI16x4)offset,
+                Av1FilterU16x4) :
+            result_q[0];
+        result_p[0] = active ?
+            __builtin_convertvector(
+                av1_filter_clip4(ps0 + filter2, low, high) +
+                    (Av1FilterI16x4)offset,
+                Av1FilterU16x4) :
+            result_p[0];
+        active &= ~hev;
+        result_q[1] = active ?
+            __builtin_convertvector(
+                av1_filter_clip4(qs1 - secondary, low, high) +
+                    (Av1FilterI16x4)offset,
+                Av1FilterU16x4) :
+            result_q[1];
+        result_p[1] = active ?
+            __builtin_convertvector(
+                av1_filter_clip4(ps1 + secondary, low, high) +
+                    (Av1FilterI16x4)offset,
+                Av1FilterU16x4) :
+            result_p[1];
+    }
+    if (filter_size != 4U) {
+        Av1FilterU16x4 wide = ~mask & flat;
+
+        if (plane != 0U) {
+            result_p[1] = wide ?
+                (3U * p[2] + 2U * p[1] + 2U * p[0] + q[0] + 4U) >>
+                    3U :
+                result_p[1];
+            result_p[0] = wide ?
+                (p[2] + 2U * p[1] + 2U * p[0] + 2U * q[0] + q[1] +
+                    4U) >> 3U :
+                result_p[0];
+            result_q[0] = wide ?
+                (p[1] + 2U * p[0] + 2U * q[0] + 2U * q[1] + q[2] +
+                    4U) >> 3U :
+                result_q[0];
+            result_q[1] = wide ?
+                (p[0] + 2U * q[0] + 2U * q[1] + 3U * q[2] + 4U) >>
+                    3U :
+                result_q[1];
+        } else {
+            Av1FilterU16x4 wide8 =
+                filter_size == 16U ? wide & ~flat2 : wide;
+
+            result_p[2] = wide8 ?
+                (3U * p[3] + 2U * p[2] + p[1] + p[0] + q[0] + 4U) >>
+                    3U :
+                result_p[2];
+            result_p[1] = wide8 ?
+                (2U * p[3] + p[2] + 2U * p[1] + p[0] + q[0] + q[1] +
+                    4U) >> 3U :
+                result_p[1];
+            result_p[0] = wide8 ?
+                (p[3] + p[2] + p[1] + 2U * p[0] + q[0] + q[1] +
+                    q[2] + 4U) >> 3U :
+                result_p[0];
+            result_q[0] = wide8 ?
+                (p[2] + p[1] + p[0] + 2U * q[0] + q[1] + q[2] +
+                    q[3] + 4U) >> 3U :
+                result_q[0];
+            result_q[1] = wide8 ?
+                (p[1] + p[0] + q[0] + 2U * q[1] + q[2] +
+                    2U * q[3] + 4U) >> 3U :
+                result_q[1];
+            result_q[2] = wide8 ?
+                (p[0] + q[0] + q[1] + 2U * q[2] + 3U * q[3] + 4U) >>
+                    3U :
+                result_q[2];
+            if (filter_size == 16U) {
+                Av1FilterU16x4 wide16 = wide & flat2;
+
+                result_p[5] = wide16 ?
+                    (7U * p[6] + 2U * p[5] + 2U * p[4] + p[3] + p[2] +
+                        p[1] + p[0] + q[0] + 8U) >> 4U :
+                    result_p[5];
+                result_p[4] = wide16 ?
+                    (5U * p[6] + 2U * p[5] + 2U * p[4] + 2U * p[3] +
+                        p[2] + p[1] + p[0] + q[0] + q[1] + 8U) >> 4U :
+                    result_p[4];
+                result_p[3] = wide16 ?
+                    (4U * p[6] + p[5] + 2U * p[4] + 2U * p[3] +
+                        2U * p[2] + p[1] + p[0] + q[0] + q[1] + q[2] +
+                        8U) >> 4U :
+                    result_p[3];
+                result_p[2] = wide16 ?
+                    (3U * p[6] + p[5] + p[4] + 2U * p[3] + 2U * p[2] +
+                        2U * p[1] + p[0] + q[0] + q[1] + q[2] + q[3] +
+                        8U) >> 4U :
+                    result_p[2];
+                result_p[1] = wide16 ?
+                    (2U * p[6] + p[5] + p[4] + p[3] + 2U * p[2] +
+                        2U * p[1] + 2U * p[0] + q[0] + q[1] + q[2] +
+                        q[3] + q[4] + 8U) >> 4U :
+                    result_p[1];
+                result_p[0] = wide16 ?
+                    (p[6] + p[5] + p[4] + p[3] + p[2] + 2U * p[1] +
+                        2U * p[0] + 2U * q[0] + q[1] + q[2] + q[3] +
+                        q[4] + q[5] + 8U) >> 4U :
+                    result_p[0];
+                result_q[0] = wide16 ?
+                    (p[5] + p[4] + p[3] + p[2] + p[1] + 2U * p[0] +
+                        2U * q[0] + 2U * q[1] + q[2] + q[3] + q[4] +
+                        q[5] + q[6] + 8U) >> 4U :
+                    result_q[0];
+                result_q[1] = wide16 ?
+                    (p[4] + p[3] + p[2] + p[1] + p[0] + 2U * q[0] +
+                        2U * q[1] + 2U * q[2] + q[3] + q[4] + q[5] +
+                        2U * q[6] + 8U) >> 4U :
+                    result_q[1];
+                result_q[2] = wide16 ?
+                    (p[3] + p[2] + p[1] + p[0] + q[0] + 2U * q[1] +
+                        2U * q[2] + 2U * q[3] + q[4] + q[5] +
+                        3U * q[6] + 8U) >> 4U :
+                    result_q[2];
+                result_q[3] = wide16 ?
+                    (p[2] + p[1] + p[0] + q[0] + q[1] + 2U * q[2] +
+                        2U * q[3] + 2U * q[4] + q[5] + 4U * q[6] +
+                        8U) >> 4U :
+                    result_q[3];
+                result_q[4] = wide16 ?
+                    (p[1] + p[0] + q[0] + q[1] + q[2] + 2U * q[3] +
+                        2U * q[4] + 2U * q[5] + 5U * q[6] + 8U) >> 4U :
+                    result_q[4];
+                result_q[5] = wide16 ?
+                    (p[0] + q[0] + q[1] + q[2] + q[3] + 2U * q[4] +
+                        2U * q[5] + 7U * q[6] + 8U) >> 4U :
+                    result_q[5];
+            }
+        }
+    }
+    {
+        unsigned int p_writes = filter_size == 16U ? 6U :
+                                (filter_size == 8U && plane == 0U ? 3U : 2U);
+        unsigned int q_writes = filter_size == 16U ? 6U :
+                                (filter_size == 8U && plane == 0U ? 3U : 2U);
+
+        for (index = 0U; index < p_writes; ++index) {
+            av1_filter_store4(q0 - (ptrdiff_t)(index + 1U) * tap_step,
+                              lane_step, result_p[index]);
+        }
+        for (index = 0U; index < q_writes; ++index) {
+            av1_filter_store4(q0 + (ptrdiff_t)index * tap_step,
+                              lane_step, result_q[index]);
+        }
+    }
+}
+
+#endif
+
 static const Av1BlockCell *av1_filter_cell(const Av1BlockState *blocks,
                                             uint32_t row,
                                             uint32_t column) {
@@ -383,6 +725,36 @@ static AvifdecStatus av1_filter_apply_edge(Av1FramePlanes *planes,
     ptrdiff_t step = pass == 0U ? 1 : (ptrdiff_t)planes->stride[plane];
     unsigned int index;
 
+#if defined(AVIFDEC_AARCH64_NEON)
+    {
+        unsigned int tap_count = plan->filter_size == 4U ? 2U :
+                                 (plan->filter_size == 8U ? 4U : 7U);
+        int interior = pass == 0U
+            ? plan->y_plane <= planes->height[plane] &&
+              planes->height[plane] - plan->y_plane >= 4U &&
+              plan->x_plane <= planes->width[plane] &&
+              plan->x_plane >= tap_count &&
+              planes->width[plane] - plan->x_plane >= tap_count
+            : plan->x_plane <= planes->width[plane] &&
+              planes->width[plane] - plan->x_plane >= 4U &&
+              plan->y_plane <= planes->height[plane] &&
+              plan->y_plane >= tap_count &&
+              planes->height[plane] - plan->y_plane >= tap_count;
+
+        if (params->bit_depth <= 10U && interior) {
+            uint16_t *sample = planes->data[plane] +
+                (size_t)plan->y_plane * planes->stride[plane] +
+                plan->x_plane;
+            ptrdiff_t lane_step = pass == 0U
+                ? (ptrdiff_t)planes->stride[plane] : 1;
+
+            av1_loop_filter_4_neon(
+                sample, lane_step, step, plane, plan->filter_size,
+                plan->limit, plan->blimit, plan->thresh, params->bit_depth);
+            return AVIFDEC_OK;
+        }
+    }
+#endif
     for (index = 0U; index < 4U; ++index) {
         uint32_t sample_x = plan->x_plane + dy * index;
         uint32_t sample_y = plan->y_plane + dx * index;

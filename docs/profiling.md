@@ -685,6 +685,52 @@ measured neutral and were rejected. Counters also found zero inter blocks in the
 still-image corpus, so time was not misattributed to inter prediction; inter
 optimization requires a representative inter-frame workload.
 
+## ARM64 hotspot kernels and entropy normalization
+
+The next pass directly targeted those remaining flat-profile hotspots:
+
+- Interior 8- and 10-bit CDEF blocks use ARM64 vector kernels processing eight
+  or four samples together. The existing full-neighborhood proof remains the
+  dispatch guard; boundary, partial, and 12-bit blocks retain the scalar path.
+- Interior loop-filter edges process four adjacent samples together on ARM64
+  for 8- and 10-bit 4-, 8-, and 16-sample filters. The vertical and horizontal
+  phase ordering is unchanged. Boundary edges and 12-bit samples remain scalar.
+- Reconstruction dispatches the 4x4 lossless WHT and clamp-exact 10-bit 4x4
+  and 8x8 DCT-DCT transforms to ARM64 implementations. The portable routines
+  remain the reference and fallback.
+- Entropy normalization directly extracts the common contiguous one- and
+  two-byte spans, while preserving the existing raw-bit path for split spans
+  and truncation. Adaptive CDF updates use an exact unrolled four-symbol case.
+
+Implementation-time differential harnesses compared 188,160 CDEF cases,
+180,604 loop-filter cases, 640,044 transform cases, 200,000 CDF updates, and
+30,000 contiguous, multi-span, and truncated entropy streams against their
+scalar or generic references. These focused harnesses were temporary and their
+kernel timings are not treated as durable benchmark evidence. Existing unit
+coverage retains scalar-versus-dispatched transform checks, including the
+10-bit DCT clamp pair, WHT clamp ranges, and randomized and extreme inputs.
+
+The integrated A/B used the saved executable with SHA-256
+`72b2b3a8f5b58e42fa6aa6fd24c359e532e16cb1e38d69cb75df0fa6bf972168`
+and an optimized executable with SHA-256
+`b3374ccf5d8ee1f5a1edfb7b5ad6f15f99ba96b29033d3cac144c01f067da528`.
+Both used one worker and raw output to `/dev/null`. After one warm-up, a
+schedule seeded with `20260720` interleaved 9 rounds per corpus image and 7
+rounds for the regenerated active-filter fixture.
+
+| Workload | Saved baseline | Hotspot optimized | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP lossy 4:2:0 | 100.519 ms | 68.158 ms | -32.19% |
+| 11.2 MP lossy 4:2:0 | 446.635 ms | 291.629 ms | -34.71% |
+| 4.2 MP lossless 4:4:4 | 635.063 ms | 548.779 ms | -13.59% |
+| 30.1 MP lossy 4:2:0 | 1,485.632 ms | 896.861 ms | -39.63% |
+| 4096x4096 active filters | 1,313.324 ms | 833.158 ms | -36.56% |
+
+The four corpus cases improved by a 30.68% geometric mean. All five raw outputs
+were byte-identical between executables. The optimized ARM64 executable grew
+from 442,256 to 458,912 bytes, or 16,656 bytes (3.77%). These results are the
+combined pass and must not be added to isolated implementation-time results.
+
 ## Validation
 
 Run the complete suite without overriding `CFLAGS` on the `make test` command line:

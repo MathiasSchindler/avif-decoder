@@ -2,6 +2,102 @@
 #include "av1_tile_internal.h"
 #include "base.h"
 
+#if defined(AVIFDEC_AARCH64_NEON)
+typedef int16_t Av1CdefI16x8
+    __attribute__((ext_vector_type(8), aligned(2)));
+typedef int16_t Av1CdefI16x4
+    __attribute__((ext_vector_type(4), aligned(2)));
+
+#define AV1_CDEF_DEFINE_NEON_KERNEL(SUFFIX, VECTOR)                           \
+static VECTOR av1_cdef_constrain_neon_##SUFFIX(                              \
+    VECTOR difference, int16_t threshold, unsigned int adjustment) {         \
+    VECTOR zero = (VECTOR){ 0 };                                              \
+    VECTOR magnitude = difference < zero ? -difference : difference;         \
+    VECTOR decay = adjustment >= 15U ? zero : magnitude >> adjustment;        \
+    VECTOR constrained = (VECTOR)threshold - decay;                           \
+    constrained = constrained < zero ? zero : constrained;                    \
+    constrained = constrained > magnitude ? magnitude : constrained;          \
+    return difference < zero ? -constrained : constrained;                    \
+}                                                                             \
+                                                                              \
+static VECTOR av1_cdef_load_neon_##SUFFIX(const uint16_t *source) {           \
+    VECTOR value;                                                             \
+    __builtin_memcpy(&value, source, sizeof(value));                           \
+    return value;                                                             \
+}                                                                             \
+                                                                              \
+static void av1_cdef_store_neon_##SUFFIX(uint16_t *destination,               \
+                                          VECTOR value) {                     \
+    __builtin_memcpy(destination, &value, sizeof(value));                      \
+}                                                                             \
+                                                                              \
+static void av1_cdef_filter_interior_neon_##SUFFIX(                           \
+    uint16_t *destination, size_t destination_stride,                         \
+    const uint16_t *source, size_t source_stride, unsigned int height,         \
+    const ptrdiff_t primary_offsets[2],                                        \
+    const ptrdiff_t secondary_offsets[2][2],                                  \
+    unsigned int primary_strength, unsigned int secondary_strength,           \
+    unsigned int primary_adjustment, unsigned int secondary_adjustment,        \
+    const unsigned int primary_taps[2], int clipping_required) {               \
+    unsigned int row;                                                         \
+    for (row = 0U; row < height; ++row) {                                     \
+        const uint16_t *center_pointer = source + row * source_stride;         \
+        VECTOR center = av1_cdef_load_neon_##SUFFIX(center_pointer);           \
+        VECTOR sum = (VECTOR){ 0 };                                            \
+        VECTOR minimum = center;                                               \
+        VECTOR maximum = center;                                               \
+        VECTOR sample;                                                         \
+        VECTOR constrained;                                                    \
+        ptrdiff_t offset;                                                      \
+        unsigned int distance;                                                 \
+        unsigned int secondary_index;                                          \
+        int sign;                                                              \
+        for (distance = 0U; distance < 2U; ++distance) {                       \
+            for (sign = -1; sign <= 1; sign += 2) {                           \
+                offset = (ptrdiff_t)sign * primary_offsets[distance];          \
+                sample = av1_cdef_load_neon_##SUFFIX(center_pointer + offset); \
+                constrained = av1_cdef_constrain_neon_##SUFFIX(                \
+                    sample - center, (int16_t)primary_strength,                \
+                    primary_adjustment);                                       \
+                sum += constrained * (int16_t)primary_taps[distance];          \
+                if (clipping_required) {                                       \
+                    minimum = sample < minimum ? sample : minimum;             \
+                    maximum = sample > maximum ? sample : maximum;             \
+                }                                                             \
+                for (secondary_index = 0U; secondary_index < 2U;              \
+                     ++secondary_index) {                                      \
+                    offset = (ptrdiff_t)sign *                                 \
+                        secondary_offsets[secondary_index][distance];          \
+                    sample = av1_cdef_load_neon_##SUFFIX(                      \
+                        center_pointer + offset);                              \
+                    constrained = av1_cdef_constrain_neon_##SUFFIX(            \
+                        sample - center, (int16_t)secondary_strength,          \
+                        secondary_adjustment);                                 \
+                    sum += constrained * (int16_t)(2U - distance);             \
+                    if (clipping_required) {                                   \
+                        minimum = sample < minimum ? sample : minimum;         \
+                        maximum = sample > maximum ? sample : maximum;         \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+        }                                                                     \
+        center += (sum + (VECTOR)8 -                                           \
+                   ((sum < (VECTOR){ 0 }) & (VECTOR)1)) >> 4;                  \
+        if (clipping_required) {                                               \
+            center = center < minimum ? minimum : center;                      \
+            center = center > maximum ? maximum : center;                      \
+        }                                                                     \
+        av1_cdef_store_neon_##SUFFIX(                                          \
+            destination + row * destination_stride, center);                  \
+    }                                                                         \
+}
+
+AV1_CDEF_DEFINE_NEON_KERNEL(x8, Av1CdefI16x8)
+AV1_CDEF_DEFINE_NEON_KERNEL(x4, Av1CdefI16x4)
+
+#undef AV1_CDEF_DEFINE_NEON_KERNEL
+#endif
+
 static const uint8_t av1_cdef_uv_direction[2][2][8] = {
     { { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U },
       { 1U, 2U, 2U, 2U, 3U, 4U, 6U, 0U } },
@@ -255,6 +351,38 @@ static AvifdecStatus av1_cdef_filter_block(
                 ++secondary_index;
             }
         }
+#if defined(AVIFDEC_AARCH64_NEON)
+        if (params->bit_depth <= 10U &&
+            x0 + width <= output->width[plane] &&
+            y0 + height <= output->height[plane]) {
+            uint16_t *destination = output->data[plane] +
+                (size_t)y0 * output->stride[plane] + x0;
+            const uint16_t *source = input->data[plane] +
+                (size_t)y0 * input->stride[plane] + x0;
+            if (width == 8U) {
+                av1_cdef_filter_interior_neon_x8(
+                    destination, output->stride[plane],
+                    source, input->stride[plane], height,
+                    primary_offsets, secondary_offsets,
+                    primary_strength, secondary_strength,
+                    primary_damping_adjustment,
+                    secondary_damping_adjustment,
+                    primary_taps[tap_set], clipping_required);
+                return AVIFDEC_OK;
+            }
+            if (width == 4U) {
+                av1_cdef_filter_interior_neon_x4(
+                    destination, output->stride[plane],
+                    source, input->stride[plane], height,
+                    primary_offsets, secondary_offsets,
+                    primary_strength, secondary_strength,
+                    primary_damping_adjustment,
+                    secondary_damping_adjustment,
+                    primary_taps[tap_set], clipping_required);
+                return AVIFDEC_OK;
+            }
+        }
+#endif
         for (row = 0U; row < height; ++row) {
             for (column = 0U; column < width; ++column) {
                 uint32_t destination_x = x0 + column;

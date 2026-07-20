@@ -68,6 +68,33 @@ static uint32_t av1_symbol_raw_bits(Av1SymbolDecoder *decoder, unsigned int coun
     return value;
 }
 
+static inline __attribute__((always_inline)) uint32_t av1_symbol_normalization_bits(
+    Av1SymbolDecoder *decoder,
+    unsigned int count) {
+    if (count != 0U && decoder->contiguous_data != 0) {
+        size_t position = decoder->bit_position;
+        unsigned int leading = (unsigned int)(position & 7U);
+
+        if (count <= 8U - leading) {
+            unsigned int shift = 8U - leading - count;
+            uint32_t value = decoder->contiguous_data[position >> 3U];
+
+            decoder->bit_position = position + count;
+            return (value >> shift) & ((1U << count) - 1U);
+        }
+        if (count <= 16U - leading) {
+            const unsigned char *data =
+                decoder->contiguous_data + (position >> 3U);
+            unsigned int shift = 16U - leading - count;
+            uint32_t value = ((uint32_t)data[0] << 8U) | data[1];
+
+            decoder->bit_position = position + count;
+            return (value >> shift) & ((1U << count) - 1U);
+        }
+    }
+    return count != 0U ? av1_symbol_raw_bits(decoder, count) : 0U;
+}
+
 static unsigned int av1_symbol_floor_log2(uint32_t value) {
     return 31U - (unsigned int)__builtin_clz(value);
 }
@@ -152,7 +179,7 @@ static uint32_t av1_symbol_read_bool(Av1SymbolDecoder *decoder) {
         ? (unsigned int)(decoder->max_bits < (int64_t)bits
             ? decoder->max_bits : (int64_t)bits)
         : 0U;
-    new_data = av1_symbol_raw_bits(decoder, read_bits);
+    new_data = av1_symbol_normalization_bits(decoder, read_bits);
     decoder->value = (new_data << (bits - read_bits)) ^
         (((decoder->value + 1U) << bits) - 1U);
     decoder->max_bits -= bits;
@@ -208,7 +235,7 @@ uint32_t av1_symbol_read(Av1SymbolDecoder *decoder, uint16_t *cdf, size_t symbol
                 ? (unsigned int)(decoder->max_bits < (int64_t)bits
                                  ? decoder->max_bits : (int64_t)bits)
                 : 0U;
-    new_data = av1_symbol_raw_bits(decoder, read_bits);
+    new_data = av1_symbol_normalization_bits(decoder, read_bits);
     decoder->value = (new_data << (bits - read_bits)) ^
                      (((decoder->value + 1U) << bits) - 1U);
     decoder->max_bits -= bits;

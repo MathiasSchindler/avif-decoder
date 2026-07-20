@@ -685,9 +685,21 @@ AvifdecStatus av1_recon_inverse_transform(const int32_t *dequantized,
         (lossless != 0U && tx_size != AV1_TX_4X4)) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
+    row_clamp = bit_depth + 8U;
+    column_clamp = bit_depth + 6U < 16U ? 16U : bit_depth + 6U;
+    if (tx_size == AV1_TX_4X4 && lossless != 0U) {
+        av1_dsp_inverse_wht4(dequantized, residual, column_clamp);
+        return AVIFDEC_OK;
+    }
     if (tx_size == AV1_TX_4X4 && tx_type == AV1_TX_DCT_DCT &&
         bit_depth == 8U && lossless == 0U) {
         av1_dsp_inverse_dct4(dequantized, residual);
+        return AVIFDEC_OK;
+    }
+    if (tx_size == AV1_TX_4X4 && tx_type == AV1_TX_DCT_DCT &&
+        bit_depth == 10U && lossless == 0U) {
+        av1_dsp_inverse_dct4_clamped(
+            dequantized, residual, row_clamp, column_clamp);
         return AVIFDEC_OK;
     }
     if (tx_size == AV1_TX_8X8 && tx_type == AV1_TX_DCT_DCT &&
@@ -695,13 +707,17 @@ AvifdecStatus av1_recon_inverse_transform(const int32_t *dequantized,
         av1_dsp_inverse_dct8(dequantized, residual);
         return AVIFDEC_OK;
     }
+    if (tx_size == AV1_TX_8X8 && tx_type == AV1_TX_DCT_DCT &&
+        bit_depth == 10U && lossless == 0U) {
+        av1_dsp_inverse_dct8_clamped(
+            dequantized, residual, row_clamp, column_clamp);
+        return AVIFDEC_OK;
+    }
     if (tx_size == AV1_TX_16X16 && tx_type == AV1_TX_DCT_DCT &&
         bit_depth == 8U && lossless == 0U) {
         av1_dsp_inverse_dct16(dequantized, residual);
         return AVIFDEC_OK;
     }
-    row_clamp = bit_depth + 8U;
-    column_clamp = bit_depth + 6U < 16U ? 16U : bit_depth + 6U;
     row_shift = lossless != 0U ? 0U : av1_transform_row_shift[tx_size];
     for (row = 0U; row < height; ++row) {
         for (column = 0U; column < width; ++column) {

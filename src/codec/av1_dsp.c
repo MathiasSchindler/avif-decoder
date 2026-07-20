@@ -15,15 +15,18 @@ static int32_t av1_dsp_round2(int64_t value, unsigned int bits) {
         value + ((int64_t)1U << (bits - 1U)), bits);
 }
 
-static int32_t av1_dsp_clip16(int64_t value) {
-    if (value < -32768) return -32768;
-    if (value > 32767) return 32767;
+static int32_t av1_dsp_clip_signed(int64_t value,
+                                   unsigned int clamp_range) {
+    int32_t limit = (int32_t)1 << (clamp_range - 1U);
+    if (value < -limit) return -limit;
+    if (value > limit - 1) return limit - 1;
     return (int32_t)value;
 }
 
 static void av1_dsp_inverse_dct4_1d_c(
     const int32_t *input,
-    int32_t *output) {
+    int32_t *output,
+    unsigned int clamp_range) {
     int32_t first = av1_dsp_round2(
         (int64_t)(input[0] + input[2]) * 2896, 12U);
     int32_t second = av1_dsp_round2(
@@ -35,13 +38,17 @@ static void av1_dsp_inverse_dct4_1d_c(
         (int64_t)input[1] * 3784 + (int64_t)input[3] * 1567,
         12U);
 
-    output[0] = av1_dsp_clip16((int64_t)first + fourth);
-    output[1] = av1_dsp_clip16((int64_t)second + third);
-    output[2] = av1_dsp_clip16((int64_t)second - third);
-    output[3] = av1_dsp_clip16((int64_t)first - fourth);
+    output[0] = av1_dsp_clip_signed((int64_t)first + fourth, clamp_range);
+    output[1] = av1_dsp_clip_signed((int64_t)second + third, clamp_range);
+    output[2] = av1_dsp_clip_signed((int64_t)second - third, clamp_range);
+    output[3] = av1_dsp_clip_signed((int64_t)first - fourth, clamp_range);
 }
 
-void av1_dsp_inverse_dct4_c(const int32_t *input, int32_t *output) {
+void av1_dsp_inverse_dct4_clamped_c(
+    const int32_t *input,
+    int32_t *output,
+    unsigned int row_clamp,
+    unsigned int column_clamp) {
     int32_t intermediate[16];
     int32_t column_input[4];
     int32_t column_output[4];
@@ -50,18 +57,27 @@ void av1_dsp_inverse_dct4_c(const int32_t *input, int32_t *output) {
 
     for (row = 0U; row < 4U; ++row) {
         av1_dsp_inverse_dct4_1d_c(
-            input + row * 4U, intermediate + row * 4U);
+            input + row * 4U, intermediate + row * 4U, row_clamp);
+        for (column = 0U; column < 4U; ++column) {
+            intermediate[row * 4U + column] = av1_dsp_clip_signed(
+                intermediate[row * 4U + column], column_clamp);
+        }
     }
     for (column = 0U; column < 4U; ++column) {
         for (row = 0U; row < 4U; ++row) {
             column_input[row] = intermediate[row * 4U + column];
         }
-        av1_dsp_inverse_dct4_1d_c(column_input, column_output);
+        av1_dsp_inverse_dct4_1d_c(
+            column_input, column_output, column_clamp);
         for (row = 0U; row < 4U; ++row) {
             output[row * 4U + column] =
                 av1_dsp_round2(column_output[row], 4U);
         }
     }
+}
+
+void av1_dsp_inverse_dct4_c(const int32_t *input, int32_t *output) {
+    av1_dsp_inverse_dct4_clamped_c(input, output, 16U, 16U);
 }
 
 static void av1_dsp_butterfly_c(
@@ -82,21 +98,23 @@ static void av1_dsp_butterfly_c(
 static void av1_dsp_hadamard_c(
     int32_t *left,
     int32_t *right,
-    unsigned int flip) {
+    unsigned int flip,
+    unsigned int clamp_range) {
     int32_t first = *left;
     int32_t second = *right;
 
-    *left = av1_dsp_clip16(
+    *left = av1_dsp_clip_signed(
         flip != 0U ? (int64_t)second - first
-                   : (int64_t)first + second);
-    *right = av1_dsp_clip16(
+                   : (int64_t)first + second, clamp_range);
+    *right = av1_dsp_clip_signed(
         flip != 0U ? (int64_t)second + first
-                   : (int64_t)first - second);
+                   : (int64_t)first - second, clamp_range);
 }
 
 static void av1_dsp_inverse_dct8_1d_c(
     const int32_t *input,
-    int32_t *output) {
+    int32_t *output,
+    unsigned int clamp_range) {
     unsigned int index;
 
     output[0] = input[0];
@@ -111,17 +129,22 @@ static void av1_dsp_inverse_dct8_1d_c(
     av1_dsp_butterfly_c(&output[5], &output[6], 3406, 2276, 0U);
     av1_dsp_butterfly_c(&output[0], &output[1], 2896, 2896, 1U);
     av1_dsp_butterfly_c(&output[2], &output[3], 1567, 3784, 0U);
-    av1_dsp_hadamard_c(&output[4], &output[5], 0U);
-    av1_dsp_hadamard_c(&output[6], &output[7], 1U);
-    av1_dsp_hadamard_c(&output[0], &output[3], 0U);
-    av1_dsp_hadamard_c(&output[1], &output[2], 0U);
+    av1_dsp_hadamard_c(&output[4], &output[5], 0U, clamp_range);
+    av1_dsp_hadamard_c(&output[6], &output[7], 1U, clamp_range);
+    av1_dsp_hadamard_c(&output[0], &output[3], 0U, clamp_range);
+    av1_dsp_hadamard_c(&output[1], &output[2], 0U, clamp_range);
     av1_dsp_butterfly_c(&output[6], &output[5], 2896, 2896, 1U);
     for (index = 0U; index < 4U; ++index) {
-        av1_dsp_hadamard_c(&output[index], &output[7U - index], 0U);
+        av1_dsp_hadamard_c(
+            &output[index], &output[7U - index], 0U, clamp_range);
     }
 }
 
-void av1_dsp_inverse_dct8_c(const int32_t *input, int32_t *output) {
+void av1_dsp_inverse_dct8_clamped_c(
+    const int32_t *input,
+    int32_t *output,
+    unsigned int row_clamp,
+    unsigned int column_clamp) {
     int32_t intermediate[64];
     int32_t column_input[8];
     int32_t column_output[8];
@@ -130,22 +153,29 @@ void av1_dsp_inverse_dct8_c(const int32_t *input, int32_t *output) {
 
     for (row = 0U; row < 8U; ++row) {
         av1_dsp_inverse_dct8_1d_c(
-            input + row * 8U, intermediate + row * 8U);
+            input + row * 8U, intermediate + row * 8U, row_clamp);
         for (column = 0U; column < 8U; ++column) {
-            intermediate[row * 8U + column] = av1_dsp_round2(
-                intermediate[row * 8U + column], 1U);
+            intermediate[row * 8U + column] = av1_dsp_clip_signed(
+                av1_dsp_round2(
+                    intermediate[row * 8U + column], 1U),
+                column_clamp);
         }
     }
     for (column = 0U; column < 8U; ++column) {
         for (row = 0U; row < 8U; ++row) {
             column_input[row] = intermediate[row * 8U + column];
         }
-        av1_dsp_inverse_dct8_1d_c(column_input, column_output);
+        av1_dsp_inverse_dct8_1d_c(
+            column_input, column_output, column_clamp);
         for (row = 0U; row < 8U; ++row) {
             output[row * 8U + column] =
                 av1_dsp_round2(column_output[row], 4U);
         }
     }
+}
+
+void av1_dsp_inverse_dct8_c(const int32_t *input, int32_t *output) {
+    av1_dsp_inverse_dct8_clamped_c(input, output, 16U, 16U);
 }
 
 static void av1_dsp_inverse_dct16_1d_c(
@@ -166,30 +196,30 @@ static void av1_dsp_inverse_dct16_1d_c(
     av1_dsp_butterfly_c(&output[11], &output[12], 3920, 1189, 0U);
     av1_dsp_butterfly_c(&output[4], &output[7], 799, 4017, 0U);
     av1_dsp_butterfly_c(&output[5], &output[6], 3406, 2276, 0U);
-    av1_dsp_hadamard_c(&output[8], &output[9], 0U);
-    av1_dsp_hadamard_c(&output[10], &output[11], 1U);
-    av1_dsp_hadamard_c(&output[12], &output[13], 0U);
-    av1_dsp_hadamard_c(&output[14], &output[15], 1U);
+    av1_dsp_hadamard_c(&output[8], &output[9], 0U, 16U);
+    av1_dsp_hadamard_c(&output[10], &output[11], 1U, 16U);
+    av1_dsp_hadamard_c(&output[12], &output[13], 0U, 16U);
+    av1_dsp_hadamard_c(&output[14], &output[15], 1U, 16U);
     av1_dsp_butterfly_c(&output[0], &output[1], 2896, 2896, 1U);
     av1_dsp_butterfly_c(&output[2], &output[3], 1567, 3784, 0U);
-    av1_dsp_hadamard_c(&output[4], &output[5], 0U);
-    av1_dsp_hadamard_c(&output[6], &output[7], 1U);
+    av1_dsp_hadamard_c(&output[4], &output[5], 0U, 16U);
+    av1_dsp_hadamard_c(&output[6], &output[7], 1U, 16U);
     av1_dsp_butterfly_c(&output[14], &output[9], 1567, 3784, 1U);
     av1_dsp_butterfly_c(&output[13], &output[10], -3784, 1567, 1U);
-    av1_dsp_hadamard_c(&output[0], &output[3], 0U);
-    av1_dsp_hadamard_c(&output[1], &output[2], 0U);
+    av1_dsp_hadamard_c(&output[0], &output[3], 0U, 16U);
+    av1_dsp_hadamard_c(&output[1], &output[2], 0U, 16U);
     av1_dsp_butterfly_c(&output[6], &output[5], 2896, 2896, 1U);
-    av1_dsp_hadamard_c(&output[8], &output[11], 0U);
-    av1_dsp_hadamard_c(&output[9], &output[10], 0U);
-    av1_dsp_hadamard_c(&output[12], &output[15], 1U);
-    av1_dsp_hadamard_c(&output[13], &output[14], 1U);
+    av1_dsp_hadamard_c(&output[8], &output[11], 0U, 16U);
+    av1_dsp_hadamard_c(&output[9], &output[10], 0U, 16U);
+    av1_dsp_hadamard_c(&output[12], &output[15], 1U, 16U);
+    av1_dsp_hadamard_c(&output[13], &output[14], 1U, 16U);
     for (index = 0U; index < 4U; ++index) {
-        av1_dsp_hadamard_c(&output[index], &output[7U - index], 0U);
+        av1_dsp_hadamard_c(&output[index], &output[7U - index], 0U, 16U);
     }
     av1_dsp_butterfly_c(&output[13], &output[10], 2896, 2896, 1U);
     av1_dsp_butterfly_c(&output[12], &output[11], 2896, 2896, 1U);
     for (index = 0U; index < 8U; ++index) {
-        av1_dsp_hadamard_c(&output[index], &output[15U - index], 0U);
+        av1_dsp_hadamard_c(&output[index], &output[15U - index], 0U, 16U);
     }
 }
 
@@ -220,13 +250,68 @@ void av1_dsp_inverse_dct16_c(const int32_t *input, int32_t *output) {
     }
 }
 
+static void av1_dsp_inverse_wht4_1d_c(const int32_t *input,
+                                       int32_t *output,
+                                       unsigned int shift) {
+    int64_t a = av1_dsp_floor_div_pow2(input[0], shift);
+    int64_t c = av1_dsp_floor_div_pow2(input[1], shift);
+    int64_t d = av1_dsp_floor_div_pow2(input[2], shift);
+    int64_t b = av1_dsp_floor_div_pow2(input[3], shift);
+    int64_t e;
+
+    a += c;
+    d -= b;
+    e = av1_dsp_floor_div_pow2(a - d, 1U);
+    b = e - b;
+    c = e - c;
+    a -= b;
+    d += c;
+    output[0] = (int32_t)a;
+    output[1] = (int32_t)b;
+    output[2] = (int32_t)c;
+    output[3] = (int32_t)d;
+}
+
+void av1_dsp_inverse_wht4_c(const int32_t *input,
+                            int32_t *output,
+                            unsigned int clamp_range) {
+    int32_t intermediate[16];
+    int32_t column_input[4];
+    int32_t column_output[4];
+    size_t row;
+    size_t column;
+
+    for (row = 0U; row < 4U; ++row) {
+        av1_dsp_inverse_wht4_1d_c(
+            input + row * 4U, intermediate + row * 4U, 2U);
+        for (column = 0U; column < 4U; ++column) {
+            intermediate[row * 4U + column] = av1_dsp_clip_signed(
+                intermediate[row * 4U + column], clamp_range);
+        }
+    }
+    for (column = 0U; column < 4U; ++column) {
+        for (row = 0U; row < 4U; ++row) {
+            column_input[row] = intermediate[row * 4U + column];
+        }
+        av1_dsp_inverse_wht4_1d_c(column_input, column_output, 0U);
+        for (row = 0U; row < 4U; ++row) {
+            output[row * 4U + column] = column_output[row];
+        }
+    }
+}
+
 #if defined(AVIFDEC_AARCH64_NEON)
 typedef int32_t Av1DspI32x4 __attribute__((ext_vector_type(4)));
 typedef int64_t Av1DspI64x4 __attribute__((ext_vector_type(4)));
 
-static Av1DspI32x4 av1_dsp_clip16x4(Av1DspI32x4 value) {
-    const Av1DspI32x4 minimum = { -32768, -32768, -32768, -32768 };
-    const Av1DspI32x4 maximum = { 32767, 32767, 32767, 32767 };
+static Av1DspI32x4 av1_dsp_clip_signed4(
+    Av1DspI32x4 value,
+    unsigned int clamp_range) {
+    int32_t limit = (int32_t)1 << (clamp_range - 1U);
+    const Av1DspI32x4 minimum = { -limit, -limit, -limit, -limit };
+    const Av1DspI32x4 maximum = {
+        limit - 1, limit - 1, limit - 1, limit - 1
+    };
 
     value = value < minimum ? minimum : value;
     return value > maximum ? maximum : value;
@@ -240,7 +325,8 @@ static void av1_dsp_inverse_dct4_1d_neon(
     Av1DspI32x4 *output0,
     Av1DspI32x4 *output1,
     Av1DspI32x4 *output2,
-    Av1DspI32x4 *output3) {
+    Av1DspI32x4 *output3,
+    unsigned int clamp_range) {
     Av1DspI64x4 wide0 = __builtin_convertvector(input0, Av1DspI64x4);
     Av1DspI64x4 wide1 = __builtin_convertvector(input1, Av1DspI64x4);
     Av1DspI64x4 wide2 = __builtin_convertvector(input2, Av1DspI64x4);
@@ -256,15 +342,17 @@ static void av1_dsp_inverse_dct4_1d_neon(
         (wide1 * 3784 + wide3 * 1567 + 2048) >> 12,
         Av1DspI32x4);
 
-    *output0 = av1_dsp_clip16x4(first + fourth);
-    *output1 = av1_dsp_clip16x4(second + third);
-    *output2 = av1_dsp_clip16x4(second - third);
-    *output3 = av1_dsp_clip16x4(first - fourth);
+    *output0 = av1_dsp_clip_signed4(first + fourth, clamp_range);
+    *output1 = av1_dsp_clip_signed4(second + third, clamp_range);
+    *output2 = av1_dsp_clip_signed4(second - third, clamp_range);
+    *output3 = av1_dsp_clip_signed4(first - fourth, clamp_range);
 }
 
 static void av1_dsp_inverse_dct4_neon(
     const int32_t *input,
-    int32_t *output) {
+    int32_t *output,
+    unsigned int row_clamp,
+    unsigned int column_clamp) {
     Av1DspI32x4 input0 = { input[0], input[4], input[8], input[12] };
     Av1DspI32x4 input1 = { input[1], input[5], input[9], input[13] };
     Av1DspI32x4 input2 = { input[2], input[6], input[10], input[14] };
@@ -280,14 +368,18 @@ static void av1_dsp_inverse_dct4_neon(
 
     av1_dsp_inverse_dct4_1d_neon(
         input0, input1, input2, input3,
-        &row0, &row1, &row2, &row3);
+        &row0, &row1, &row2, &row3, row_clamp);
+    row0 = av1_dsp_clip_signed4(row0, column_clamp);
+    row1 = av1_dsp_clip_signed4(row1, column_clamp);
+    row2 = av1_dsp_clip_signed4(row2, column_clamp);
+    row3 = av1_dsp_clip_signed4(row3, column_clamp);
     input0 = (Av1DspI32x4){ row0[0], row1[0], row2[0], row3[0] };
     input1 = (Av1DspI32x4){ row0[1], row1[1], row2[1], row3[1] };
     input2 = (Av1DspI32x4){ row0[2], row1[2], row2[2], row3[2] };
     input3 = (Av1DspI32x4){ row0[3], row1[3], row2[3], row3[3] };
     av1_dsp_inverse_dct4_1d_neon(
         input0, input1, input2, input3,
-        &result0, &result1, &result2, &result3);
+        &result0, &result1, &result2, &result3, column_clamp);
     result0 = (result0 + 8) >> 4;
     result1 = (result1 + 8) >> 4;
     result2 = (result2 + 8) >> 4;
@@ -334,17 +426,20 @@ static void av1_dsp_butterfly4(
 static void av1_dsp_hadamard4(
     Av1DspI32x4 *left,
     Av1DspI32x4 *right,
-    unsigned int flip) {
+    unsigned int flip,
+    unsigned int clamp_range) {
     Av1DspI32x4 first = *left;
     Av1DspI32x4 second = *right;
 
-    *left = av1_dsp_clip16x4(
-        flip != 0U ? second - first : first + second);
-    *right = av1_dsp_clip16x4(
-        flip != 0U ? second + first : first - second);
+    *left = av1_dsp_clip_signed4(
+        flip != 0U ? second - first : first + second, clamp_range);
+    *right = av1_dsp_clip_signed4(
+        flip != 0U ? second + first : first - second, clamp_range);
 }
 
-static void av1_dsp_inverse_dct8_1d_neon(Av1DspI32x4 values[8]) {
+static void av1_dsp_inverse_dct8_1d_neon(
+    Av1DspI32x4 values[8],
+    unsigned int clamp_range) {
     Av1DspI32x4 copy[8];
     unsigned int index;
 
@@ -361,19 +456,22 @@ static void av1_dsp_inverse_dct8_1d_neon(Av1DspI32x4 values[8]) {
     av1_dsp_butterfly4(&values[5], &values[6], 3406, 2276, 0U);
     av1_dsp_butterfly4(&values[0], &values[1], 2896, 2896, 1U);
     av1_dsp_butterfly4(&values[2], &values[3], 1567, 3784, 0U);
-    av1_dsp_hadamard4(&values[4], &values[5], 0U);
-    av1_dsp_hadamard4(&values[6], &values[7], 1U);
-    av1_dsp_hadamard4(&values[0], &values[3], 0U);
-    av1_dsp_hadamard4(&values[1], &values[2], 0U);
+    av1_dsp_hadamard4(&values[4], &values[5], 0U, clamp_range);
+    av1_dsp_hadamard4(&values[6], &values[7], 1U, clamp_range);
+    av1_dsp_hadamard4(&values[0], &values[3], 0U, clamp_range);
+    av1_dsp_hadamard4(&values[1], &values[2], 0U, clamp_range);
     av1_dsp_butterfly4(&values[6], &values[5], 2896, 2896, 1U);
     for (index = 0U; index < 4U; ++index) {
-        av1_dsp_hadamard4(&values[index], &values[7U - index], 0U);
+        av1_dsp_hadamard4(
+            &values[index], &values[7U - index], 0U, clamp_range);
     }
 }
 
 static void av1_dsp_inverse_dct8_neon(
     const int32_t *input,
-    int32_t *output) {
+    int32_t *output,
+    unsigned int row_clamp,
+    unsigned int column_clamp) {
     int32_t intermediate[64];
     Av1DspI32x4 values[8];
     unsigned int group;
@@ -389,9 +487,11 @@ static void av1_dsp_inverse_dct8_neon(
                 input[(group * 4U + 3U) * 8U + index]
             };
         }
-        av1_dsp_inverse_dct8_1d_neon(values);
+        av1_dsp_inverse_dct8_1d_neon(values, row_clamp);
         for (index = 0U; index < 8U; ++index) {
             values[index] = (values[index] + 1) >> 1;
+            values[index] = av1_dsp_clip_signed4(
+                values[index], column_clamp);
             for (lane = 0U; lane < 4U; ++lane) {
                 intermediate[(group * 4U + lane) * 8U + index] =
                     values[index][lane];
@@ -407,7 +507,7 @@ static void av1_dsp_inverse_dct8_neon(
                 intermediate[index * 8U + group * 4U + 3U]
             };
         }
-        av1_dsp_inverse_dct8_1d_neon(values);
+        av1_dsp_inverse_dct8_1d_neon(values, column_clamp);
         for (index = 0U; index < 8U; ++index) {
             values[index] = (values[index] + 8) >> 4;
             for (lane = 0U; lane < 4U; ++lane) {
@@ -436,30 +536,30 @@ static void av1_dsp_inverse_dct16_1d_neon(Av1DspI32x4 values[16]) {
     av1_dsp_butterfly4(&values[11], &values[12], 3920, 1189, 0U);
     av1_dsp_butterfly4(&values[4], &values[7], 799, 4017, 0U);
     av1_dsp_butterfly4(&values[5], &values[6], 3406, 2276, 0U);
-    av1_dsp_hadamard4(&values[8], &values[9], 0U);
-    av1_dsp_hadamard4(&values[10], &values[11], 1U);
-    av1_dsp_hadamard4(&values[12], &values[13], 0U);
-    av1_dsp_hadamard4(&values[14], &values[15], 1U);
+    av1_dsp_hadamard4(&values[8], &values[9], 0U, 16U);
+    av1_dsp_hadamard4(&values[10], &values[11], 1U, 16U);
+    av1_dsp_hadamard4(&values[12], &values[13], 0U, 16U);
+    av1_dsp_hadamard4(&values[14], &values[15], 1U, 16U);
     av1_dsp_butterfly4(&values[0], &values[1], 2896, 2896, 1U);
     av1_dsp_butterfly4(&values[2], &values[3], 1567, 3784, 0U);
-    av1_dsp_hadamard4(&values[4], &values[5], 0U);
-    av1_dsp_hadamard4(&values[6], &values[7], 1U);
+    av1_dsp_hadamard4(&values[4], &values[5], 0U, 16U);
+    av1_dsp_hadamard4(&values[6], &values[7], 1U, 16U);
     av1_dsp_butterfly4(&values[14], &values[9], 1567, 3784, 1U);
     av1_dsp_butterfly4(&values[13], &values[10], -3784, 1567, 1U);
-    av1_dsp_hadamard4(&values[0], &values[3], 0U);
-    av1_dsp_hadamard4(&values[1], &values[2], 0U);
+    av1_dsp_hadamard4(&values[0], &values[3], 0U, 16U);
+    av1_dsp_hadamard4(&values[1], &values[2], 0U, 16U);
     av1_dsp_butterfly4(&values[6], &values[5], 2896, 2896, 1U);
-    av1_dsp_hadamard4(&values[8], &values[11], 0U);
-    av1_dsp_hadamard4(&values[9], &values[10], 0U);
-    av1_dsp_hadamard4(&values[12], &values[15], 1U);
-    av1_dsp_hadamard4(&values[13], &values[14], 1U);
+    av1_dsp_hadamard4(&values[8], &values[11], 0U, 16U);
+    av1_dsp_hadamard4(&values[9], &values[10], 0U, 16U);
+    av1_dsp_hadamard4(&values[12], &values[15], 1U, 16U);
+    av1_dsp_hadamard4(&values[13], &values[14], 1U, 16U);
     for (index = 0U; index < 4U; ++index) {
-        av1_dsp_hadamard4(&values[index], &values[7U - index], 0U);
+        av1_dsp_hadamard4(&values[index], &values[7U - index], 0U, 16U);
     }
     av1_dsp_butterfly4(&values[13], &values[10], 2896, 2896, 1U);
     av1_dsp_butterfly4(&values[12], &values[11], 2896, 2896, 1U);
     for (index = 0U; index < 8U; ++index) {
-        av1_dsp_hadamard4(&values[index], &values[15U - index], 0U);
+        av1_dsp_hadamard4(&values[index], &values[15U - index], 0U, 16U);
     }
 }
 
@@ -513,17 +613,43 @@ static void av1_dsp_inverse_dct16_neon(
 
 void av1_dsp_inverse_dct4(const int32_t *input, int32_t *output) {
 #if defined(AVIFDEC_AARCH64_NEON)
-    av1_dsp_inverse_dct4_neon(input, output);
+    av1_dsp_inverse_dct4_neon(input, output, 16U, 16U);
 #else
     av1_dsp_inverse_dct4_c(input, output);
 #endif
 }
 
+void av1_dsp_inverse_dct4_clamped(const int32_t *input,
+                                  int32_t *output,
+                                  unsigned int row_clamp,
+                                  unsigned int column_clamp) {
+#if defined(AVIFDEC_AARCH64_NEON)
+    av1_dsp_inverse_dct4_neon(
+        input, output, row_clamp, column_clamp);
+#else
+    av1_dsp_inverse_dct4_clamped_c(
+        input, output, row_clamp, column_clamp);
+#endif
+}
+
 void av1_dsp_inverse_dct8(const int32_t *input, int32_t *output) {
 #if defined(AVIFDEC_AARCH64_NEON)
-    av1_dsp_inverse_dct8_neon(input, output);
+    av1_dsp_inverse_dct8_neon(input, output, 16U, 16U);
 #else
     av1_dsp_inverse_dct8_c(input, output);
+#endif
+}
+
+void av1_dsp_inverse_dct8_clamped(const int32_t *input,
+                                  int32_t *output,
+                                  unsigned int row_clamp,
+                                  unsigned int column_clamp) {
+#if defined(AVIFDEC_AARCH64_NEON)
+    av1_dsp_inverse_dct8_neon(
+        input, output, row_clamp, column_clamp);
+#else
+    av1_dsp_inverse_dct8_clamped_c(
+        input, output, row_clamp, column_clamp);
 #endif
 }
 
@@ -536,6 +662,9 @@ void av1_dsp_inverse_dct16(const int32_t *input, int32_t *output) {
 }
 
 #if defined(AVIFDEC_AARCH64_NEON)
+void av1_dsp_inverse_wht4_neon(const int32_t *input,
+                               int32_t *output,
+                               unsigned int clamp_range);
 void av1_dsp_add_residual_neon(uint16_t *destination,
                                size_t stride,
                                size_t width,
@@ -543,6 +672,16 @@ void av1_dsp_add_residual_neon(uint16_t *destination,
                                const int32_t *residual,
                                int32_t maximum);
 #endif
+
+void av1_dsp_inverse_wht4(const int32_t *input,
+                          int32_t *output,
+                          unsigned int clamp_range) {
+#if defined(AVIFDEC_AARCH64_NEON)
+    av1_dsp_inverse_wht4_neon(input, output, clamp_range);
+#else
+    av1_dsp_inverse_wht4_c(input, output, clamp_range);
+#endif
+}
 
 void av1_dsp_add_residual_c(uint16_t *destination,
                             size_t stride,
