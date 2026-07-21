@@ -142,7 +142,7 @@ codec, image, or network dependencies. `make test-all` additionally requires
 
 The decoder API is declared in [`src/avifdec.h`](src/avifdec.h), and the
 encoder API in [`src/encoder/avifenc.h`](src/encoder/avifenc.h). Both are
-documented in [`docs/api.md`](docs/api.md). Decoder version 1.3.0 and encoder
+documented in [`docs/api.md`](docs/api.md). Decoder version 1.4.0 and encoder
 version 0.2.0 are reported through their respective version constants and
 version-string functions.
 

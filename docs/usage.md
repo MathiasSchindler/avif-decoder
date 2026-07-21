@@ -62,6 +62,11 @@ Sequence query output includes frame count, timescale, duration, alpha mode,
 and repetition information. Frame output includes DTS, duration, sync status,
 and the sync frame used for random access.
 
+The CLI intentionally uses the legacy unambiguous frame-index path. Applications
+that need fragmented sequences, edit-list presentations, explicit selection
+among alternate visual tracks, or sequence metadata use the normalized public
+sequence-index API described in [`api.md`](api.md).
+
 ## Parallel workers
 
 The native Linux/x86-64 and macOS/arm64 CLIs can optionally decode independent
@@ -195,7 +200,8 @@ The converter supports:
 - straight and premultiplied alpha;
 - clean aperture, rotation, and mirroring.
 
-Chroma upsampling is deterministic nearest-neighbor sampling. ICC transforms,
-transfer-function conversion, HDR display mapping, and tone-map application are
-not performed. The original ICC, NCLX, HDR, and tone-map metadata remains
-available through the API.
+The CLI and legacy RGB API use deterministic nearest-neighbor chroma sampling
+and source-encoded conversion. They do not apply ICC transforms, transfer
+conversion, HDR display mapping, or gain maps. Applications can opt into
+bilinear H.273/ICC color transforms and ISO 21496-1 gain-map application through
+the allocation-free public APIs described in [`api.md`](api.md).

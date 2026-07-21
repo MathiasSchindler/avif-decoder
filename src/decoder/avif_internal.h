@@ -2,6 +2,7 @@
 #define AVIF_INTERNAL_H
 
 #include "avifdec.h"
+#include "avif_item_index.h"
 #include "bmff.h"
 
 #define AVIF_MAX_ITEMS AVIFDEC_DEFAULT_MAX_ITEMS
@@ -76,6 +77,7 @@ typedef struct {
     AvifReference references[AVIF_MAX_REFERENCES];
     size_t reference_count;
     AvifdecSpan query_spans[AVIF_MAX_RESOLVED_SPANS];
+    const AvifItemIndex *item_index;
     int failed;
 } AvifContext;
 

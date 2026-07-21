@@ -757,7 +757,7 @@ static AvifdecStatus avifseq_parse_stsd(AvifSeqContext *context, AvifSeqTrack *t
                 seen_nclx = 1;
             } else if (color_type == AVIFDEC_FOURCC('r', 'I', 'C', 'C') ||
                        color_type == AVIFDEC_FOURCC('p', 'r', 'o', 'f')) {
-                if (track->seen_icc) {
+                if (track->seen_icc || child_payload_size == 4U) {
                     return avifseq_fail(context, AVIFDEC_INVALID_DATA, child_box_offset, child_type);
                 }
                 track->icc_data = payload + 4U;
@@ -1305,43 +1305,7 @@ static AvifdecStatus avifseq_parse_track(
 
 static AvifdecLimits avifseq_effective_limits(
     const AvifdecLimits *limits) {
-    AvifdecLimits result;
-
-    avifdec_memory_fill(&result, 0U, sizeof(result));
-    result.max_width =
-        limits == 0 || limits->max_width == 0U
-            ? 32768U : limits->max_width;
-    result.max_height =
-        limits == 0 || limits->max_height == 0U
-            ? 32768U : limits->max_height;
-    result.max_pixels =
-        limits == 0 || limits->max_pixels == 0U
-            ? 268435456U : limits->max_pixels;
-    result.max_items =
-        limits == 0 || limits->max_items == 0U
-            ? AVIFDEC_DEFAULT_MAX_ITEMS : limits->max_items;
-    result.max_extents =
-        limits == 0 || limits->max_extents == 0U
-            ? AVIFDEC_DEFAULT_MAX_EXTENTS : limits->max_extents;
-    result.max_properties =
-        limits == 0 || limits->max_properties == 0U
-            ? AVIFDEC_DEFAULT_MAX_PROPERTIES : limits->max_properties;
-    result.max_obus =
-        limits == 0 || limits->max_obus == 0U
-            ? AVIFDEC_DEFAULT_MAX_OBUS : limits->max_obus;
-    result.max_frames =
-        limits == 0 || limits->max_frames == 0U
-            ? AVIFDEC_DEFAULT_MAX_FRAMES : limits->max_frames;
-    result.operating_point =
-        limits == 0 ? 0U : limits->operating_point;
-    result.av1_framing =
-        limits == 0 ? AVIFDEC_AV1_LOW_OVERHEAD :
-        limits->av1_framing;
-    result.spatial_layer =
-        limits == 0 ? 0U : limits->spatial_layer;
-    result.spatial_layer_set =
-        limits == 0 ? 0U : limits->spatial_layer_set;
-    return result;
+    return avifdec_limits_effective(limits);
 }
 
 static int avifseq_has_avis_brand(const AvifdecBmffInfo *info) {

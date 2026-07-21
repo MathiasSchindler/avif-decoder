@@ -1,5 +1,17 @@
 #include "av1_bitstream.h"
 
+static int av1_stream_span(const Av1Stream *stream,
+                           size_t span_index,
+                           AvifdecSpan *span) {
+    if (stream->spans == 0 && stream->source != 0) {
+        return stream->source->span_at(
+                   stream->source->context, span_index, span,
+                   stream->source->error) == AVIFDEC_OK;
+    }
+    *span = stream->spans[span_index];
+    return 1;
+}
+
 int av1_stream_byte_at(const Av1Stream *stream,
                        size_t position,
                        uint8_t *value,
@@ -7,14 +19,17 @@ int av1_stream_byte_at(const Av1Stream *stream,
     size_t index;
 
     for (index = 0U; index < stream->span_count; ++index) {
-        if (position < stream->spans[index].size) {
-            *value = stream->spans[index].data[position];
+        AvifdecSpan span;
+
+        if (!av1_stream_span(stream, index, &span)) return 0;
+        if (position < span.size) {
+            *value = span.data[position];
             if (file_offset != 0) {
-                *file_offset = stream->spans[index].file_offset + position;
+                *file_offset = span.file_offset + position;
             }
             return 1;
         }
-        position -= stream->spans[index].size;
+        position -= span.size;
     }
     return 0;
 }
@@ -25,8 +40,12 @@ size_t av1_stream_file_offset(const Av1Stream *stream, size_t position) {
 
     if (av1_stream_byte_at(stream, position, &ignored, &offset)) return offset;
     if (stream->span_count != 0U) {
-        const AvifdecSpan *last = &stream->spans[stream->span_count - 1U];
-        return last->file_offset + last->size;
+        AvifdecSpan last;
+
+        if (av1_stream_span(
+                stream, stream->span_count - 1U, &last)) {
+            return last.file_offset + last.size;
+        }
     }
     return 0U;
 }

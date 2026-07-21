@@ -21,6 +21,9 @@ project itself builds. It includes:
 - AV1 feature-fixture checks (including a corrupt-input rejection built with
   `od`/`dd`);
 - recursive BMFF and checked-in AVIF corpus traces.
+- private strict and hosted-sanitizer coverage for AVIF-forbidden AV1 modes,
+  metadata/item-span resolution, ISO gain maps, explicit H.273/ICC color, and
+  normalized classic/fragmented sequence indexing;
 - encoder API validation, exact capacity and one-byte-short buffer checks,
   varied workspace alignment, deterministic output, reconstruction equality,
   quality/search regressions, monotonic speed budgets, square and rectangular
@@ -72,6 +75,8 @@ The additional coverage includes:
 - timed image-sequence tests covering dependent-frame seeking, varied
   durations, finite/infinite repetition, compact sample tables, straight and
   premultiplied alpha, repeated decoding, and malformed tables;
+- public v1.4 metadata, color, gain-map, sequence-index, workspace, stale-handle,
+  and capability-contract vectors;
 - byte-exact width-1/width-4 grid comparisons on Linux/x86-64 and
   macOS/arm64.
 - exact encoder reconstruction comparisons through FFmpeg, direct libaom, and

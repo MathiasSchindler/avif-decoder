@@ -22,11 +22,68 @@
 
 #define CHECK(condition) do { if (!(condition)) return __LINE__; } while (0)
 
+_Static_assert(AVIFDEC_RGB8 == 0, "legacy RGB8 value changed");
+_Static_assert(AVIFDEC_RGBA8 == 1, "legacy RGBA8 value changed");
+_Static_assert(AVIFDEC_RGB16 == 2, "legacy RGB16 value changed");
+_Static_assert(AVIFDEC_RGBA16 == 3, "legacy RGBA16 value changed");
+_Static_assert(AVIFDEC_RGBF32 == 4, "RGBF32 value");
+_Static_assert(AVIFDEC_RGBAF32 == 5, "RGBAF32 value");
+_Static_assert(AVIFDEC_AV1_LOW_OVERHEAD == 0,
+               "legacy low-overhead value changed");
+_Static_assert(AVIFDEC_AV1_ANNEX_B == 1,
+               "legacy Annex B value changed");
+_Static_assert(AVIFDEC_OK == 0 &&
+               AVIFDEC_INVALID_ARGUMENT == 1 &&
+               AVIFDEC_TRUNCATED == 2 &&
+               AVIFDEC_INVALID_DATA == 3 &&
+               AVIFDEC_OVERFLOW == 4 &&
+               AVIFDEC_LIMIT_EXCEEDED == 5 &&
+               AVIFDEC_OUT_OF_MEMORY == 6 &&
+               AVIFDEC_IO_ERROR == 7 &&
+               AVIFDEC_UNSUPPORTED == 8,
+               "legacy status values changed");
+_Static_assert(AVIFDEC_ALPHA_STRAIGHT == 0 &&
+               AVIFDEC_ALPHA_PREMULTIPLIED == 1,
+               "legacy alpha values changed");
+
 static int test_checked_arithmetic(void) {
+    static const uint64_t capability_bits[] = {
+        AVIFDEC_CAP_AV1_LOW_OVERHEAD,
+        AVIFDEC_CAP_AV1_ANNEX_B,
+        AVIFDEC_CAP_AV1_OPERATING_POINTS,
+        AVIFDEC_CAP_AV1_METADATA,
+        AVIFDEC_CAP_AV1_PROFILE_LEVELS,
+        AVIFDEC_CAP_AV1_FILM_GRAIN,
+        AVIFDEC_CAP_AV1_TILE_LIST,
+        AVIFDEC_CAP_AV1_LARGE_SCALE_TILE,
+        AVIFDEC_CAP_AVIF_PRESENTATION,
+        AVIFDEC_CAP_AVIF_ALPHA,
+        AVIFDEC_CAP_AVIF_GRID,
+        AVIFDEC_CAP_AVIF_LAYERED,
+        AVIFDEC_CAP_AVIF_SAMPLE_TRANSFORM,
+        AVIFDEC_CAP_RGB_CONVERSION,
+        AVIFDEC_CAP_AVIF_TONE_MAP_METADATA,
+        AVIFDEC_CAP_AVIF_SEQUENCE,
+        AVIFDEC_CAP_PARALLEL_EXECUTOR,
+        AVIFDEC_CAP_AVIF_METADATA,
+        AVIFDEC_CAP_COLOR_CICP,
+        AVIFDEC_CAP_COLOR_ICC_MATRIX_TRC,
+        AVIFDEC_CAP_AVIF_GAIN_MAP_METADATA,
+        AVIFDEC_CAP_AVIF_GAIN_MAP_APPLICATION,
+        AVIFDEC_CAP_AVIF_SEQUENCE_INDEX,
+        AVIFDEC_CAP_AVIF_SEQUENCE_EDITS,
+        AVIFDEC_CAP_AVIF_SEQUENCE_FRAGMENTS,
+        AVIFDEC_CAP_AVIF_SEQUENCE_TRACK_SELECTION
+    };
     size_t result;
+    size_t first;
+    size_t second;
     uint64_t capabilities = avifdec_capabilities();
     AvifdecExecutor executor;
     AvifdecImageInfo info;
+    AvifdecLimits defaults;
+    AvifdecSpan tile_list_span;
+    static const unsigned char tile_list_obu[] = { 0x42U, 0x00U };
     AvifdecError error;
 
     CHECK((capabilities & AVIFDEC_CAP_AV1_ANNEX_B) != 0U);
@@ -40,10 +97,57 @@ static int test_checked_arithmetic(void) {
     CHECK((capabilities & AVIFDEC_CAP_RGB_CONVERSION) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_AVIF_SEQUENCE) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_PARALLEL_EXECUTOR) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_AVIF_METADATA) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_COLOR_CICP) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_COLOR_ICC_MATRIX_TRC) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_AVIF_GAIN_MAP_METADATA) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_AVIF_GAIN_MAP_APPLICATION) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_AVIF_SEQUENCE_INDEX) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_AVIF_SEQUENCE_EDITS) != 0U);
+    CHECK((capabilities & AVIFDEC_CAP_AVIF_SEQUENCE_FRAGMENTS) != 0U);
+    CHECK((capabilities &
+           AVIFDEC_CAP_AVIF_SEQUENCE_TRACK_SELECTION) != 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_TILE_LIST) == 0U);
     CHECK((capabilities & AVIFDEC_CAP_AV1_LARGE_SCALE_TILE) == 0U);
+    for (first = 0U;
+         first < sizeof(capability_bits) / sizeof(capability_bits[0]);
+         ++first) {
+        CHECK(capability_bits[first] != 0U &&
+              (capability_bits[first] &
+               (capability_bits[first] - 1U)) == 0U);
+        for (second = first + 1U;
+             second <
+                 sizeof(capability_bits) / sizeof(capability_bits[0]);
+             ++second) {
+            CHECK(capability_bits[first] != capability_bits[second]);
+        }
+    }
     CHECK(avifdec_memory_compare(
-        avifdec_version_string(), "1.3.0", 6U) == 0);
+        avifdec_version_string(), "1.4.0", 6U) == 0);
+    CHECK(AVIFDEC_VERSION_MAJOR == 1U &&
+          AVIFDEC_VERSION_MINOR == 4U &&
+          AVIFDEC_VERSION_PATCH == 0U);
+    avifdec_limits_default(&defaults);
+    CHECK(defaults.max_metadata_items ==
+              AVIFDEC_DEFAULT_MAX_METADATA_ITEMS &&
+          defaults.max_metadata_spans ==
+              AVIFDEC_DEFAULT_MAX_METADATA_SPANS &&
+          defaults.max_tracks == AVIFDEC_DEFAULT_MAX_TRACKS &&
+          defaults.max_edits == AVIFDEC_DEFAULT_MAX_EDITS &&
+          defaults.max_fragments == AVIFDEC_DEFAULT_MAX_FRAGMENTS &&
+          defaults.max_icc_bytes == AVIFDEC_DEFAULT_MAX_ICC_BYTES &&
+          defaults.max_icc_curve_entries ==
+              AVIFDEC_DEFAULT_MAX_ICC_CURVE_ENTRIES);
+    avifdec_memory_fill(&info, 0U, sizeof(info));
+    tile_list_span.data = tile_list_obu;
+    tile_list_span.size = sizeof(tile_list_obu);
+    tile_list_span.file_offset = 71U;
+    error.status = AVIFDEC_OK;
+    CHECK(avifdec_av1_query(
+              &tile_list_span, 1U, 0, &info, &error) ==
+          AVIFDEC_INVALID_DATA);
+    CHECK(error.offset == 71U &&
+          error.context == AVIFDEC_FOURCC('O', 'B', 'U', 8));
     CHECK(avifdec_size_add(3U, 4U, &result) && result == 7U);
     CHECK(!avifdec_size_add(SIZE_MAX, 1U, &result));
     CHECK(avifdec_size_multiply(7U, 9U, &result) && result == 63U);
@@ -1922,6 +2026,799 @@ static void make_query_fixture(QueryFixture *fixture, int use_idat, int multiple
     }
 }
 
+static const unsigned char public_gain_map_fixture[] = {
+    0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66,
+    0x00, 0x00, 0x00, 0x00, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x01, 0x84,
+    0x6d, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6c, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x70, 0x69, 0x63, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x70, 0x69, 0x74,
+    0x6d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3a, 0x69,
+    0x6c, 0x6f, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x03, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0xa0, 0x00, 0x00, 0x00,
+    0x1d, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0xbd, 0x00,
+    0x00, 0x00, 0x8e, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02,
+    0x4b, 0x00, 0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x58, 0x69, 0x69, 0x6e,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x19, 0x69,
+    0x6e, 0x66, 0x65, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61,
+    0x76, 0x30, 0x31, 0x62, 0x61, 0x73, 0x65, 0x00, 0x00, 0x00, 0x00, 0x18,
+    0x69, 0x6e, 0x66, 0x65, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x74, 0x6d, 0x61, 0x70, 0x6d, 0x61, 0x70, 0x00, 0x00, 0x00, 0x00, 0x19,
+    0x69, 0x6e, 0x66, 0x65, 0x02, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00,
+    0x61, 0x76, 0x30, 0x31, 0x67, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00,
+    0x1c, 0x69, 0x72, 0x65, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x10, 0x64, 0x69, 0x6d, 0x67, 0x00, 0x02, 0x00, 0x02, 0x00, 0x01, 0x00,
+    0x03, 0x00, 0x00, 0x00, 0x24, 0x67, 0x72, 0x70, 0x6c, 0x00, 0x00, 0x00,
+    0x1c, 0x61, 0x6c, 0x74, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x06, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x77, 0x69, 0x70, 0x72, 0x70, 0x00,
+    0x00, 0x00, 0x4b, 0x69, 0x70, 0x63, 0x6f, 0x00, 0x00, 0x00, 0x14, 0x69,
+    0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00,
+    0x00, 0x00, 0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0c, 0x61,
+    0x76, 0x31, 0x43, 0x81, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x63,
+    0x6f, 0x6c, 0x72, 0x6e, 0x63, 0x6c, 0x78, 0x00, 0x01, 0x00, 0x0d, 0x00,
+    0x00, 0x80, 0x00, 0x00, 0x00, 0x24, 0x69, 0x70, 0x6d, 0x61, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x04, 0x81, 0x02, 0x83,
+    0x04, 0x00, 0x02, 0x03, 0x81, 0x02, 0x04, 0x00, 0x03, 0x04, 0x81, 0x02,
+    0x83, 0x04, 0x00, 0x00, 0x00, 0xd0, 0x6d, 0x64, 0x61, 0x74, 0x12, 0x00,
+    0x0a, 0x04, 0x38, 0x00, 0x06, 0x09, 0x32, 0x13, 0x10, 0x00, 0x00, 0x00,
+    0x0f, 0xfa, 0x3f, 0x5a, 0x74, 0x0c, 0x7a, 0x91, 0x83, 0xdd, 0xca, 0x7b,
+    0x36, 0x50, 0xb0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+    0x02, 0xff, 0xff, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x40, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+    0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x20, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff,
+    0xff, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+    0x80, 0x12, 0x00, 0x0a, 0x04, 0x38, 0x00, 0x06, 0x09, 0x32, 0x13, 0x10,
+    0x00, 0x00, 0x00, 0x0f, 0xfa, 0x3f, 0x5a, 0x74, 0x0c, 0x7a, 0x91, 0x83,
+    0xdd, 0xca, 0x7b, 0x36, 0x50, 0xb0
+};
+
+static const unsigned char public_track_metadata_box[] = {
+    0x00, 0x00, 0x00, 0x94, 0x6d, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x21, 0x68, 0x64, 0x6c, 0x72, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x6d, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x20, 0x69, 0x6c, 0x6f, 0x63, 0x01, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00,
+    0x01, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x3b, 0x69, 0x69, 0x6e,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2d, 0x69,
+    0x6e, 0x66, 0x65, 0x02, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x6d,
+    0x69, 0x6d, 0x65, 0x78, 0x6d, 0x70, 0x00, 0x61, 0x70, 0x70, 0x6c, 0x69,
+    0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2f, 0x72, 0x64, 0x66, 0x2b, 0x78,
+    0x6d, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x69, 0x64, 0x61, 0x74,
+    0x3c, 0x78, 0x2f, 0x3e
+};
+
+static const unsigned char public_sequence_fixture[] = {
+    0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x73,
+    0x00, 0x00, 0x00, 0x00, 0x61, 0x76, 0x69, 0x73, 0x00, 0x00, 0x02, 0x1c,
+    0x6d, 0x6f, 0x6f, 0x76, 0x00, 0x00, 0x00, 0x6c, 0x6d, 0x76, 0x68, 0x64,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x01, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x01, 0xa8, 0x74, 0x72, 0x61, 0x6b,
+    0x00, 0x00, 0x00, 0x5c, 0x74, 0x6b, 0x68, 0x64, 0x00, 0x00, 0x00, 0x07,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x44,
+    0x6d, 0x64, 0x69, 0x61, 0x00, 0x00, 0x00, 0x20, 0x6d, 0x64, 0x68, 0x64,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x00, 0x0a, 0x55, 0xc4, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x21, 0x68, 0x64, 0x6c, 0x72, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xfb, 0x6d, 0x69, 0x6e, 0x66, 0x00, 0x00, 0x00, 0xf3, 0x73, 0x74, 0x62,
+    0x6c, 0x00, 0x00, 0x00, 0x8b, 0x73, 0x74, 0x73, 0x64, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x7b, 0x61, 0x76, 0x30,
+    0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x48, 0x00, 0x00, 0x00, 0x48, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x18, 0xff, 0xff, 0x00, 0x00, 0x00, 0x12, 0x61,
+    0x76, 0x31, 0x43, 0x81, 0x20, 0x00, 0x00, 0x0a, 0x04, 0x38, 0x00, 0x06,
+    0x09, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6f, 0x6c, 0x72, 0x6e, 0x63, 0x6c,
+    0x78, 0x00, 0x01, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x18,
+    0x73, 0x74, 0x74, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x1c,
+    0x73, 0x74, 0x73, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x18, 0x73, 0x74, 0x73, 0x7a, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x15,
+    0x00, 0x00, 0x00, 0x14, 0x73, 0x74, 0x63, 0x6f, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x38, 0x00, 0x00, 0x00, 0x1d,
+    0x6d, 0x64, 0x61, 0x74, 0x32, 0x13, 0x10, 0x00, 0x00, 0x00, 0x0f, 0xfa,
+    0x3f, 0x5a, 0x74, 0x0c, 0x7a, 0x91, 0x83, 0xdd, 0xca, 0x7b, 0x36, 0x50,
+    0xb0
+};
+
+static int test_v14_public_api(void) {
+    static unsigned char index_workspace[2049];
+    static unsigned char decode_workspace[300000];
+    static const unsigned char header_cicp_av1[] = {
+        0x12U, 0x00U, 0x0aU, 0x07U, 0x38U, 0x00U, 0x36U,
+        0x90U, 0x91U, 0x00U, 0x99U, 0x32U, 0x1aU, 0x17U,
+        0x82U, 0x63U, 0x04U, 0xc2U, 0x49U, 0x24U, 0x93U,
+        0x28U, 0x00U, 0x00U, 0x00U, 0x48U, 0x54U, 0x36U,
+        0x61U, 0xacU, 0x63U, 0x37U, 0x73U, 0x36U, 0x9dU,
+        0x28U, 0xf1U, 0xf7U, 0x40U
+    };
+    QueryFixture fixture;
+    AvifdecMetadataResult metadata_result;
+    AvifdecGainMapInfo gain_map;
+    AvifdecGainMapApplyOptions gain_options;
+    AvifdecImageInfo image_info;
+    AvifdecImage image;
+    AvifdecImage gain_image;
+    AvifdecImage decoded_base;
+    AvifdecImage decoded_gain;
+    AvifdecColorDescription color;
+    AvifdecColorOptions color_options;
+    AvifdecColorTransformInfo transform_info;
+    AvifdecColorTransform transform;
+    AvifdecRgbImage rgb;
+    AvifdecSequenceIndexInfo index_info;
+    AvifdecSequenceIndexInfo initialized_info;
+    AvifdecSequenceIndex index;
+    AvifdecSequenceIndex short_index;
+    AvifdecSequenceIndex stale_index;
+    AvifdecSequenceTrackInfo track;
+    AvifdecSequenceSelection selection;
+    AvifdecSequencePresentationInfo presentation;
+    AvifdecMetadataInfo sequence_metadata;
+    AvifdecSpan sequence_metadata_span;
+    AvifdecEntropyTrace trace;
+    AvifdecError error;
+    uint16_t y = 128U;
+    uint16_t u = 64U;
+    uint16_t v = 192U;
+    uint16_t decoded_planes[3] = { 0U, 0U, 0U };
+    uint16_t decoded_base_planes[3] = { 0U, 0U, 0U };
+    uint16_t decoded_gain_planes[3] = { 0U, 0U, 0U };
+    uint16_t gain_plane = 255U;
+    unsigned char tmap_primary[sizeof(public_gain_map_fixture)];
+    unsigned char header_color_gain[
+        sizeof(public_gain_map_fixture) + 20U];
+    unsigned char track_metadata_file[
+        sizeof(public_sequence_fixture) +
+        sizeof(public_track_metadata_box)];
+    unsigned char top_metadata_file[
+        sizeof(public_sequence_fixture) +
+        sizeof(public_track_metadata_box)];
+    float pixels[3];
+    unsigned char *index_memory = index_workspace + 1U;
+    size_t fixture_offset;
+    AvifdecStatus status;
+
+    AvifdecStatus (*legacy_query)(
+        const void *, size_t, const AvifdecLimits *, AvifdecSpan *,
+        size_t, AvifdecImageInfo *, AvifdecError *) = avifdec_query;
+    AvifdecStatus (*legacy_decode)(
+        const void *, size_t, const AvifdecLimits *, void *, size_t,
+        AvifdecImage *, AvifdecEntropyTrace *, AvifdecError *) =
+        avifdec_decode;
+    AvifdecStatus (*legacy_rgb)(
+        const AvifdecImage *, const AvifdecImageInfo *,
+        AvifdecRgbImage *, AvifdecError *) = avifdec_image_to_rgb;
+
+    CHECK(legacy_query != 0 && legacy_decode != 0 && legacy_rgb != 0);
+    make_query_fixture(&fixture, 0, 0);
+    CHECK(avifdec_metadata_query(
+              fixture.data, fixture.size, 0,
+              0, 0U, 0, 0U, 0, 0U,
+              &metadata_result, &error) == AVIFDEC_OK);
+    CHECK(metadata_result.metadata_count == 0U &&
+          metadata_result.thumbnail_count == 0U &&
+          metadata_result.span_count == 0U);
+    CHECK(avifdec_gain_map_query(
+              fixture.data, fixture.size, 0,
+              &gain_map, &error) == AVIFDEC_OK);
+    CHECK(gain_map.present == 0U);
+    CHECK(avifdec_gain_map_query(
+              public_gain_map_fixture,
+              sizeof(public_gain_map_fixture), 0,
+              &gain_map, &error) == AVIFDEC_OK);
+    CHECK(gain_map.present == 1U &&
+          gain_map.base_item_id == 1U &&
+          gain_map.alternate_item_id == 2U &&
+          gain_map.gain_map_item_id == 3U &&
+          gain_map.channel_count == 3U &&
+          gain_map.workspace_required <= sizeof(decode_workspace));
+    avifdec_memory_fill(&decoded_base, 0U, sizeof(decoded_base));
+    avifdec_memory_fill(&decoded_gain, 0U, sizeof(decoded_gain));
+    {
+        size_t plane;
+
+        for (plane = 0U; plane < 3U; ++plane) {
+            decoded_base.planes[plane] =
+                &decoded_base_planes[plane];
+            decoded_base.strides[plane] = 1U;
+            decoded_gain.planes[plane] =
+                &decoded_gain_planes[plane];
+            decoded_gain.strides[plane] = 1U;
+        }
+    }
+    CHECK(avifdec_gain_map_decode(
+              public_gain_map_fixture,
+              sizeof(public_gain_map_fixture), 0,
+              decode_workspace, gain_map.workspace_required,
+              &decoded_base, &decoded_gain, 0, 0,
+              &gain_map, &error) == AVIFDEC_OK);
+    CHECK(decoded_base.widths[0] == 1U &&
+          decoded_gain.widths[0] == 1U &&
+          decoded_base.bit_depth == 8U &&
+          decoded_gain.bit_depth == 8U);
+    avifdec_memory_copy(
+        tmap_primary, public_gain_map_fixture,
+        sizeof(tmap_primary));
+    for (fixture_offset = 4U;
+         fixture_offset + 10U < sizeof(tmap_primary);
+         ++fixture_offset) {
+        if (tmap_primary[fixture_offset] == 'p' &&
+            tmap_primary[fixture_offset + 1U] == 'i' &&
+            tmap_primary[fixture_offset + 2U] == 't' &&
+            tmap_primary[fixture_offset + 3U] == 'm') {
+            break;
+        }
+    }
+    CHECK(fixture_offset + 10U < sizeof(tmap_primary));
+    tmap_primary[fixture_offset + 8U] = 0U;
+    tmap_primary[fixture_offset + 9U] = 2U;
+    CHECK(avifdec_gain_map_query(
+              tmap_primary, sizeof(tmap_primary), 0,
+              &gain_map, &error) == AVIFDEC_OK);
+    CHECK(gain_map.present == 1U &&
+          gain_map.base_item_id == 1U &&
+          gain_map.alternate_item_id == 2U);
+    avifdec_memory_copy(
+        tmap_primary, public_gain_map_fixture,
+        sizeof(tmap_primary));
+    for (fixture_offset = 4U;
+         fixture_offset + 8U < sizeof(tmap_primary);
+         ++fixture_offset) {
+        if (tmap_primary[fixture_offset] == 'a' &&
+            tmap_primary[fixture_offset + 1U] == 'l' &&
+            tmap_primary[fixture_offset + 2U] == 't' &&
+            tmap_primary[fixture_offset + 3U] == 'r') {
+            break;
+        }
+    }
+    CHECK(fixture_offset + 8U < sizeof(tmap_primary));
+    tmap_primary[fixture_offset + 4U] = 1U;
+    CHECK(avifdec_gain_map_query(
+              tmap_primary, sizeof(tmap_primary), 0,
+              &gain_map, &error) == AVIFDEC_UNSUPPORTED);
+    tmap_primary[fixture_offset + 4U] = 0U;
+    tmap_primary[fixture_offset + 7U] = 1U;
+    CHECK(avifdec_gain_map_query(
+              tmap_primary, sizeof(tmap_primary), 0,
+              &gain_map, &error) == AVIFDEC_INVALID_DATA);
+    avifdec_memory_copy(
+        tmap_primary, public_gain_map_fixture,
+        sizeof(tmap_primary));
+    for (fixture_offset = 4U;
+         fixture_offset + 4U < sizeof(tmap_primary);
+         ++fixture_offset) {
+        if (tmap_primary[fixture_offset] == 'g' &&
+            tmap_primary[fixture_offset + 1U] == 'r' &&
+            tmap_primary[fixture_offset + 2U] == 'p' &&
+            tmap_primary[fixture_offset + 3U] == 'l') {
+            break;
+        }
+    }
+    CHECK(fixture_offset + 4U < sizeof(tmap_primary));
+    tmap_primary[fixture_offset] = 'f';
+    tmap_primary[fixture_offset + 1U] = 'r';
+    tmap_primary[fixture_offset + 2U] = 'e';
+    tmap_primary[fixture_offset + 3U] = 'e';
+    CHECK(avifdec_gain_map_query(
+              tmap_primary, sizeof(tmap_primary), 0,
+              &gain_map, &error) == AVIFDEC_OK);
+    CHECK(gain_map.present == 0U);
+    for (fixture_offset = 4U;
+         fixture_offset + 54U < sizeof(public_gain_map_fixture);
+         ++fixture_offset) {
+        if (public_gain_map_fixture[fixture_offset] == 'i' &&
+            public_gain_map_fixture[fixture_offset + 1U] == 'l' &&
+            public_gain_map_fixture[fixture_offset + 2U] == 'o' &&
+            public_gain_map_fixture[fixture_offset + 3U] == 'c') {
+            const size_t base_offset = avifdec_load_u32be(
+                public_gain_map_fixture + fixture_offset + 18U);
+            const size_t base_size = avifdec_load_u32be(
+                public_gain_map_fixture + fixture_offset + 22U);
+            const size_t tone_map_offset = avifdec_load_u32be(
+                public_gain_map_fixture + fixture_offset + 32U);
+            const size_t tone_map_size = avifdec_load_u32be(
+                public_gain_map_fixture + fixture_offset + 36U);
+            const size_t gain_offset = avifdec_load_u32be(
+                public_gain_map_fixture + fixture_offset + 46U);
+            const size_t gain_size = avifdec_load_u32be(
+                public_gain_map_fixture + fixture_offset + 50U);
+            const size_t expanded_tone_map_offset =
+                base_offset + sizeof(header_cicp_av1);
+            const size_t expanded_gain_offset =
+                expanded_tone_map_offset + tone_map_size;
+            const size_t patch_offsets[6] = {
+                fixture_offset + 18U, fixture_offset + 22U,
+                fixture_offset + 32U, fixture_offset + 36U,
+                fixture_offset + 46U, fixture_offset + 50U
+            };
+            const uint32_t patch_values[6] = {
+                (uint32_t)base_offset,
+                (uint32_t)sizeof(header_cicp_av1),
+                (uint32_t)expanded_tone_map_offset,
+                (uint32_t)tone_map_size,
+                (uint32_t)expanded_gain_offset,
+                (uint32_t)sizeof(header_cicp_av1)
+            };
+            size_t patch_index;
+
+            CHECK(base_offset + base_size == tone_map_offset);
+            CHECK(tone_map_offset + tone_map_size == gain_offset);
+            CHECK(gain_offset + gain_size ==
+                  sizeof(public_gain_map_fixture));
+            avifdec_memory_copy(
+                header_color_gain, public_gain_map_fixture,
+                base_offset);
+            avifdec_memory_copy(
+                header_color_gain + base_offset,
+                header_cicp_av1, sizeof(header_cicp_av1));
+            avifdec_memory_copy(
+                header_color_gain + expanded_tone_map_offset,
+                public_gain_map_fixture + tone_map_offset,
+                tone_map_size);
+            avifdec_memory_copy(
+                header_color_gain + expanded_gain_offset,
+                header_cicp_av1, sizeof(header_cicp_av1));
+            for (patch_index = 0U; patch_index < 6U;
+                 ++patch_index) {
+                size_t patch_offset = patch_offsets[patch_index];
+                uint32_t value = patch_values[patch_index];
+
+                header_color_gain[patch_offset] =
+                    (unsigned char)(value >> 24U);
+                header_color_gain[patch_offset + 1U] =
+                    (unsigned char)(value >> 16U);
+                header_color_gain[patch_offset + 2U] =
+                    (unsigned char)(value >> 8U);
+                header_color_gain[patch_offset + 3U] =
+                    (unsigned char)value;
+            }
+            break;
+        }
+    }
+    CHECK(fixture_offset + 54U < sizeof(public_gain_map_fixture));
+    for (fixture_offset = 4U;
+         fixture_offset + 4U < sizeof(header_color_gain);
+         ++fixture_offset) {
+        if (header_color_gain[fixture_offset] == 'm' &&
+            header_color_gain[fixture_offset + 1U] == 'd' &&
+            header_color_gain[fixture_offset + 2U] == 'a' &&
+            header_color_gain[fixture_offset + 3U] == 't') {
+            size_t patch_offset = fixture_offset - 4U;
+            uint32_t value = avifdec_load_u32be(
+                header_color_gain + patch_offset) + 20U;
+
+            header_color_gain[patch_offset] =
+                (unsigned char)(value >> 24U);
+            header_color_gain[patch_offset + 1U] =
+                (unsigned char)(value >> 16U);
+            header_color_gain[patch_offset + 2U] =
+                (unsigned char)(value >> 8U);
+            header_color_gain[patch_offset + 3U] =
+                (unsigned char)value;
+            break;
+        }
+    }
+    CHECK(fixture_offset + 4U < sizeof(header_color_gain));
+    for (fixture_offset = 4U;
+         fixture_offset + 16U < sizeof(header_color_gain);
+         ++fixture_offset) {
+        if (header_color_gain[fixture_offset] == 'i' &&
+            header_color_gain[fixture_offset + 1U] == 'p' &&
+            header_color_gain[fixture_offset + 2U] == 'm' &&
+            header_color_gain[fixture_offset + 3U] == 'a') {
+            size_t cursor = fixture_offset + 12U;
+            size_t entry;
+
+            for (entry = 0U; entry < 3U; ++entry) {
+                uint16_t item_id = avifdec_load_u16be(
+                    header_color_gain + cursor);
+                uint8_t association_count =
+                    header_color_gain[cursor + 2U];
+                size_t association;
+
+                for (association = 0U;
+                     association < association_count;
+                     ++association) {
+                    unsigned char *value =
+                        &header_color_gain[
+                            cursor + 3U + association];
+
+                    if (item_id != 2U &&
+                        (*value & 0x7fU) == 4U) {
+                        *value = 0U;
+                    }
+                }
+                cursor += 3U + association_count;
+            }
+            break;
+        }
+    }
+    CHECK(fixture_offset + 16U < sizeof(header_color_gain));
+    for (fixture_offset = 4U;
+         fixture_offset + 16U < sizeof(header_color_gain);
+         ++fixture_offset) {
+        if (header_color_gain[fixture_offset] == 'i' &&
+            header_color_gain[fixture_offset + 1U] == 's' &&
+            header_color_gain[fixture_offset + 2U] == 'p' &&
+            header_color_gain[fixture_offset + 3U] == 'e') {
+            header_color_gain[fixture_offset + 8U] = 0U;
+            header_color_gain[fixture_offset + 9U] = 0U;
+            header_color_gain[fixture_offset + 10U] = 0U;
+            header_color_gain[fixture_offset + 11U] = 2U;
+            header_color_gain[fixture_offset + 12U] = 0U;
+            header_color_gain[fixture_offset + 13U] = 0U;
+            header_color_gain[fixture_offset + 14U] = 0U;
+            header_color_gain[fixture_offset + 15U] = 2U;
+            break;
+        }
+    }
+    CHECK(fixture_offset + 16U < sizeof(header_color_gain));
+    CHECK(avifdec_gain_map_query(
+              header_color_gain, sizeof(header_color_gain), 0,
+              &gain_map, &error) == AVIFDEC_OK);
+    CHECK(gain_map.present == 1U &&
+          gain_map.base_color.color_primaries == 9U &&
+          gain_map.base_color.transfer_characteristics == 16U &&
+          gain_map.base_color.matrix_coefficients == 9U &&
+          gain_map.base_color.color_range == 1U &&
+          gain_map.base_color.has_nclx == 0U);
+
+    avifdec_memory_fill(&image_info, 0U, sizeof(image_info));
+    image_info.width = 1U;
+    image_info.height = 1U;
+    image_info.presentation_width = 1U;
+    image_info.presentation_height = 1U;
+    image_info.crop.width = 1U;
+    image_info.crop.height = 1U;
+    image_info.color_primaries = 1U;
+    image_info.transfer_characteristics = 13U;
+    image_info.matrix_coefficients = 0U;
+    image_info.color_range = 1U;
+    image_info.has_nclx = 1U;
+    image_info.bit_depth = 8U;
+    image_info.channel_count = 3U;
+    avifdec_memory_fill(&image, 0U, sizeof(image));
+    image.planes[0] = &y;
+    image.planes[1] = &u;
+    image.planes[2] = &v;
+    image.strides[0] = 1U;
+    image.strides[1] = 1U;
+    image.strides[2] = 1U;
+    image.widths[0] = 1U;
+    image.widths[1] = 1U;
+    image.widths[2] = 1U;
+    image.heights[0] = 1U;
+    image.heights[1] = 1U;
+    image.heights[2] = 1U;
+    image.bit_depth = 8U;
+    CHECK(avifdec_image_color_description(
+              &image_info, &color, &error) == AVIFDEC_OK);
+    avifdec_color_options_default(&color_options);
+    color_options.destination_color_primaries = 1U;
+    color_options.destination_transfer_characteristics = 13U;
+    CHECK(avifdec_color_transform_query(
+              &color, &color_options, 0,
+              &transform_info, &error) == AVIFDEC_OK);
+    CHECK(transform_info.workspace_required == 0U);
+    CHECK(avifdec_color_transform_init(
+              &color, &color_options, 0, 0, 0U,
+              &transform, &error) == AVIFDEC_OK);
+    avifdec_memory_fill(&rgb, 0U, sizeof(rgb));
+    rgb.pixels = pixels;
+    rgb.stride = sizeof(pixels);
+    rgb.width = 1U;
+    rgb.height = 1U;
+    rgb.format = AVIFDEC_RGBF32;
+    CHECK(avifdec_image_to_rgb_with_transform(
+              &image, &image_info, &transform,
+              &rgb, &error) == AVIFDEC_OK);
+    CHECK(pixels[0] == pixels[0] &&
+          pixels[1] == pixels[1] &&
+          pixels[2] == pixels[2]);
+    CHECK(avifdec_image_to_rgb(
+              &image, &image_info, &rgb, &error) ==
+          AVIFDEC_INVALID_ARGUMENT);
+
+    image_info.transfer_characteristics = 8U;
+    color.transfer_characteristics = 8U;
+    color_options.destination_transfer_characteristics = 8U;
+    CHECK(avifdec_color_transform_init(
+              &color, &color_options, 0, 0, 0U,
+              &transform, &error) == AVIFDEC_OK);
+    avifdec_memory_fill(&gain_map, 0U, sizeof(gain_map));
+    gain_map.present = 1U;
+    gain_map.channel_count = 1U;
+    gain_map.use_base_color_space = 1U;
+    gain_map.base_image = image_info;
+    gain_map.gain_map_image = image_info;
+    gain_map.gain_map_image.monochrome = 1U;
+    gain_map.gain_map_image.channel_count = 1U;
+    gain_map.gain_map_image.color_primaries = 2U;
+    gain_map.gain_map_image.transfer_characteristics = 2U;
+    gain_map.gain_map_image.matrix_coefficients = 2U;
+    gain_map.base_color = color;
+    gain_map.alternate_color = color;
+    gain_map.base_hdr_headroom.denominator = 1U;
+    gain_map.alternate_hdr_headroom.numerator = 1U;
+    gain_map.alternate_hdr_headroom.denominator = 1U;
+    {
+        size_t channel;
+
+        for (channel = 0U; channel < 3U; ++channel) {
+            gain_map.gain_map_min[channel].denominator = 1U;
+            gain_map.gain_map_max[channel].numerator = 1;
+            gain_map.gain_map_max[channel].denominator = 1U;
+            gain_map.gain_map_gamma[channel].numerator = 1U;
+            gain_map.gain_map_gamma[channel].denominator = 1U;
+            gain_map.base_offset[channel].denominator = 1U;
+            gain_map.alternate_offset[channel].denominator = 1U;
+        }
+    }
+    avifdec_memory_fill(&gain_image, 0U, sizeof(gain_image));
+    gain_image.planes[0] = &gain_plane;
+    gain_image.strides[0] = 1U;
+    gain_image.widths[0] = 1U;
+    gain_image.heights[0] = 1U;
+    gain_image.bit_depth = 8U;
+    gain_image.monochrome = 1U;
+    gain_options.display_headroom = 2.0f;
+    gain_options.flags = 0U;
+    y = 64U;
+    u = 64U;
+    v = 64U;
+    rgb.pixels = pixels;
+    rgb.stride = sizeof(pixels);
+    rgb.format = AVIFDEC_RGBF32;
+    CHECK(avifdec_gain_map_apply(
+              &image, &gain_image, &gain_map, &transform,
+              &gain_options, &rgb, &error) == AVIFDEC_OK);
+    CHECK(pixels[0] > 0.49f && pixels[0] < 0.51f);
+
+    CHECK(avifdec_sequence_index_query(
+              public_sequence_fixture,
+              sizeof(public_sequence_fixture), 0,
+              &index_info, &error) == AVIFDEC_OK);
+    CHECK(index_info.workspace_required > 1U &&
+          index_info.workspace_required < sizeof(index_workspace) &&
+          index_info.track_count == 1U &&
+          index_info.sample_count == 1U &&
+          index_info.presentation_count == 1U);
+    avifdec_memory_fill(&short_index, 0xffU, sizeof(short_index));
+    CHECK(avifdec_sequence_index_init(
+              public_sequence_fixture,
+              sizeof(public_sequence_fixture), 0,
+              index_memory, index_info.workspace_required - 1U,
+              &short_index, &initialized_info, &error) ==
+          AVIFDEC_OUT_OF_MEMORY);
+    CHECK(initialized_info.workspace_required ==
+              index_info.workspace_required &&
+          short_index.opaque[0] == 0U);
+    CHECK(avifdec_sequence_index_init(
+              public_sequence_fixture,
+              sizeof(public_sequence_fixture), 0,
+              index_memory, index_info.workspace_required,
+              &index, &initialized_info, &error) == AVIFDEC_OK);
+    CHECK(initialized_info.workspace_required ==
+          index_info.workspace_required);
+    CHECK(avifdec_sequence_track_query(
+              &index, 0U, &track, &error) == AVIFDEC_OK);
+    CHECK(track.track_id == 1U && track.sample_count == 1U);
+    CHECK(avifdec_sequence_select(
+              &index, 0, &selection, &error) == AVIFDEC_OK);
+    CHECK(selection.main_track_id == 1U &&
+          selection.presentation_count == 1U);
+    CHECK(avifdec_sequence_presentation_query(
+              &index, &selection, 0U,
+              &presentation, &error) == AVIFDEC_OK);
+    CHECK(presentation.image.workspace_required <=
+          sizeof(decode_workspace));
+    avifdec_memory_fill(&image, 0U, sizeof(image));
+    image.planes[0] = &decoded_planes[0];
+    image.planes[1] = &decoded_planes[1];
+    image.planes[2] = &decoded_planes[2];
+    image.strides[0] = 1U;
+    image.strides[1] = 1U;
+    image.strides[2] = 1U;
+    CHECK(avifdec_sequence_decode_presentation(
+              &index, &selection, 0U, decode_workspace,
+              presentation.image.workspace_required, &image,
+              &trace, &presentation, &error) == AVIFDEC_OK);
+    CHECK(trace.frame_count == 1U &&
+          image.widths[0] == 1U && image.heights[0] == 1U);
+    CHECK(avifdec_sequence_metadata_query(
+              &index, 0U, 0, 0U, 0, 0U, 0, 0U,
+              &metadata_result, &error) == AVIFDEC_OK);
+    CHECK(metadata_result.metadata_count == 0U &&
+          metadata_result.thumbnail_count == 0U &&
+          metadata_result.span_count == 0U);
+
+    stale_index = index;
+    status = avifdec_sequence_index_init(
+        public_sequence_fixture,
+        sizeof(public_sequence_fixture), 0,
+        index_memory, index_info.workspace_required,
+        &index, &initialized_info, &error);
+    CHECK(status == AVIFDEC_OK);
+    CHECK(avifdec_sequence_track_query(
+              &stale_index, 0U, &track, &error) ==
+          AVIFDEC_INVALID_ARGUMENT);
+
+    CHECK(sizeof(public_sequence_fixture) > 236U);
+    avifdec_memory_copy(
+        track_metadata_file, public_sequence_fixture, 236U);
+    avifdec_memory_copy(
+        track_metadata_file + 236U, public_track_metadata_box,
+        sizeof(public_track_metadata_box));
+    avifdec_memory_copy(
+        track_metadata_file + 236U +
+            sizeof(public_track_metadata_box),
+        public_sequence_fixture + 236U,
+        sizeof(public_sequence_fixture) - 236U);
+    {
+        static const size_t size_offsets[2] = { 20U, 136U };
+        size_t patch_index;
+
+        for (patch_index = 0U; patch_index < 2U; ++patch_index) {
+            size_t patch_offset = size_offsets[patch_index];
+            uint32_t value = avifdec_load_u32be(
+                track_metadata_file + patch_offset) +
+                (uint32_t)sizeof(public_track_metadata_box);
+
+            track_metadata_file[patch_offset] =
+                (unsigned char)(value >> 24U);
+            track_metadata_file[patch_offset + 1U] =
+                (unsigned char)(value >> 16U);
+            track_metadata_file[patch_offset + 2U] =
+                (unsigned char)(value >> 8U);
+            track_metadata_file[patch_offset + 3U] =
+                (unsigned char)value;
+        }
+    }
+    for (fixture_offset = 4U;
+         fixture_offset + 16U < sizeof(track_metadata_file);
+         ++fixture_offset) {
+        if (track_metadata_file[fixture_offset] == 's' &&
+            track_metadata_file[fixture_offset + 1U] == 't' &&
+            track_metadata_file[fixture_offset + 2U] == 'c' &&
+            track_metadata_file[fixture_offset + 3U] == 'o') {
+            uint32_t value = avifdec_load_u32be(
+                track_metadata_file + fixture_offset + 12U) +
+                (uint32_t)sizeof(public_track_metadata_box);
+            size_t patch_offset = fixture_offset + 12U;
+
+            track_metadata_file[patch_offset] =
+                (unsigned char)(value >> 24U);
+            track_metadata_file[patch_offset + 1U] =
+                (unsigned char)(value >> 16U);
+            track_metadata_file[patch_offset + 2U] =
+                (unsigned char)(value >> 8U);
+            track_metadata_file[patch_offset + 3U] =
+                (unsigned char)value;
+            break;
+        }
+    }
+    CHECK(fixture_offset + 16U < sizeof(track_metadata_file));
+    CHECK(avifdec_sequence_index_query(
+              track_metadata_file, sizeof(track_metadata_file), 0,
+              &index_info, &error) == AVIFDEC_OK);
+    CHECK(index_info.workspace_required < sizeof(index_workspace));
+    CHECK(avifdec_sequence_index_init(
+              track_metadata_file, sizeof(track_metadata_file), 0,
+              index_memory, index_info.workspace_required,
+              &index, &initialized_info, &error) == AVIFDEC_OK);
+    CHECK(avifdec_sequence_metadata_query(
+              &index, 0U, 0, 0U, 0, 0U, 0, 0U,
+              &metadata_result, &error) == AVIFDEC_OK);
+    CHECK(metadata_result.metadata_count == 1U &&
+          metadata_result.thumbnail_count == 0U &&
+          metadata_result.span_count == 1U);
+    CHECK(avifdec_sequence_metadata_query(
+              &index, 1U, &sequence_metadata, 1U,
+              0, 0U, 0, 0U, &metadata_result, &error) ==
+          AVIFDEC_OUT_OF_MEMORY);
+    CHECK(metadata_result.metadata_count == 1U &&
+          metadata_result.span_count == 1U);
+    CHECK(avifdec_sequence_metadata_query(
+              &index, 1U, &sequence_metadata, 1U,
+              0, 0U, &sequence_metadata_span, 1U,
+              &metadata_result, &error) == AVIFDEC_OK);
+    CHECK(sequence_metadata.kind == AVIFDEC_METADATA_XMP &&
+          sequence_metadata.scope == AVIFDEC_METADATA_SCOPE_TRACK &&
+          sequence_metadata.target_track_id == 1U &&
+          (sequence_metadata.flags &
+           AVIFDEC_METADATA_FLAG_SEQUENCE_WIDE) != 0U &&
+          sequence_metadata_span.size == 4U &&
+          sequence_metadata_span.data[0] == '<' &&
+          sequence_metadata_span.data[1] == 'x');
+    avifdec_memory_copy(
+        top_metadata_file, public_sequence_fixture, 20U);
+    avifdec_memory_copy(
+        top_metadata_file + 20U, public_track_metadata_box,
+        sizeof(public_track_metadata_box));
+    avifdec_memory_copy(
+        top_metadata_file + 20U +
+            sizeof(public_track_metadata_box),
+        public_sequence_fixture + 20U,
+        sizeof(public_sequence_fixture) - 20U);
+    for (fixture_offset = 4U;
+         fixture_offset + 16U < sizeof(top_metadata_file);
+         ++fixture_offset) {
+        if (top_metadata_file[fixture_offset] == 's' &&
+            top_metadata_file[fixture_offset + 1U] == 't' &&
+            top_metadata_file[fixture_offset + 2U] == 'c' &&
+            top_metadata_file[fixture_offset + 3U] == 'o') {
+            uint32_t value = avifdec_load_u32be(
+                top_metadata_file + fixture_offset + 12U) +
+                (uint32_t)sizeof(public_track_metadata_box);
+            size_t patch_offset = fixture_offset + 12U;
+
+            top_metadata_file[patch_offset] =
+                (unsigned char)(value >> 24U);
+            top_metadata_file[patch_offset + 1U] =
+                (unsigned char)(value >> 16U);
+            top_metadata_file[patch_offset + 2U] =
+                (unsigned char)(value >> 8U);
+            top_metadata_file[patch_offset + 3U] =
+                (unsigned char)value;
+            break;
+        }
+    }
+    CHECK(fixture_offset + 16U < sizeof(top_metadata_file));
+    CHECK(avifdec_sequence_index_query(
+              top_metadata_file, sizeof(top_metadata_file), 0,
+              &index_info, &error) == AVIFDEC_OK);
+    CHECK(index_info.workspace_required < sizeof(index_workspace));
+    CHECK(avifdec_sequence_index_init(
+              top_metadata_file, sizeof(top_metadata_file), 0,
+              index_memory, index_info.workspace_required,
+              &index, &initialized_info, &error) == AVIFDEC_OK);
+    CHECK(avifdec_sequence_metadata_query(
+              &index, 0U, &sequence_metadata, 1U,
+              0, 0U, &sequence_metadata_span, 1U,
+              &metadata_result, &error) == AVIFDEC_OK);
+    CHECK(metadata_result.metadata_count == 1U &&
+          sequence_metadata.scope ==
+              AVIFDEC_METADATA_SCOPE_UNSCOPED &&
+          sequence_metadata.target_track_id == 0U &&
+          sequence_metadata_span.size == 4U);
+    CHECK(avifdec_sequence_metadata_query(
+              &index, 1U, 0, 0U, 0, 0U, 0, 0U,
+              &metadata_result, &error) == AVIFDEC_OK);
+    CHECK(metadata_result.metadata_count == 0U &&
+          metadata_result.span_count == 0U);
+    return 0;
+}
+
 static void make_sato_fixture(QueryFixture *fixture) {
     static const unsigned char expression[] = {
         0x02U, 0x05U,
@@ -2456,8 +3353,10 @@ static int test_av1_obu_errors(void) {
         info.matrix_coefficients = 9U;
         info.color_range = 1U;
         CHECK(avifdec_av1_query(&span, 1U, 0, &info, &error) == AVIFDEC_OK);
-        CHECK(info.color_primaries == 9U && info.transfer_characteristics == 16U &&
-            info.matrix_coefficients == 9U && info.color_range == 1U);
+        CHECK(info.color_primaries == 9U &&
+              info.transfer_characteristics == 16U &&
+              info.matrix_coefficients == 9U &&
+              info.color_range == 1U);
     info.has_nclx = 0U;
 
     span.data = truncated_leb;
@@ -5021,6 +5920,8 @@ int main(int argc, char **argv) {
     result = test_bmff_mutation_sweep();
     if (result != 0) return result;
     result = test_avif_query_extents();
+    if (result != 0) return result;
+    result = test_v14_public_api();
     if (result != 0) return result;
     result = test_avif_item_graph();
     if (result != 0) return result;

@@ -1,6 +1,10 @@
 #include "avifdec.h"
 #include "av1.h"
 #include "avif_internal.h"
+#include "avif_color.h"
+#include "avif_gain_map.h"
+#include "avif_item_index.h"
+#include "avif_metadata_items.h"
 #include "avif_parse.h"
 #include "avif_properties_internal.h"
 #include "avif_sato.h"
@@ -129,6 +133,38 @@ static AvifdecStatus avif_parse_properties(AvifContext *context,
     property_context.error = context->error;
     property_context.failed = &context->failed;
     return avif_properties_parse(&property_context, item_id, info);
+}
+
+static void avif_attach_color_property_error(
+    const AvifContext *context,
+    uint32_t item_id) {
+    size_t association_index;
+
+    if (context->error == 0 ||
+        context->error->context !=
+            AVIFDEC_FOURCC('n', 'c', 'l', 'x') ||
+        context->error->offset != 0U) {
+        return;
+    }
+    for (association_index = 0U;
+         association_index < context->association_count;
+         ++association_index) {
+        const AvifAssociation *association =
+            &context->associations[association_index];
+        const AvifProperty *property;
+
+        if (association->item_id != item_id) continue;
+        property =
+            &context->properties[association->property_index - 1U];
+        if (property->type == AVIFDEC_FOURCC('c', 'o', 'l', 'r') &&
+            property->box.payload_size >= 4U &&
+            avifdec_load_u32be(
+                context->data + property->box.payload_offset) ==
+                AVIFDEC_FOURCC('n', 'c', 'l', 'x')) {
+            context->error->offset = property->box.offset;
+            return;
+        }
+    }
 }
 
 static AvifdecStatus avif_apply_layer_slice(AvifContext *context,
@@ -261,7 +297,10 @@ static AvifdecStatus avif_query_av1_item(
     status = avifdec_av1_query_ex(
         spans, info->extent_count, &item_limits, worker_count, info,
         context->error);
-    if (status != AVIFDEC_OK) return status;
+    if (status != AVIFDEC_OK) {
+        avif_attach_color_property_error(context, item_id);
+        return status;
+    }
     if (info->has_a1op &&
         info->a1op_index >= info->operating_point_count) {
         return avif_fail(context, AVIFDEC_INVALID_DATA,
@@ -2224,4 +2263,909 @@ AvifdecStatus avifdec_decode(
     return avifdec_decode_ex(
         data, size, limits, 0, workspace,
         workspace_size, image, trace, error);
+}
+
+typedef struct {
+    AvifItemIndex *item_index;
+    AvifContext *decode_context;
+    uint32_t payload_item_id;
+} AvifGainMapApiIndexContext;
+
+static void avif_gain_map_api_error_clear(AvifdecError *error) {
+    if (error != 0) {
+        error->status = AVIFDEC_OK;
+        error->offset = 0U;
+        error->context = 0U;
+    }
+}
+
+static AvifdecStatus avif_gain_map_api_fail(
+    AvifdecError *error,
+    AvifdecStatus status) {
+    if (error != 0 && error->status == AVIFDEC_OK) {
+        error->status = status;
+        error->offset = 0U;
+        error->context = 0U;
+    }
+    return status;
+}
+
+static int avif_gain_map_api_unsupported_essential(
+    const AvifItemIndex *index,
+    uint32_t item_id) {
+    size_t association_index;
+
+    for (association_index = 0U;
+         association_index < index->association_count;
+         ++association_index) {
+        const AvifItemIndexAssociation *association =
+            &index->associations[association_index];
+        const AvifItemIndexProperty *property;
+
+        if (association->item_id != item_id ||
+            association->essential == 0U) {
+            continue;
+        }
+        property =
+            &index->properties[association->property_index - 1U];
+        if (!avif_item_index_property_type_supported(property->type)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static AvifdecStatus avif_gain_map_api_item_at(
+    void *opaque,
+    size_t item_index,
+    AvifGainMapIndexedItem *item,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+    const AvifItemIndexItem *indexed_item;
+    size_t reference_index;
+    AvifdecStatus status;
+
+    if (context == 0 || context->item_index == 0 ||
+        context->decode_context == 0 || item == 0 ||
+        item_index >= context->item_index->item_count) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    avifdec_memory_fill(item, 0U, sizeof(*item));
+    indexed_item = &context->item_index->items[item_index];
+    item->id = indexed_item->id;
+    item->type = indexed_item->type;
+    item->source_offset = indexed_item->source_offset;
+    item->hidden = (uint8_t)(
+        (indexed_item->flags & AVIF_ITEM_INDEX_ITEM_FLAG_HIDDEN) != 0U);
+    item->has_unsupported_essential_property = (uint8_t)
+        avif_gain_map_api_unsupported_essential(
+            context->item_index, indexed_item->id);
+    for (reference_index = 0U;
+         reference_index < context->item_index->reference_count;
+         ++reference_index) {
+        const AvifItemIndexReference *reference =
+            &context->item_index->references[reference_index];
+
+        if (reference->type ==
+                AVIFDEC_FOURCC('t', 'h', 'm', 'b') &&
+            reference->from_item_id == indexed_item->id) {
+            item->is_thumbnail = 1U;
+            break;
+        }
+    }
+    if (item->has_unsupported_essential_property != 0U) {
+        return AVIFDEC_OK;
+    }
+    context->decode_context->failed = 0;
+    status = avif_parse_properties(
+        context->decode_context, indexed_item->id, &item->properties);
+    if (status != AVIFDEC_OK) return status;
+    item->color.color_primaries =
+        item->properties.color_primaries;
+    item->color.transfer_characteristics =
+        item->properties.transfer_characteristics;
+    item->color.matrix_coefficients =
+        item->properties.matrix_coefficients;
+    item->color.color_range = item->properties.color_range;
+    item->color.has_nclx = item->properties.has_nclx;
+    item->color.icc.data = item->properties.icc_data;
+    item->color.icc.size = item->properties.icc_size;
+    (void)error;
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus avif_gain_map_api_dimg(
+    void *opaque,
+    uint32_t from_item_id,
+    uint32_t *to_item_ids,
+    size_t id_capacity,
+    size_t *id_count,
+    size_t *reference_offset,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+
+    if (context == 0 || context->item_index == 0) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    return avif_item_index_query_references(
+        context->item_index, AVIFDEC_FOURCC('d', 'i', 'm', 'g'),
+        from_item_id, to_item_ids, id_capacity, id_count,
+        reference_offset, error);
+}
+
+static AvifdecStatus avif_gain_map_api_alternative(
+    void *opaque,
+    uint32_t first_item_id,
+    uint32_t second_item_id,
+    AvifGainMapAlternativeOrder *order,
+    size_t *group_offset,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+    AvifItemAlternativeOrder item_order;
+    AvifdecStatus status;
+
+    if (context == 0 || context->item_index == 0 ||
+        order == 0 || group_offset == 0 ||
+        first_item_id == 0U || second_item_id == 0U) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    *order = AVIF_GAIN_MAP_ALTERNATIVE_NONE;
+    *group_offset = 0U;
+    status = avif_item_index_alternative_order(
+        context->item_index, first_item_id, second_item_id,
+        &item_order, group_offset, error);
+    if (status != AVIFDEC_OK) return status;
+    if (item_order == AVIF_ITEM_ALTERNATIVE_FIRST_BEFORE_SECOND) {
+        *order = AVIF_GAIN_MAP_ALTERNATIVE_FIRST_BEFORE_SECOND;
+    } else if (item_order ==
+               AVIF_ITEM_ALTERNATIVE_SECOND_BEFORE_FIRST) {
+        *order = AVIF_GAIN_MAP_ALTERNATIVE_SECOND_BEFORE_FIRST;
+    }
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus avif_gain_map_api_span_at(
+    void *opaque,
+    size_t span_index,
+    AvifdecSpan *span,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+
+    if (context == 0 || context->item_index == 0 ||
+        context->payload_item_id == 0U) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    return avif_item_index_item_span_at(
+        context->item_index, context->payload_item_id,
+        span_index, span, error);
+}
+
+static AvifdecStatus avif_gain_map_api_payload(
+    void *opaque,
+    uint32_t item_id,
+    AvifGainMapSpanSource *source,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+    AvifItemPayload payload;
+    AvifdecStatus status;
+
+    if (context == 0 || context->item_index == 0 || source == 0) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    status = avif_item_index_resolve_item(
+        context->item_index, item_id, 0, 0U, &payload, error);
+    if (status != AVIFDEC_OK) return status;
+    context->payload_item_id = item_id;
+    source->context = context;
+    source->span_count = payload.span_count;
+    source->payload_offset =
+        avif_item_index_find_item(
+            context->item_index, item_id)->source_offset;
+    source->span_at = avif_gain_map_api_span_at;
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus avif_gain_map_api_query_child(
+    void *opaque,
+    uint32_t item_id,
+    const AvifdecExecutor *executor,
+    AvifdecImageInfo *info,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+    AvifdecStatus status;
+
+    if (context == 0 || context->decode_context == 0 || info == 0 ||
+        !avif_executor_valid(executor)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    context->decode_context->error = error;
+    context->decode_context->failed = 0;
+    status = avif_query_item_with_workers(
+        context->decode_context, item_id, 0U,
+        avif_executor_width(executor), info);
+    if (status != AVIFDEC_OK) return status;
+    return avif_query_alpha_item(
+        context->decode_context, item_id, info);
+}
+
+static AvifGainMapItemIndex avif_gain_map_api_index(
+    AvifGainMapApiIndexContext *context) {
+    AvifGainMapItemIndex result;
+
+    avifdec_memory_fill(&result, 0U, sizeof(result));
+    result.context = context;
+    result.primary_item_id = context->item_index->primary_item_id;
+    result.item_count = context->item_index->item_count;
+    result.item_at = avif_gain_map_api_item_at;
+    result.dimg = avif_gain_map_api_dimg;
+    result.alternative_order = avif_gain_map_api_alternative;
+    result.item_payload = avif_gain_map_api_payload;
+    result.query_child = avif_gain_map_api_query_child;
+    return result;
+}
+
+static void avif_gain_map_api_info_to_public(
+    const AvifGainMapInfo *source,
+    AvifdecGainMapInfo *destination) {
+    size_t channel;
+
+    avifdec_memory_fill(destination, 0U, sizeof(*destination));
+    destination->base_image = source->base_image;
+    destination->gain_map_image = source->gain_map_image;
+    destination->base_color = source->base_color;
+    destination->alternate_color = source->alternate_color;
+    destination->base_item_id = source->base_item_id;
+    destination->alternate_item_id = source->alternate_item_id;
+    destination->gain_map_item_id = source->gain_map_item_id;
+    destination->workspace_required = source->workspace_required;
+    destination->base_hdr_headroom =
+        source->metadata.base_hdr_headroom;
+    destination->alternate_hdr_headroom =
+        source->metadata.alternate_hdr_headroom;
+    for (channel = 0U; channel < 3U; ++channel) {
+        destination->gain_map_min[channel] =
+            source->metadata.gain_map_min[channel];
+        destination->gain_map_max[channel] =
+            source->metadata.gain_map_max[channel];
+        destination->gain_map_gamma[channel] =
+            source->metadata.gain_map_gamma[channel];
+        destination->base_offset[channel] =
+            source->metadata.base_offset[channel];
+        destination->alternate_offset[channel] =
+            source->metadata.alternate_offset[channel];
+    }
+    destination->present = source->present;
+    destination->metadata_version =
+        source->metadata.metadata_version;
+    destination->channel_count = source->metadata.channel_count;
+    destination->base_is_hdr = source->base_is_hdr;
+    destination->use_base_color_space =
+        source->metadata.use_base_color_space;
+    destination->backward_direction =
+        source->metadata.backward_direction;
+    destination->common_denominator =
+        source->metadata.common_denominator;
+}
+
+static void avif_gain_map_api_info_from_public(
+    const AvifdecGainMapInfo *source,
+    AvifGainMapInfo *destination) {
+    size_t channel;
+
+    avifdec_memory_fill(destination, 0U, sizeof(*destination));
+    destination->base_image = source->base_image;
+    destination->gain_map_image = source->gain_map_image;
+    destination->base_color = source->base_color;
+    destination->alternate_color = source->alternate_color;
+    destination->base_item_id = source->base_item_id;
+    destination->alternate_item_id = source->alternate_item_id;
+    destination->gain_map_item_id = source->gain_map_item_id;
+    destination->workspace_required = source->workspace_required;
+    destination->metadata.base_hdr_headroom =
+        source->base_hdr_headroom;
+    destination->metadata.alternate_hdr_headroom =
+        source->alternate_hdr_headroom;
+    for (channel = 0U; channel < 3U; ++channel) {
+        destination->metadata.gain_map_min[channel] =
+            source->gain_map_min[channel];
+        destination->metadata.gain_map_max[channel] =
+            source->gain_map_max[channel];
+        destination->metadata.gain_map_gamma[channel] =
+            source->gain_map_gamma[channel];
+        destination->metadata.base_offset[channel] =
+            source->base_offset[channel];
+        destination->metadata.alternate_offset[channel] =
+            source->alternate_offset[channel];
+    }
+    destination->present = source->present;
+    destination->metadata.metadata_version =
+        source->metadata_version;
+    destination->metadata.minimum_version = 0U;
+    destination->metadata.writer_version = 0U;
+    destination->metadata.channel_count = source->channel_count;
+    destination->base_is_hdr = source->base_is_hdr;
+    destination->metadata.use_base_color_space =
+        source->use_base_color_space;
+    destination->metadata.backward_direction =
+        source->backward_direction;
+    destination->metadata.common_denominator =
+        source->common_denominator;
+}
+
+static AvifdecStatus avif_context_from_item_index(
+    AvifContext *context,
+    const AvifItemIndex *index,
+    const AvifdecLimits *limits,
+    AvifdecError *error) {
+    size_t item_index;
+    size_t property_index;
+    size_t association_index;
+    size_t reference_index;
+
+    if (context == 0 || index == 0) return AVIFDEC_INVALID_ARGUMENT;
+    if (index->item_count > AVIF_MAX_ITEMS ||
+        index->property_count > AVIF_MAX_PROPERTIES ||
+        index->association_count > AVIF_MAX_ASSOCIATIONS ||
+        index->reference_count > AVIF_MAX_REFERENCES) {
+        return AVIFDEC_UNSUPPORTED;
+    }
+    avifdec_memory_fill(context, 0U, sizeof(*context));
+    if (error != 0) {
+        error->status = AVIFDEC_OK;
+        error->offset = 0U;
+        error->context = 0U;
+    }
+    context->data = index->data;
+    context->size = index->size;
+    context->limits = avifdec_limits_effective(limits);
+    context->error = error;
+    context->meta = index->meta;
+    context->handler = index->handler;
+    context->pitm = index->pitm;
+    context->iloc = index->iloc;
+    context->iinf = index->iinf;
+    context->iref = index->iref;
+    context->ipco = index->ipco;
+    context->item_count = index->item_count;
+    for (item_index = 0U;
+         item_index < index->item_count;
+         ++item_index) {
+        context->items[item_index].id = index->items[item_index].id;
+        context->items[item_index].type = index->items[item_index].type;
+    }
+    context->property_count = index->property_count;
+    for (property_index = 0U;
+         property_index < index->property_count;
+         ++property_index) {
+        context->properties[property_index].box =
+            index->properties[property_index].box;
+        context->properties[property_index].type =
+            index->properties[property_index].type;
+    }
+    context->association_count = index->association_count;
+    for (association_index = 0U;
+         association_index < index->association_count;
+         ++association_index) {
+        context->associations[association_index].item_id =
+            index->associations[association_index].item_id;
+        context->associations[association_index].property_index =
+            index->associations[association_index].property_index;
+        context->associations[association_index].essential =
+            index->associations[association_index].essential;
+    }
+    context->reference_count = index->reference_count;
+    for (reference_index = 0U;
+         reference_index < index->reference_count;
+         ++reference_index) {
+        context->references[reference_index].from_item_id =
+            index->references[reference_index].from_item_id;
+        context->references[reference_index].to_item_id =
+            index->references[reference_index].to_item_id;
+        context->references[reference_index].type =
+            index->references[reference_index].type;
+    }
+    context->item_index = index;
+    return AVIFDEC_OK;
+}
+
+static AvifdecStatus avif_gain_map_api_plan(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifItemIndex *item_index,
+    AvifContext *decode_context,
+    AvifGainMapApiIndexContext *adapter_context,
+    AvifGainMapDecodePlan *plan,
+    AvifdecError *error) {
+    AvifItemIndexLimits item_limits;
+    AvifGainMapItemIndex adapter;
+    AvifdecStatus status;
+
+    if (!avif_executor_valid(executor)) {
+        return avif_gain_map_api_fail(
+            error, AVIFDEC_INVALID_ARGUMENT);
+    }
+    avif_item_index_limits_from_public(limits, &item_limits);
+    status = avif_item_index_build(
+        data, size, &item_limits, item_index, error);
+    if (status != AVIFDEC_OK) return status;
+    status = avif_context_from_item_index(
+        decode_context, item_index, limits, error);
+    if (status != AVIFDEC_OK) return status;
+    adapter_context->item_index = item_index;
+    adapter_context->decode_context = decode_context;
+    adapter_context->payload_item_id = 0U;
+    adapter = avif_gain_map_api_index(adapter_context);
+    return avif_gain_map_query_decode_plan(
+        &adapter, executor, plan, error);
+}
+
+AvifdecStatus avifdec_gain_map_query_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error) {
+    AvifItemIndex item_index;
+    AvifContext decode_context;
+    AvifGainMapApiIndexContext adapter_context;
+    AvifGainMapDecodePlan plan;
+    AvifdecStatus status;
+
+    avif_gain_map_api_error_clear(error);
+    if (info != 0) {
+        avifdec_memory_fill(info, 0U, sizeof(*info));
+    }
+    if (info == 0 || (data == 0 && size != 0U)) {
+        return avif_gain_map_api_fail(
+            error, AVIFDEC_INVALID_ARGUMENT);
+    }
+    status = avif_gain_map_api_plan(
+        data, size, limits, executor, &item_index,
+        &decode_context, &adapter_context, &plan, error);
+    if (status != AVIFDEC_OK) return status;
+    avif_gain_map_api_info_to_public(&plan.info, info);
+    return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_gain_map_query(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error) {
+    return avifdec_gain_map_query_ex(
+        data, size, limits, 0, info, error);
+}
+
+static AvifdecStatus avif_gain_map_api_decode_child(
+    void *opaque,
+    uint32_t item_id,
+    const AvifdecExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecError *error) {
+    AvifGainMapApiIndexContext *context =
+        (AvifGainMapApiIndexContext *)opaque;
+    AvifdecImageInfo info;
+    AvifdecStatus status;
+
+    status = avif_gain_map_api_query_child(
+        opaque, item_id, executor, &info, error);
+    if (status != AVIFDEC_OK) return status;
+    context->decode_context->error = error;
+    context->decode_context->failed = 0;
+    status = avif_decode_item(
+        context->decode_context, item_id, 0U, executor,
+        workspace, workspace_size, image, trace);
+    if (status != AVIFDEC_OK || info.has_alpha == 0U) return status;
+    {
+        AvifdecImageInfo alpha_info;
+        AvifdecImage alpha_image;
+        AvifdecEntropyTrace alpha_trace;
+
+        if (image->alpha_plane == 0 ||
+            image->alpha_stride < info.width) {
+            return AVIFDEC_INVALID_ARGUMENT;
+        }
+        status = avif_query_item(
+            context->decode_context, info.alpha_item_id,
+            0U, &alpha_info);
+        if (status != AVIFDEC_OK) return status;
+        avifdec_memory_fill(&alpha_image, 0U, sizeof(alpha_image));
+        alpha_image.planes[0] = image->alpha_plane;
+        alpha_image.strides[0] = image->alpha_stride;
+        avifdec_memory_fill(
+            &alpha_trace, 0U, sizeof(alpha_trace));
+        status = avif_decode_item(
+            context->decode_context, info.alpha_item_id, 0U, 0,
+            workspace, workspace_size, &alpha_image,
+            trace == 0 ? 0 : &alpha_trace);
+        if (status != AVIFDEC_OK) return status;
+        image->alpha_width = alpha_image.widths[0];
+        image->alpha_height = alpha_image.heights[0];
+        image->alpha_bit_depth = alpha_info.bit_depth;
+        image->alpha_color_range = alpha_info.color_range;
+        image->alpha_premultiplied = info.alpha_premultiplied;
+        if (trace != 0) {
+            trace->frame_count += alpha_trace.frame_count;
+            trace->show_existing_frame_count +=
+                alpha_trace.show_existing_frame_count;
+            trace->tile_count += alpha_trace.tile_count;
+            trace->partition_nodes += alpha_trace.partition_nodes;
+            trace->block_count += alpha_trace.block_count;
+            trace->inter_block_count +=
+                alpha_trace.inter_block_count;
+            trace->compound_block_count +=
+                alpha_trace.compound_block_count;
+            trace->transform_count += alpha_trace.transform_count;
+            trace->nonzero_transform_count +=
+                alpha_trace.nonzero_transform_count;
+            trace->coefficient_count +=
+                alpha_trace.coefficient_count;
+            trace->transform_size_mask |=
+                alpha_trace.transform_size_mask;
+            trace->transform_type_mask |=
+                alpha_trace.transform_type_mask;
+            trace->checksum =
+                (trace->checksum * 0x100000001b3ULL) ^
+                alpha_trace.checksum;
+            trace->reference_state_checksum =
+                (trace->reference_state_checksum *
+                 0x100000001b3ULL) ^
+                alpha_trace.reference_state_checksum;
+            trace->mode_checksum =
+                (trace->mode_checksum * 0x100000001b3ULL) ^
+                alpha_trace.mode_checksum;
+            trace->inter_mode_checksum =
+                (trace->inter_mode_checksum *
+                 0x100000001b3ULL) ^
+                alpha_trace.inter_mode_checksum;
+            trace->mv_stack_checksum =
+                (trace->mv_stack_checksum * 0x100000001b3ULL) ^
+                alpha_trace.mv_stack_checksum;
+            trace->mv_checksum =
+                (trace->mv_checksum * 0x100000001b3ULL) ^
+                alpha_trace.mv_checksum;
+            trace->predictor_checksum =
+                (trace->predictor_checksum * 0x100000001b3ULL) ^
+                alpha_trace.predictor_checksum;
+            trace->quantized_checksum =
+                (trace->quantized_checksum * 0x100000001b3ULL) ^
+                alpha_trace.quantized_checksum;
+            trace->dequantized_checksum =
+                (trace->dequantized_checksum * 0x100000001b3ULL) ^
+                alpha_trace.dequantized_checksum;
+            trace->residual_checksum =
+                (trace->residual_checksum * 0x100000001b3ULL) ^
+                alpha_trace.residual_checksum;
+            trace->reconstruction_checksum =
+                (trace->reconstruction_checksum *
+                 0x100000001b3ULL) ^
+                alpha_trace.reconstruction_checksum;
+            trace->deblocked_checksum =
+                (trace->deblocked_checksum * 0x100000001b3ULL) ^
+                alpha_trace.deblocked_checksum;
+            trace->cdef_checksum =
+                (trace->cdef_checksum * 0x100000001b3ULL) ^
+                alpha_trace.cdef_checksum;
+            trace->superres_checksum =
+                (trace->superres_checksum * 0x100000001b3ULL) ^
+                alpha_trace.superres_checksum;
+            trace->restoration_checksum =
+                (trace->restoration_checksum *
+                 0x100000001b3ULL) ^
+                alpha_trace.restoration_checksum;
+        }
+    }
+    return AVIFDEC_OK;
+}
+
+static void avif_gain_map_api_prepare_image(
+    const AvifdecImageInfo *info,
+    const AvifdecImage *input,
+    AvifdecImage *output) {
+    uint32_t chroma_width;
+    uint32_t chroma_height;
+
+    *output = *input;
+    output->widths[0] = info->width;
+    output->heights[0] = info->height;
+    output->bit_depth = info->bit_depth;
+    output->monochrome = info->monochrome;
+    output->subsampling_x = info->subsampling_x;
+    output->subsampling_y = info->subsampling_y;
+    if (info->monochrome == 0U) {
+        chroma_width =
+            ((info->width - 1U) >> info->subsampling_x) + 1U;
+        chroma_height =
+            ((info->height - 1U) >> info->subsampling_y) + 1U;
+        output->widths[1] = chroma_width;
+        output->widths[2] = chroma_width;
+        output->heights[1] = chroma_height;
+        output->heights[2] = chroma_height;
+    }
+    if (info->has_alpha != 0U) {
+        output->alpha_width = info->width;
+        output->alpha_height = info->height;
+        output->alpha_bit_depth = info->alpha_bit_depth;
+        output->alpha_color_range = info->alpha_color_range;
+        output->alpha_premultiplied = info->alpha_premultiplied;
+    }
+}
+
+AvifdecStatus avifdec_gain_map_decode_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *base_image,
+    AvifdecImage *gain_map_image,
+    AvifdecEntropyTrace *base_trace,
+    AvifdecEntropyTrace *gain_map_trace,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error) {
+    AvifItemIndex item_index;
+    AvifContext decode_context;
+    AvifGainMapApiIndexContext adapter_context;
+    AvifGainMapDecodePlan plan;
+    AvifGainMapChildDecoder decoder;
+    AvifdecImage base_output;
+    AvifdecImage gain_output;
+    AvifdecStatus status;
+
+    avif_gain_map_api_error_clear(error);
+    if (info != 0) {
+        avifdec_memory_fill(info, 0U, sizeof(*info));
+    }
+    if (info == 0 || base_image == 0 || gain_map_image == 0 ||
+        (data == 0 && size != 0U) ||
+        (workspace == 0 && workspace_size != 0U)) {
+        return avif_gain_map_api_fail(
+            error, AVIFDEC_INVALID_ARGUMENT);
+    }
+    status = avif_gain_map_api_plan(
+        data, size, limits, executor, &item_index,
+        &decode_context, &adapter_context, &plan, error);
+    if (status != AVIFDEC_OK) return status;
+    avif_gain_map_api_info_to_public(&plan.info, info);
+    if (plan.info.present == 0U) {
+        return avif_gain_map_api_fail(
+            error, AVIFDEC_INVALID_DATA);
+    }
+    decoder.context = &adapter_context;
+    decoder.decode = avif_gain_map_api_decode_child;
+    avif_gain_map_api_prepare_image(
+        &plan.info.base_image, base_image, &base_output);
+    avif_gain_map_api_prepare_image(
+        &plan.info.gain_map_image, gain_map_image, &gain_output);
+    status = avif_gain_map_execute_decode_plan(
+        &plan, &decoder, executor, workspace, workspace_size,
+        &base_output, &gain_output,
+        base_trace, gain_map_trace, error);
+    if (status != AVIFDEC_OK) return status;
+    *base_image = base_output;
+    *gain_map_image = gain_output;
+    return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_gain_map_decode(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *base_image,
+    AvifdecImage *gain_map_image,
+    AvifdecEntropyTrace *base_trace,
+    AvifdecEntropyTrace *gain_map_trace,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error) {
+    return avifdec_gain_map_decode_ex(
+        data, size, limits, 0, workspace, workspace_size,
+        base_image, gain_map_image, base_trace, gain_map_trace,
+        info, error);
+}
+
+typedef struct {
+    const AvifdecColorTransform *output_transform;
+    AvifdecColorTransform source_to_working;
+    AvifdecColorTransform gain_transform;
+} AvifGainMapApiColorContext;
+
+static AvifdecStatus avif_gain_map_api_validate_transform(
+    void *opaque,
+    const AvifGainMapColorDescription *working_color,
+    uint8_t output_format,
+    AvifdecError *error) {
+    AvifGainMapApiColorContext *context =
+        (AvifGainMapApiColorContext *)opaque;
+
+    return avif_color_transform_validate_working(
+        context->output_transform, working_color,
+        output_format, error);
+}
+
+static AvifdecStatus avif_gain_map_api_base_to_working(
+    void *opaque,
+    const AvifdecImage *base_image,
+    const AvifdecImageInfo *base_info,
+    const AvifGainMapColorDescription *working_color,
+    uint32_t x,
+    uint32_t y,
+    float rgba[4],
+    AvifdecError *error) {
+    AvifGainMapApiColorContext *context =
+        (AvifGainMapApiColorContext *)opaque;
+
+    (void)working_color;
+    return avif_color_image_pixel_to_working(
+        base_image, base_info, &context->source_to_working,
+        context->output_transform, x, y, rgba, error);
+}
+
+static AvifdecStatus avif_gain_map_api_texel(
+    void *opaque,
+    const AvifdecImage *gain_map_image,
+    const AvifdecImageInfo *gain_map_info,
+    uint32_t x,
+    uint32_t y,
+    uint8_t channel_count,
+    float gain[3],
+    AvifdecError *error) {
+    AvifGainMapApiColorContext *context =
+        (AvifGainMapApiColorContext *)opaque;
+
+    return avif_color_gain_map_texel(
+        gain_map_image, gain_map_info, &context->gain_transform,
+        x, y, channel_count, gain, error);
+}
+
+static AvifdecStatus avif_gain_map_api_working_to_linear(
+    void *opaque,
+    const float working_rgb[3],
+    float output_rgb[3],
+    AvifdecError *error) {
+    AvifGainMapApiColorContext *context =
+        (AvifGainMapApiColorContext *)opaque;
+
+    return avif_color_transform_linear_to_linear(
+        context->output_transform, working_rgb, output_rgb, error);
+}
+
+static AvifdecStatus avif_gain_map_api_working_to_encoded16(
+    void *opaque,
+    const float working_rgb[3],
+    uint16_t output_rgb[3],
+    AvifdecError *error) {
+    AvifGainMapApiColorContext *context =
+        (AvifGainMapApiColorContext *)opaque;
+
+    return avif_color_transform_linear_to_encoded16(
+        context->output_transform, working_rgb, output_rgb, error);
+}
+
+static AvifdecStatus avif_gain_map_api_color_adapter(
+    const AvifdecGainMapInfo *info,
+    const AvifdecColorTransform *output_transform,
+    AvifGainMapApiColorContext *context,
+    AvifGainMapColorAdapter *adapter,
+    AvifdecError *error) {
+    AvifdecColorDescription gain_color;
+    AvifdecColorOptions gain_options;
+    AvifdecStatus status;
+
+    avifdec_memory_fill(context, 0U, sizeof(*context));
+    avifdec_memory_fill(adapter, 0U, sizeof(*adapter));
+    context->output_transform = output_transform;
+    status = avif_color_transform_init_source_to_working(
+        &info->base_color, output_transform,
+        &context->source_to_working, error);
+    if (status != AVIFDEC_OK) return status;
+    if (info->channel_count == 3U) {
+        status = avifdec_image_color_description(
+            &info->gain_map_image, &gain_color, error);
+        if (status != AVIFDEC_OK) return status;
+        avifdec_color_options_default(&gain_options);
+        gain_options.destination_color_primaries =
+            gain_color.color_primaries;
+        gain_options.destination_transfer_characteristics =
+            gain_color.transfer_characteristics;
+        gain_options.source = AVIFDEC_COLOR_SOURCE_CICP;
+        if (gain_color.transfer_characteristics == 16U ||
+            gain_color.transfer_characteristics == 18U) {
+            gain_options.hdr_policy =
+                AVIFDEC_COLOR_HDR_PRESERVE_RELATIVE;
+            gain_options.reference_white_nits = 203.0f;
+            gain_options.display_peak_nits = 10000.0f;
+        }
+        status = avifdec_color_transform_init(
+            &gain_color, &gain_options, 0, 0, 0U,
+            &context->gain_transform, error);
+        if (status != AVIFDEC_OK) return status;
+    }
+    adapter->context = context;
+    adapter->validate_transform =
+        avif_gain_map_api_validate_transform;
+    adapter->base_to_working =
+        avif_gain_map_api_base_to_working;
+    adapter->gain_texel = avif_gain_map_api_texel;
+    adapter->working_to_linear =
+        avif_gain_map_api_working_to_linear;
+    adapter->working_to_encoded16 =
+        avif_gain_map_api_working_to_encoded16;
+    return AVIFDEC_OK;
+}
+
+AvifdecStatus avifdec_gain_map_apply(
+    const AvifdecImage *base_image,
+    const AvifdecImage *gain_map_image,
+    const AvifdecGainMapInfo *info,
+    const AvifdecColorTransform *output_transform,
+    const AvifdecGainMapApplyOptions *options,
+    AvifdecRgbImage *output,
+    AvifdecError *error) {
+    AvifGainMapInfo private_info;
+    AvifGainMapApplyOptions private_options;
+    AvifGainMapApiColorContext color_context;
+    AvifGainMapColorAdapter color_adapter;
+    AvifdecStatus status;
+
+    avif_gain_map_api_error_clear(error);
+    if (info == 0 || options == 0 || output_transform == 0) {
+        return avif_gain_map_api_fail(
+            error, AVIFDEC_INVALID_ARGUMENT);
+    }
+    avif_gain_map_api_info_from_public(info, &private_info);
+    private_options.display_headroom = options->display_headroom;
+    private_options.flags = options->flags;
+    status = avif_gain_map_api_color_adapter(
+        info, output_transform, &color_context, &color_adapter, error);
+    if (status != AVIFDEC_OK) return status;
+    return avif_gain_map_apply(
+        base_image, gain_map_image, &private_info, &color_adapter,
+        &private_options, output, error);
+}
+
+AvifdecStatus avifdec_gain_map_apply_row(
+    const AvifdecImage *base_image,
+    const AvifdecImage *gain_map_image,
+    const AvifdecGainMapInfo *info,
+    const AvifdecColorTransform *output_transform,
+    const AvifdecGainMapApplyOptions *options,
+    AvifdecRgbImage *output,
+    uint32_t row,
+    AvifdecError *error) {
+    AvifGainMapInfo private_info;
+    AvifGainMapApplyOptions private_options;
+    AvifGainMapApiColorContext color_context;
+    AvifGainMapColorAdapter color_adapter;
+    AvifdecStatus status;
+
+    avif_gain_map_api_error_clear(error);
+    if (info == 0 || options == 0 || output_transform == 0) {
+        return avif_gain_map_api_fail(
+            error, AVIFDEC_INVALID_ARGUMENT);
+    }
+    avif_gain_map_api_info_from_public(info, &private_info);
+    private_options.display_headroom = options->display_headroom;
+    private_options.flags = options->flags;
+    status = avif_gain_map_api_color_adapter(
+        info, output_transform, &color_context, &color_adapter, error);
+    if (status != AVIFDEC_OK) return status;
+    return avif_gain_map_apply_row(
+        base_image, gain_map_image, &private_info, &color_adapter,
+        &private_options, output, row, error);
 }

@@ -1,6 +1,6 @@
 # Public API
 
-The API is declared in [`src/avifdec.h`](../src/avifdec.h). Version 1.3.0 is
+The API is declared in [`src/avifdec.h`](../src/avifdec.h). Version 1.4.0 is
 reported by:
 
 ```c
@@ -131,6 +131,53 @@ fixed-Huffman filter-0 stream from an existing packed image.
 `avifdec_trace()` performs full decoding without caller output planes and
 returns deterministic syntax and reconstruction checksums.
 
+### Metadata views
+
+`avifdec_metadata_query()` enumerates Exif, canonical XMP, arbitrary MIME, and
+thumbnail items without allocation. A null/zero-capacity call returns required
+metadata, thumbnail, and span counts after validating the complete structure.
+A fill call is all-or-nothing; insufficient capacity returns
+`AVIFDEC_OUT_OF_MEMORY` with the required counts and leaves arrays untouched.
+Payload spans and length-delimited names/content types are immutable views into
+the caller's input. Exif validates its displacement and TIFF header but does not
+parse IFDs.
+
+### Explicit color transforms
+
+Legacy `avifdec_image_to_rgb*()` behavior is unchanged. For color-managed
+output:
+
+1. Obtain `AvifdecColorDescription` with
+   `avifdec_image_color_description()`.
+2. Initialize `AvifdecColorOptions` and query/init an immutable
+   `AvifdecColorTransform`.
+3. Call `avifdec_image_to_rgb_with_transform()` or its row variant.
+
+AUTO selects a present ICC profile and otherwise CICP; a malformed or
+unsupported selected ICC never silently falls back. The bounded ICC surface is
+v2/v4 RGB or gray, XYZ PCS, matrix/TRC, and relative/absolute colorimetric
+intent. CICP conversion implements every defined H.273 identifier and
+deterministic nearest or bilinear chroma sampling. PQ/HLG require an explicit
+HDR policy, reference white, and display peak.
+
+`AVIFDEC_RGBF32` and `AVIFDEC_RGBAF32` are linear in destination primaries,
+allow extended values, and define `1.0` as 203 nits. Integer formats use the
+destination transfer and clip to their representable range.
+
+### ISO 21496-1 gain maps
+
+`avifdec_gain_map_query*()` discovers and validates a version-0 gain map.
+Absence is success with `present == 0`. `avifdec_gain_map_decode*()` requires
+separate caller-owned base and gain-map planes and decodes them sequentially;
+its exact workspace requirement is the maximum child requirement for the same
+executor width.
+
+Application is explicitly opt-in through `avifdec_gain_map_apply()` or its row
+variant. The output transform must describe the metadata-selected working color
+to an explicit destination. `display_headroom` is a positive linear ratio.
+Alpha comes only from the base image and is never gain-mapped. Existing
+query/decode/RGB functions remain base-only.
+
 ## Parallel execution
 
 `avifdec_query_ex()`, `avifdec_trace_ex()`, and `avifdec_decode_ex()` accept an
@@ -174,6 +221,24 @@ Decoding frame *N* starts from its nearest preceding sync sample and processes
 all required samples through *N*. This reconstructs reference-dependent frames
 without keeping decoder state between API calls.
 
+For edits, fragments, or multiple visual tracks, first query and initialize an
+`AvifdecSequenceIndex` in caller-owned persistent workspace. The immutable
+index retains input/workspace views and supports:
+
+- track and track-reference enumeration;
+- explicit main/alpha selection;
+- normalized presentation query/decode with independent main and alpha sync
+  replay;
+- classic and fragmented samples in one decode-order index;
+- sequence-wide and direct track-scoped metadata through
+  `avifdec_sequence_metadata_query()`.
+
+Index query reports the exact persistent requirement; one byte less fails with
+`AVIFDEC_OUT_OF_MEMORY`. Null selection auto-selects only when one eligible
+visual track exists. The caller must name a main track when selection is
+ambiguous. Output plane contents may be partially modified on decode failure,
+matching the existing decode APIs; result descriptors commit only on success.
+
 ## Ownership and memory
 
 - Input bytes remain owned by the caller.
@@ -204,6 +269,8 @@ without intra block copy also omit unused inter-prediction scratch.
 
 - width, height, and total pixels;
 - items, extents, and properties;
+- metadata items/spans, tracks, edits, and fragments;
+- ICC bytes and sampled-curve entries;
 - OBUs and frames;
 - operating point and selected spatial layer;
 - low-overhead versus Annex-B framing.
@@ -216,5 +283,7 @@ absolute byte offset and containing box or OBU type when available. Invalid
 syntax, truncation, arithmetic overflow, configured limits, insufficient
 workspace, and valid-but-unsupported features are distinct outcomes.
 
-`avifdec_capabilities()` returns feature bits for the supported AV1, AVIF,
-presentation, RGB, film-grain, and sequence surfaces.
+`avifdec_capabilities()` additionally reports metadata, CICP and ICC
+matrix/TRC color, ISO gain-map metadata/application, and normalized sequence
+index/edit/fragment/track-selection support. Tile-list and large-scale-tile
+bits remain clear because AVIF forbids those modes.

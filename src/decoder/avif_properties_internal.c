@@ -170,7 +170,7 @@ AvifdecStatus avif_properties_parse(
             } else if (
                 color_type == AVIFDEC_FOURCC('r', 'I', 'C', 'C') ||
                 color_type == AVIFDEC_FOURCC('p', 'r', 'o', 'f')) {
-                if (seen_icc) {
+                if (seen_icc || payload_size == 4U) {
                     return avif_properties_fail(
                         context, AVIFDEC_INVALID_DATA,
                         property->box.offset, property->type);

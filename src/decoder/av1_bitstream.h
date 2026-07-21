@@ -3,8 +3,22 @@
 
 #include "avifdec.h"
 
+typedef AvifdecStatus (*Av1SpanAt)(
+    void *context,
+    size_t span_index,
+    AvifdecSpan *span,
+    AvifdecError *error);
+
+typedef struct {
+    void *context;
+    size_t span_count;
+    Av1SpanAt span_at;
+    AvifdecError *error;
+} Av1SpanSource;
+
 typedef struct {
     const AvifdecSpan *spans;
+    const Av1SpanSource *source;
     size_t span_count;
     size_t size;
     size_t position;

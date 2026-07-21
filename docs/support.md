@@ -11,13 +11,17 @@ Still-image item support includes:
 - `pitm`, `iloc` versions 0-2, `iinf`/`infe`, `iprp`/`ipco`/`ipma`;
 - `mdat` and `idat` payloads with multiple extents;
 - item-wide `iref` relationships and cycle-checked derived graphs;
+- `grpl`/`altr` entity groups;
 - `av1C`, `ispe`, `pixi`, ICC and NCLX `colr`;
 - `clap`, `irot`, `imir`, and `pasp`;
 - auxiliary alpha through `auxC`, `auxl`, and `prem`;
 - full and partial-edge image grids;
 - `a1op`, `lsel`, and `a1lx` layered images;
 - checked sample-transform (`sato`) expressions;
-- CLL/MDCV and opaque tone-map/gain-map metadata.
+- CLL/MDCV metadata;
+- allocation-free Exif, XMP, arbitrary MIME, and thumbnail enumeration;
+- ISO 21496-1 version-0 gain-map discovery, metadata, child decoding, and
+  opt-in application.
 
 Unknown non-essential item properties are skipped. Unknown essential properties
 return `AVIFDEC_UNSUPPORTED`.
@@ -26,17 +30,24 @@ Image-sequence track support includes:
 
 - `moov`, `trak`, `mdia`, `minf`, and `stbl`;
 - `av01` visual sample entries and `av1C`;
-- `stts` and version 0/1 `ctts` timing;
+- `stts` decode timing; AV1 `ctts` is rejected as invalid;
 - `stsc`, `stsz`, compact 4/8/16-bit `stz2`, `stco`, and `co64`;
 - explicit `stss` sync samples or implicit all-sync tracks;
 - finite and infinite repetition reporting;
-- synchronized `auxv` alpha tracks;
+- independent `auxv` alpha sample and sync cadence;
 - `auxl` and `prem` track relationships;
-- nearest-sync random access followed by dependent-sample decoding.
+- nearest-sync random access followed by dependent-sample decoding;
+- multiple visual tracks with explicit selection and `altr` reporting;
+- zero, one, or multiple version-0/1 rate-1 edit-list entries, including empty
+  edits and nonzero media times;
+- identity and exact orthogonal track matrices with integer translation;
+- `mvex`/`trex` and `moof`/`traf`/`tfhd`/`tfdt`/`trun` fragmented samples;
+- checked 32-bit, extended-size, and size-to-parent-end child boxes.
 
-One normal edit-list entry with media time zero and playback rate 1.0 is
-supported. Multi-entry edits and non-identity track matrices return
-`AVIFDEC_UNSUPPORTED`.
+The normalized sequence-index API exposes tracks, references, edits, fragments,
+presentations, explicit track selection, and sequence-wide or track-scoped
+metadata. The legacy frame-index API remains available for one unambiguous
+classic visual track and its unique alpha track.
 
 ## AV1 decoding support
 
@@ -60,8 +71,30 @@ Implemented decoding includes:
 - display-only film-grain synthesis without contaminating reference frames;
 - HDR CLL/MDCV, scalability, ITU-T T.35, and timecode metadata.
 
-Tile-list OBUs and large-scale-tile mode are intentionally not supported and are
-reported through capability flags and `AVIFDEC_UNSUPPORTED`.
+AV1-in-AVIF forbids tile-list OBUs and large-scale-tile mode. Both are rejected
+as `AVIFDEC_INVALID_DATA`, including tile-list OBUs in unselected layers, and
+their generic AV1 capability bits remain clear.
+
+## Color and HDR output
+
+The legacy packed-RGB functions preserve their source-encoded, nearest-chroma
+behavior. The opt-in color-transform API additionally supports:
+
+- every defined H.273 primary, transfer, and matrix identifier, including
+  constant-luminance, YCgCo variants, ICtCp, and chromaticity-derived matrices;
+- NCLX/AV1 consistency validation;
+- deterministic bilinear chroma reconstruction with signaled siting;
+- linear-light primary conversion, PQ and HLG with explicit display policy,
+  and RGB/RGBA 8-bit, 16-bit, or binary32 output;
+- bounded ICC v2/v4 RGB and gray matrix/TRC profiles with XYZ PCS and relative
+  or absolute colorimetric intent;
+- straight or final-domain premultiplied alpha.
+
+ISO 21496-1 gain maps are opt-in. Query validates the ordered derived images and
+metadata, decode reuses `max(base, gain-map)` child workspace, and application
+performs pixel-center bilinear gain sampling in straight linear light. Float
+output is extended linear SDR with `1.0 == 203 nits`; 16-bit output uses the
+explicit destination transfer.
 
 ## Encoder support
 
@@ -98,11 +131,20 @@ Linux and macOS both use native worker threads.
   sequences, grids, inter prediction, film grain, super-resolution, in-loop
   filtering, restoration, and advanced metadata are not supported.
 - Encoder image input rejects progressive JPEG and interlaced PNG.
-- Tile-list OBUs and large-scale-tile mode are unsupported.
-- Tone-map/gain-map metadata is retained but not applied.
-- ICC color transforms and transfer-function conversion are not applied.
-- Sequence edit lists are restricted to the normal single-entry form.
-- Sequence track matrices must be identity.
+- Generic AV1 tile-list anchors and large-scale-tile decoding are not exposed;
+  those modes are invalid in AVIF.
+- Gain-map application supports ISO 21496-1 metadata version 0 with one or three
+  channels. Existing decode/RGB APIs and the CLI remain base-image-only.
+- ICC support is limited to bounded v2/v4 RGB/gray matrix plus curve or
+  parametric-TRC profiles in XYZ PCS. CLUT, CMYK, multichannel, Lab PCS,
+  `mAB`/`mBA`, `mft1`/`mft2`, device-link, perceptual, and saturation LUT
+  processing are unsupported.
+- Metadata APIs expose validated payload views but do not parse TIFF IFDs or
+  XML. Protected items, external data references, and encoded MIME payloads are
+  unsupported.
+- Sequence composition offsets, multiple `stsd` entries on an AVIF track,
+  non-1x/reverse/dwell edits, non-unit scaling, shear, perspective, incremental
+  streaming, and generic non-AVIF tracks are unsupported.
 - Sample-transform input images, nested derived images, and auxiliary alpha
   decoding remain serial. Sequence frames are replayed in decode order even
   though each frame's independent AV1 regions can run in parallel.

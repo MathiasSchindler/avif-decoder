@@ -54,7 +54,7 @@ src/
   base.c, base.h         Checked arithmetic, readers, memory, caller arena
   task_pool.c, .h        Common native-worker scheduler and executor adapter
   decoder/
-    bmff.c, avif*.c       AVIF parse, recursive item decode, and presentation
+    bmff.c, avif*.c       AVIF parse, item index, metadata, color, HDR, sequence
     av1*.c                Decoder-specific AV1 parsing and reconstruction flow
     png.c                 Allocation-free streaming PNG encoder
     png_write.c           Decoder CLI RGB conversion and PNG file output
@@ -97,6 +97,12 @@ the encoder live in `src/codec`.
 AVIF container processing has a similar internal boundary: `avif_parse.c`
 validates and indexes container metadata and resolves item extents, while
 `avif.c` recursively queries and decodes items and plans their workspace.
+`avif_item_index.c` provides the checked item/reference/span resolver shared by
+metadata and gain maps. `avif_color.c` owns H.273 and bounded ICC transforms;
+`avif_gain_map.c` owns ISO 21496-1 parsing and gain equations.
+`avif_sequence_index.c` normalizes tracks, edits, fragments, relationships, and
+presentations into persistent caller workspace, while
+`avif_sequence_decode.c` plans independent main/alpha replay.
 
 ## Workspace and memory model
 

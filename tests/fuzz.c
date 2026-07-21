@@ -6,9 +6,12 @@
     ((size_t)FUZZ_MAX_DIMENSION * FUZZ_MAX_DIMENSION)
 #define FUZZ_WORKSPACE_SIZE (32U * 1024U * 1024U)
 #define FUZZ_WORKSPACE_ALIGNMENT 16U
+#define FUZZ_INDEX_WORKSPACE_SIZE (4U * 1024U * 1024U)
 
 static unsigned char fuzz_workspace[
     FUZZ_WORKSPACE_SIZE + FUZZ_WORKSPACE_ALIGNMENT];
+static unsigned char fuzz_index_workspace[
+    FUZZ_INDEX_WORKSPACE_SIZE + FUZZ_WORKSPACE_ALIGNMENT];
 static uint16_t fuzz_y[FUZZ_MAX_PIXELS];
 static uint16_t fuzz_u[FUZZ_MAX_PIXELS];
 static uint16_t fuzz_v[FUZZ_MAX_PIXELS];
@@ -259,6 +262,115 @@ static void fuzz_check_sequence(
         &serial_trace, &parallel_trace, sizeof(serial_trace)) == 0);
 }
 
+static void fuzz_check_extended_apis(
+    const unsigned char *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    size_t workspace_offset) {
+    AvifdecMetadataResult metadata_result;
+    AvifdecGainMapInfo gain_map;
+    AvifdecImageInfo still_info;
+    AvifdecColorDescription color;
+    AvifdecColorOptions color_options;
+    AvifdecColorTransformInfo color_transform;
+    AvifdecSequenceIndexInfo index_info;
+    AvifdecSequenceIndex index;
+    AvifdecSequenceSelectOptions select_options;
+    AvifdecSequenceSelection selection;
+    AvifdecSequencePresentationInfo presentation;
+    AvifdecEntropyTrace trace;
+    AvifdecImage image;
+    AvifdecError error;
+    AvifdecStatus status;
+    size_t track_index;
+
+    (void)avifdec_metadata_query(
+        data, size, limits, 0, 0U, 0, 0U, 0, 0U,
+        &metadata_result, &error);
+    (void)avifdec_gain_map_query(
+        data, size, limits, &gain_map, &error);
+
+    if (avifdec_query(
+            data, size, limits, 0, 0U, &still_info, &error) ==
+        AVIFDEC_OK) {
+        if (avifdec_image_color_description(
+                &still_info, &color, &error) == AVIFDEC_OK) {
+            avifdec_color_options_default(&color_options);
+            (void)avifdec_color_transform_query(
+                &color, &color_options, limits,
+                &color_transform, &error);
+        }
+    }
+
+    status = avifdec_sequence_index_query(
+        data, size, limits, &index_info, &error);
+    if (status != AVIFDEC_OK ||
+        index_info.workspace_required > FUZZ_INDEX_WORKSPACE_SIZE) {
+        return;
+    }
+    if (index_info.workspace_required != 0U) {
+        AvifdecSequenceIndex short_index;
+        AvifdecSequenceIndexInfo short_info;
+
+        fuzz_require(avifdec_sequence_index_init(
+            data, size, limits,
+            fuzz_index_workspace + workspace_offset,
+            index_info.workspace_required - 1U,
+            &short_index, &short_info, &error) ==
+            AVIFDEC_OUT_OF_MEMORY);
+        fuzz_require(short_info.workspace_required ==
+                     index_info.workspace_required);
+    }
+    fuzz_require(avifdec_sequence_index_init(
+        data, size, limits,
+        fuzz_index_workspace + workspace_offset,
+        index_info.workspace_required,
+        &index, &index_info, &error) == AVIFDEC_OK);
+    (void)avifdec_sequence_metadata_query(
+        &index, 0U, 0, 0U, 0, 0U, 0, 0U,
+        &metadata_result, &error);
+
+    avifdec_memory_fill(
+        &select_options, 0U, sizeof(select_options));
+    for (track_index = 0U;
+         track_index < index_info.track_count;
+         ++track_index) {
+        AvifdecSequenceTrackInfo track;
+
+        fuzz_require(avifdec_sequence_track_query(
+            &index, track_index, &track, &error) == AVIFDEC_OK);
+        if (select_options.main_track_id == 0U &&
+            (track.flags & AVIFDEC_SEQUENCE_TRACK_VISUAL) != 0U &&
+            (track.flags & AVIFDEC_SEQUENCE_TRACK_ALPHA) == 0U) {
+            select_options.main_track_id = track.track_id;
+        }
+    }
+    if (select_options.main_track_id == 0U ||
+        avifdec_sequence_select(
+            &index, &select_options, &selection, &error) != AVIFDEC_OK ||
+        selection.presentation_count == 0U) {
+        return;
+    }
+    track_index = size == 0U
+        ? 0U : data[size - 1U] % selection.presentation_count;
+    status = avifdec_sequence_presentation_query(
+        &index, &selection, track_index, &presentation, &error);
+    if (status != AVIFDEC_OK ||
+        !fuzz_info_fits(&presentation.image)) {
+        return;
+    }
+    fuzz_prepare_image(&presentation.image, &image);
+    status = avifdec_sequence_decode_presentation(
+        &index, &selection, track_index,
+        fuzz_workspace + workspace_offset,
+        presentation.image.workspace_required,
+        &image, &trace, &presentation, &error);
+    fuzz_require(status != AVIFDEC_OUT_OF_MEMORY);
+    if (status == AVIFDEC_OK) {
+        (void)fuzz_hash_image(&image);
+    }
+}
+
 int LLVMFuzzerTestOneInput(
     const unsigned char *data, size_t size) {
     AvifdecBmffLimits bmff_limits = { 16U, 4096U };
@@ -277,10 +389,18 @@ int LLVMFuzzerTestOneInput(
     limits.max_properties = 64U;
     limits.max_obus = 2048U;
     limits.max_frames = 16U;
+    limits.max_metadata_items = 16U;
+    limits.max_metadata_spans = 64U;
+    limits.max_tracks = 8U;
+    limits.max_edits = 16U;
+    limits.max_fragments = 32U;
+    limits.max_icc_bytes = 1024U * 1024U;
+    limits.max_icc_curve_entries = 1024U;
 
     (void)avifdec_bmff_inspect(
         data, size, &bmff_limits, 0, 0, &bmff_info, &error);
     fuzz_check_still(data, size, &limits, workspace_offset);
     fuzz_check_sequence(data, size, &limits, workspace_offset);
+    fuzz_check_extended_apis(data, size, &limits, workspace_offset);
     return 0;
 }

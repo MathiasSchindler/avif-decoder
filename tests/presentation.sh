@@ -62,7 +62,7 @@ printf '%s\n' "$output" | grep -q '^transform_flags=15$'
 
 ffmpeg -hide_banner -loglevel error -f lavfi \
     -i 'testsrc2=size=38x30:rate=1' -frames:v 1 \
-    -pix_fmt yuv444p10le -strict -1 -f yuv4mpegpipe \
+    -pix_fmt yuv444p10le -color_range pc -strict -1 -f yuv4mpegpipe \
     -y "$work/source10.y4m"
 avifenc --lossless --jobs 1 --codec aom \
     "$work/source10.y4m" "$work/rgb10.avif" >/dev/null

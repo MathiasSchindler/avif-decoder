@@ -7,6 +7,9 @@ int avifdec_size_add(size_t left, size_t right, size_t *result);
 int avifdec_size_multiply(size_t left, size_t right, size_t *result);
 int avifdec_size_align(size_t value, size_t alignment, size_t *result);
 
+void avifdec_limits_default(AvifdecLimits *limits);
+AvifdecLimits avifdec_limits_effective(const AvifdecLimits *limits);
+
 void avifdec_memory_copy(void *destination, const void *source, size_t count);
 void avifdec_memory_fill(void *destination, unsigned char value, size_t count);
 int avifdec_memory_compare(const void *left, const void *right, size_t count);

@@ -33,9 +33,18 @@ typedef enum {
 #define AVIFDEC_CAP_AVIF_TONE_MAP_METADATA ((uint64_t)1U << 14)
 #define AVIFDEC_CAP_AVIF_SEQUENCE ((uint64_t)1U << 15)
 #define AVIFDEC_CAP_PARALLEL_EXECUTOR ((uint64_t)1U << 16)
+#define AVIFDEC_CAP_AVIF_METADATA ((uint64_t)1U << 17)
+#define AVIFDEC_CAP_COLOR_CICP ((uint64_t)1U << 18)
+#define AVIFDEC_CAP_COLOR_ICC_MATRIX_TRC ((uint64_t)1U << 19)
+#define AVIFDEC_CAP_AVIF_GAIN_MAP_METADATA ((uint64_t)1U << 20)
+#define AVIFDEC_CAP_AVIF_GAIN_MAP_APPLICATION ((uint64_t)1U << 21)
+#define AVIFDEC_CAP_AVIF_SEQUENCE_INDEX ((uint64_t)1U << 22)
+#define AVIFDEC_CAP_AVIF_SEQUENCE_EDITS ((uint64_t)1U << 23)
+#define AVIFDEC_CAP_AVIF_SEQUENCE_FRAGMENTS ((uint64_t)1U << 24)
+#define AVIFDEC_CAP_AVIF_SEQUENCE_TRACK_SELECTION ((uint64_t)1U << 25)
 
 #define AVIFDEC_VERSION_MAJOR 1U
-#define AVIFDEC_VERSION_MINOR 3U
+#define AVIFDEC_VERSION_MINOR 4U
 #define AVIFDEC_VERSION_PATCH 0U
 
 typedef struct {
@@ -49,6 +58,13 @@ typedef struct {
 #define AVIFDEC_DEFAULT_MAX_PROPERTIES 128U
 #define AVIFDEC_DEFAULT_MAX_OBUS 4096U
 #define AVIFDEC_DEFAULT_MAX_FRAMES 256U
+#define AVIFDEC_DEFAULT_MAX_METADATA_ITEMS 64U
+#define AVIFDEC_DEFAULT_MAX_METADATA_SPANS 4096U
+#define AVIFDEC_DEFAULT_MAX_TRACKS 8U
+#define AVIFDEC_DEFAULT_MAX_EDITS 64U
+#define AVIFDEC_DEFAULT_MAX_FRAGMENTS 256U
+#define AVIFDEC_DEFAULT_MAX_ICC_BYTES 16777216U
+#define AVIFDEC_DEFAULT_MAX_ICC_CURVE_ENTRIES 4096U
 
 typedef enum {
     AVIFDEC_AV1_LOW_OVERHEAD = 0,
@@ -68,6 +84,13 @@ typedef struct {
     uint8_t av1_framing;
     uint8_t spatial_layer;
     uint8_t spatial_layer_set;
+    size_t max_metadata_items;
+    size_t max_metadata_spans;
+    size_t max_tracks;
+    size_t max_edits;
+    size_t max_fragments;
+    size_t max_icc_bytes;
+    size_t max_icc_curve_entries;
 } AvifdecLimits;
 
 #define AVIFDEC_EXECUTOR_MAX_WORKERS 32U
@@ -104,6 +127,76 @@ typedef struct {
     size_t size;
     size_t file_offset;
 } AvifdecSpan;
+
+typedef struct {
+    const unsigned char *data;
+    size_t size;
+} AvifdecByteView;
+
+typedef enum {
+    AVIFDEC_METADATA_UNKNOWN = 0,
+    AVIFDEC_METADATA_EXIF = 1,
+    AVIFDEC_METADATA_XMP = 2,
+    AVIFDEC_METADATA_MIME = 3
+} AvifdecMetadataKind;
+
+typedef enum {
+    AVIFDEC_METADATA_SCOPE_UNSCOPED = 0,
+    AVIFDEC_METADATA_SCOPE_ITEM = 1,
+    AVIFDEC_METADATA_SCOPE_TRACK = 2
+} AvifdecMetadataScope;
+
+typedef enum {
+    AVIFDEC_TIFF_BYTE_ORDER_NONE = 0,
+    AVIFDEC_TIFF_BYTE_ORDER_LITTLE = 1,
+    AVIFDEC_TIFF_BYTE_ORDER_BIG = 2
+} AvifdecTiffByteOrder;
+
+#define AVIFDEC_METADATA_FLAG_SEQUENCE_WIDE ((uint32_t)1U << 0)
+#define AVIFDEC_METADATA_FLAG_CANONICAL_XMP ((uint32_t)1U << 1)
+
+typedef struct {
+    uint32_t item_id;
+    uint32_t target_item_id;
+    uint32_t target_track_id;
+    uint32_t item_type;
+    uint32_t relationship_type;
+    AvifdecMetadataKind kind;
+    AvifdecMetadataScope scope;
+    uint32_t flags;
+    size_t payload_size;
+    size_t span_index;
+    size_t span_count;
+    size_t content_offset;
+    size_t exif_tiff_offset;
+    AvifdecTiffByteOrder exif_byte_order;
+    AvifdecByteView item_name;
+    AvifdecByteView content_type;
+    AvifdecByteView content_encoding;
+} AvifdecMetadataInfo;
+
+typedef struct {
+    uint32_t thumbnail_item_id;
+    uint32_t target_item_id;
+    uint32_t target_track_id;
+    uint32_t item_type;
+    uint32_t relationship_type;
+    uint32_t width;
+    uint32_t height;
+    uint32_t presentation_width;
+    uint32_t presentation_height;
+    uint32_t flags;
+    size_t payload_size;
+    size_t span_index;
+    size_t span_count;
+} AvifdecThumbnailInfo;
+
+typedef struct {
+    uint32_t primary_item_id;
+    size_t metadata_count;
+    size_t thumbnail_count;
+    size_t span_count;
+} AvifdecMetadataResult;
 
 typedef struct {
     uint16_t max_cll;
@@ -349,7 +442,9 @@ typedef enum {
     AVIFDEC_RGB8 = 0,
     AVIFDEC_RGBA8 = 1,
     AVIFDEC_RGB16 = 2,
-    AVIFDEC_RGBA16 = 3
+    AVIFDEC_RGBA16 = 3,
+    AVIFDEC_RGBF32 = 4,
+    AVIFDEC_RGBAF32 = 5
 } AvifdecRgbFormat;
 
 typedef enum {
@@ -365,6 +460,100 @@ typedef struct {
     uint8_t format;
     uint8_t alpha_mode;
 } AvifdecRgbImage;
+
+typedef struct {
+    uint16_t color_primaries;
+    uint16_t transfer_characteristics;
+    uint16_t matrix_coefficients;
+    uint8_t color_range;
+    uint8_t has_nclx;
+    AvifdecByteView icc;
+} AvifdecColorDescription;
+
+typedef enum {
+    AVIFDEC_COLOR_SOURCE_AUTO = 0,
+    AVIFDEC_COLOR_SOURCE_CICP = 1,
+    AVIFDEC_COLOR_SOURCE_ICC = 2
+} AvifdecColorSource;
+
+typedef enum {
+    AVIFDEC_COLOR_INTENT_RELATIVE_COLORIMETRIC = 0,
+    AVIFDEC_COLOR_INTENT_ABSOLUTE_COLORIMETRIC = 1
+} AvifdecColorIntent;
+
+typedef enum {
+    AVIFDEC_CHROMA_UPSAMPLING_BILINEAR = 0,
+    AVIFDEC_CHROMA_UPSAMPLING_NEAREST = 1
+} AvifdecChromaUpsampling;
+
+typedef enum {
+    AVIFDEC_COLOR_HDR_REJECT = 0,
+    AVIFDEC_COLOR_HDR_PRESERVE_RELATIVE = 1,
+    AVIFDEC_COLOR_HDR_CLIP_TO_DISPLAY = 2
+} AvifdecColorHdrPolicy;
+
+typedef struct {
+    uint16_t destination_color_primaries;
+    uint16_t destination_transfer_characteristics;
+    AvifdecColorSource source;
+    AvifdecColorIntent intent;
+    AvifdecChromaUpsampling chroma_upsampling;
+    AvifdecColorHdrPolicy hdr_policy;
+    float reference_white_nits;
+    float display_peak_nits;
+} AvifdecColorOptions;
+
+typedef struct {
+    size_t workspace_required;
+    AvifdecColorDescription source;
+    AvifdecColorDescription destination;
+    uint32_t flags;
+} AvifdecColorTransformInfo;
+
+#define AVIFDEC_COLOR_TRANSFORM_WORDS 64U
+typedef struct {
+    uintptr_t opaque[AVIFDEC_COLOR_TRANSFORM_WORDS];
+} AvifdecColorTransform;
+
+typedef struct {
+    int32_t numerator;
+    uint32_t denominator;
+} AvifdecRational;
+
+typedef struct {
+    uint32_t numerator;
+    uint32_t denominator;
+} AvifdecUnsignedRational;
+
+typedef struct {
+    AvifdecImageInfo base_image;
+    AvifdecImageInfo gain_map_image;
+    AvifdecColorDescription base_color;
+    AvifdecColorDescription alternate_color;
+    uint32_t base_item_id;
+    uint32_t alternate_item_id;
+    uint32_t gain_map_item_id;
+    size_t workspace_required;
+    AvifdecUnsignedRational base_hdr_headroom;
+    AvifdecUnsignedRational alternate_hdr_headroom;
+    AvifdecRational gain_map_min[3];
+    AvifdecRational gain_map_max[3];
+    AvifdecUnsignedRational gain_map_gamma[3];
+    AvifdecRational base_offset[3];
+    AvifdecRational alternate_offset[3];
+    uint8_t present;
+    uint8_t metadata_version;
+    uint8_t channel_count;
+    uint8_t base_is_hdr;
+    uint8_t use_base_color_space;
+    uint8_t backward_direction;
+    uint8_t common_denominator;
+} AvifdecGainMapInfo;
+
+typedef struct {
+    float display_headroom;
+    uint32_t flags;
+} AvifdecGainMapApplyOptions;
 
 const char *avifdec_status_string(AvifdecStatus status);
 uint64_t avifdec_capabilities(void);
@@ -434,6 +623,108 @@ AvifdecStatus avifdec_image_to_rgb_row(const AvifdecImage *image,
                                        AvifdecRgbImage *rgb,
                                        uint32_t row,
                                        AvifdecError *error);
+
+AvifdecStatus avifdec_metadata_query(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    AvifdecMetadataInfo *metadata,
+    size_t metadata_capacity,
+    AvifdecThumbnailInfo *thumbnails,
+    size_t thumbnail_capacity,
+    AvifdecSpan *spans,
+    size_t span_capacity,
+    AvifdecMetadataResult *result,
+    AvifdecError *error);
+
+void avifdec_color_options_default(AvifdecColorOptions *options);
+AvifdecStatus avifdec_image_color_description(
+    const AvifdecImageInfo *info,
+    AvifdecColorDescription *description,
+    AvifdecError *error);
+AvifdecStatus avifdec_color_transform_query(
+    const AvifdecColorDescription *source,
+    const AvifdecColorOptions *options,
+    const AvifdecLimits *limits,
+    AvifdecColorTransformInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_color_transform_init(
+    const AvifdecColorDescription *source,
+    const AvifdecColorOptions *options,
+    const AvifdecLimits *limits,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecColorTransform *transform,
+    AvifdecError *error);
+AvifdecStatus avifdec_image_to_rgb_with_transform(
+    const AvifdecImage *image,
+    const AvifdecImageInfo *info,
+    const AvifdecColorTransform *transform,
+    AvifdecRgbImage *rgb,
+    AvifdecError *error);
+AvifdecStatus avifdec_image_to_rgb_row_with_transform(
+    const AvifdecImage *image,
+    const AvifdecImageInfo *info,
+    const AvifdecColorTransform *transform,
+    AvifdecRgbImage *rgb,
+    uint32_t row,
+    AvifdecError *error);
+
+AvifdecStatus avifdec_gain_map_query(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_gain_map_query_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_gain_map_decode(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *base_image,
+    AvifdecImage *gain_map_image,
+    AvifdecEntropyTrace *base_trace,
+    AvifdecEntropyTrace *gain_map_trace,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_gain_map_decode_ex(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    const AvifdecExecutor *executor,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *base_image,
+    AvifdecImage *gain_map_image,
+    AvifdecEntropyTrace *base_trace,
+    AvifdecEntropyTrace *gain_map_trace,
+    AvifdecGainMapInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_gain_map_apply(
+    const AvifdecImage *base_image,
+    const AvifdecImage *gain_map_image,
+    const AvifdecGainMapInfo *info,
+    const AvifdecColorTransform *output_transform,
+    const AvifdecGainMapApplyOptions *options,
+    AvifdecRgbImage *output,
+    AvifdecError *error);
+AvifdecStatus avifdec_gain_map_apply_row(
+    const AvifdecImage *base_image,
+    const AvifdecImage *gain_map_image,
+    const AvifdecGainMapInfo *info,
+    const AvifdecColorTransform *output_transform,
+    const AvifdecGainMapApplyOptions *options,
+    AvifdecRgbImage *output,
+    uint32_t row,
+    AvifdecError *error);
 
 const char *avifdec_version_string(void);
 
@@ -582,5 +873,167 @@ AvifdecStatus avifdec_sequence_decode_frame_ex(const void *data,
                                                AvifdecEntropyTrace *trace,
                                                AvifdecFrameInfo *frame,
                                                AvifdecError *error);
+
+#define AVIFDEC_SEQUENCE_INDEX_WORDS 8U
+typedef struct AvifdecSequenceIndex {
+    uintptr_t opaque[AVIFDEC_SEQUENCE_INDEX_WORDS];
+} AvifdecSequenceIndex;
+
+typedef struct {
+    size_t workspace_required;
+    size_t track_count;
+    size_t track_reference_count;
+    size_t sample_count;
+    size_t fragment_count;
+    size_t edit_count;
+    size_t presentation_count;
+    uint32_t movie_timescale;
+    uint64_t movie_duration;
+} AvifdecSequenceIndexInfo;
+
+#define AVIFDEC_SEQUENCE_TRACK_VISUAL ((uint32_t)1U << 0)
+#define AVIFDEC_SEQUENCE_TRACK_ALPHA ((uint32_t)1U << 1)
+#define AVIFDEC_SEQUENCE_TRACK_AUXILIARY ((uint32_t)1U << 2)
+#define AVIFDEC_SEQUENCE_TRACK_ALTERNATE ((uint32_t)1U << 3)
+#define AVIFDEC_SEQUENCE_TRACK_FRAGMENTED ((uint32_t)1U << 4)
+
+typedef struct {
+    uint32_t track_id;
+    uint32_t handler_type;
+    uint32_t flags;
+    uint32_t coded_width;
+    uint32_t coded_height;
+    uint32_t presentation_width;
+    uint32_t presentation_height;
+    AvifdecCropRect crop;
+    AvifdecCleanAperture clean_aperture;
+    AvifdecColorDescription color;
+    int32_t matrix[9];
+    uint32_t media_timescale;
+    uint64_t media_duration;
+    size_t sample_count;
+    size_t fragment_count;
+    size_t edit_count;
+    size_t presentation_count;
+    uint8_t transform_flags;
+    uint8_t irot_angle;
+    uint8_t imir_axis;
+    uint8_t bit_depth;
+    uint8_t alpha_color_range;
+} AvifdecSequenceTrackInfo;
+
+typedef struct {
+    uint32_t from_track_id;
+    uint32_t to_track_id;
+    uint32_t relationship_type;
+} AvifdecSequenceTrackReferenceInfo;
+
+#define AVIFDEC_SEQUENCE_SELECT_DISABLE_ALPHA ((uint32_t)1U << 0)
+typedef struct {
+    uint32_t main_track_id;
+    uint32_t alpha_track_id;
+    uint32_t flags;
+} AvifdecSequenceSelectOptions;
+
+typedef struct {
+    uint32_t main_track_id;
+    uint32_t alpha_track_id;
+    uint32_t flags;
+    uint32_t timescale;
+    uint64_t duration;
+    size_t presentation_count;
+    uint8_t has_alpha;
+    uint8_t alpha_premultiplied;
+} AvifdecSequenceSelection;
+
+#define AVIFDEC_SEQUENCE_PRESENTATION_FRAGMENTED ((uint32_t)1U << 0)
+typedef struct {
+    AvifdecImageInfo image;
+    size_t presentation_index;
+    size_t main_sample_index;
+    size_t alpha_sample_index;
+    size_t main_sync_sample_index;
+    size_t alpha_sync_sample_index;
+    uint64_t start_time;
+    uint64_t duration;
+    uint32_t timescale;
+    uint32_t flags;
+} AvifdecSequencePresentationInfo;
+
+AvifdecStatus avifdec_sequence_index_query(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    AvifdecSequenceIndexInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_index_init(
+    const void *data,
+    size_t size,
+    const AvifdecLimits *limits,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecSequenceIndex *index,
+    AvifdecSequenceIndexInfo *info,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_track_query(
+    const AvifdecSequenceIndex *index,
+    size_t track_index,
+    AvifdecSequenceTrackInfo *track,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_track_reference_query(
+    const AvifdecSequenceIndex *index,
+    size_t reference_index,
+    AvifdecSequenceTrackReferenceInfo *reference,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_select(
+    const AvifdecSequenceIndex *index,
+    const AvifdecSequenceSelectOptions *options,
+    AvifdecSequenceSelection *selection,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_presentation_query(
+    const AvifdecSequenceIndex *index,
+    const AvifdecSequenceSelection *selection,
+    size_t presentation_index,
+    AvifdecSequencePresentationInfo *presentation,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_presentation_query_ex(
+    const AvifdecSequenceIndex *index,
+    const AvifdecSequenceSelection *selection,
+    const AvifdecExecutor *executor,
+    size_t presentation_index,
+    AvifdecSequencePresentationInfo *presentation,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_decode_presentation(
+    const AvifdecSequenceIndex *index,
+    const AvifdecSequenceSelection *selection,
+    size_t presentation_index,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecSequencePresentationInfo *presentation,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_decode_presentation_ex(
+    const AvifdecSequenceIndex *index,
+    const AvifdecSequenceSelection *selection,
+    const AvifdecExecutor *executor,
+    size_t presentation_index,
+    void *workspace,
+    size_t workspace_size,
+    AvifdecImage *image,
+    AvifdecEntropyTrace *trace,
+    AvifdecSequencePresentationInfo *presentation,
+    AvifdecError *error);
+AvifdecStatus avifdec_sequence_metadata_query(
+    const AvifdecSequenceIndex *index,
+    uint32_t track_id,
+    AvifdecMetadataInfo *metadata,
+    size_t metadata_capacity,
+    AvifdecThumbnailInfo *thumbnails,
+    size_t thumbnail_capacity,
+    AvifdecSpan *spans,
+    size_t span_capacity,
+    AvifdecMetadataResult *result,
+    AvifdecError *error);
 
 #endif

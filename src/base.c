@@ -30,11 +30,81 @@ uint64_t avifdec_capabilities(void) {
            AVIFDEC_CAP_RGB_CONVERSION |
            AVIFDEC_CAP_AVIF_TONE_MAP_METADATA |
            AVIFDEC_CAP_AVIF_SEQUENCE |
-           AVIFDEC_CAP_PARALLEL_EXECUTOR;
+           AVIFDEC_CAP_PARALLEL_EXECUTOR |
+           AVIFDEC_CAP_AVIF_METADATA |
+           AVIFDEC_CAP_COLOR_CICP |
+           AVIFDEC_CAP_COLOR_ICC_MATRIX_TRC |
+           AVIFDEC_CAP_AVIF_GAIN_MAP_METADATA |
+           AVIFDEC_CAP_AVIF_GAIN_MAP_APPLICATION |
+           AVIFDEC_CAP_AVIF_SEQUENCE_INDEX |
+           AVIFDEC_CAP_AVIF_SEQUENCE_EDITS |
+           AVIFDEC_CAP_AVIF_SEQUENCE_FRAGMENTS |
+           AVIFDEC_CAP_AVIF_SEQUENCE_TRACK_SELECTION;
 }
 
 const char *avifdec_version_string(void) {
-    return "1.3.0";
+    return "1.4.0";
+}
+
+void avifdec_limits_default(AvifdecLimits *limits) {
+    if (limits == 0) return;
+    avifdec_memory_fill(limits, 0U, sizeof(*limits));
+    limits->max_width = 32768U;
+    limits->max_height = 32768U;
+    limits->max_pixels = 268435456U;
+    limits->max_items = AVIFDEC_DEFAULT_MAX_ITEMS;
+    limits->max_extents = AVIFDEC_DEFAULT_MAX_EXTENTS;
+    limits->max_properties = AVIFDEC_DEFAULT_MAX_PROPERTIES;
+    limits->max_obus = AVIFDEC_DEFAULT_MAX_OBUS;
+    limits->max_frames = AVIFDEC_DEFAULT_MAX_FRAMES;
+    limits->max_metadata_items = AVIFDEC_DEFAULT_MAX_METADATA_ITEMS;
+    limits->max_metadata_spans = AVIFDEC_DEFAULT_MAX_METADATA_SPANS;
+    limits->max_tracks = AVIFDEC_DEFAULT_MAX_TRACKS;
+    limits->max_edits = AVIFDEC_DEFAULT_MAX_EDITS;
+    limits->max_fragments = AVIFDEC_DEFAULT_MAX_FRAGMENTS;
+    limits->max_icc_bytes = AVIFDEC_DEFAULT_MAX_ICC_BYTES;
+    limits->max_icc_curve_entries =
+        AVIFDEC_DEFAULT_MAX_ICC_CURVE_ENTRIES;
+    limits->av1_framing = AVIFDEC_AV1_LOW_OVERHEAD;
+}
+
+AvifdecLimits avifdec_limits_effective(const AvifdecLimits *limits) {
+    AvifdecLimits result;
+
+    avifdec_limits_default(&result);
+    if (limits == 0) return result;
+    if (limits->max_width != 0U) result.max_width = limits->max_width;
+    if (limits->max_height != 0U) result.max_height = limits->max_height;
+    if (limits->max_pixels != 0U) result.max_pixels = limits->max_pixels;
+    if (limits->max_items != 0U) result.max_items = limits->max_items;
+    if (limits->max_extents != 0U) result.max_extents = limits->max_extents;
+    if (limits->max_properties != 0U) {
+        result.max_properties = limits->max_properties;
+    }
+    if (limits->max_obus != 0U) result.max_obus = limits->max_obus;
+    if (limits->max_frames != 0U) result.max_frames = limits->max_frames;
+    if (limits->max_metadata_items != 0U) {
+        result.max_metadata_items = limits->max_metadata_items;
+    }
+    if (limits->max_metadata_spans != 0U) {
+        result.max_metadata_spans = limits->max_metadata_spans;
+    }
+    if (limits->max_tracks != 0U) result.max_tracks = limits->max_tracks;
+    if (limits->max_edits != 0U) result.max_edits = limits->max_edits;
+    if (limits->max_fragments != 0U) {
+        result.max_fragments = limits->max_fragments;
+    }
+    if (limits->max_icc_bytes != 0U) {
+        result.max_icc_bytes = limits->max_icc_bytes;
+    }
+    if (limits->max_icc_curve_entries != 0U) {
+        result.max_icc_curve_entries = limits->max_icc_curve_entries;
+    }
+    result.operating_point = limits->operating_point;
+    result.av1_framing = limits->av1_framing;
+    result.spatial_layer = limits->spatial_layer;
+    result.spatial_layer_set = limits->spatial_layer_set;
+    return result;
 }
 
 int avifdec_size_add(size_t left, size_t right, size_t *result) {

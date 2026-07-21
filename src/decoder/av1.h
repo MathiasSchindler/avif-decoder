@@ -2,6 +2,7 @@
 #define AVIFDEC_AV1_H
 
 #include "avifdec.h"
+#include "av1_bitstream.h"
 #include "av1_film_grain.h"
 
 #define AV1_NUM_REF_FRAMES 8U
@@ -64,6 +65,12 @@ AvifdecStatus avifdec_av1_query_ex(const AvifdecSpan *spans,
                                    size_t worker_count,
                                    AvifdecImageInfo *info,
                                    AvifdecError *error);
+AvifdecStatus avifdec_av1_query_source_ex(
+    const Av1SpanSource *source,
+    const AvifdecLimits *limits,
+    size_t worker_count,
+    AvifdecImageInfo *info,
+    AvifdecError *error);
 AvifdecStatus avifdec_av1_trace(const AvifdecSpan *spans,
                                 size_t span_count,
                                 const AvifdecLimits *limits,

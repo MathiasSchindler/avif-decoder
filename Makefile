@@ -22,6 +22,14 @@ ENCODER_BENCHMARK := build/host/encoder-benchmark
 ENCODER_SCORECARD_BASELINE := tests/encoder-scorecard-baseline.jsonl
 OBU_TRACE := $(BUILD_DIR)/obu-trace
 THREAD_UNIT := $(BUILD_DIR)/thread-unit
+FEATURES_AV1_STRICT_UNIT := $(BUILD_DIR)/features-av1-unit
+METADATA_STRICT_UNIT := $(BUILD_DIR)/metadata-unit
+GAIN_MAP_STRICT_UNIT := $(BUILD_DIR)/gain-map-unit
+FEATURES_AV1_HOST_UNIT := build/host/features-av1-unit
+METADATA_HOST_UNIT := build/host/metadata-unit
+GAIN_MAP_HOST_UNIT := build/host/gain-map-unit
+COLOR_HOST_UNIT := build/host/color-unit
+SEQUENCE_INDEX_HOST_UNIT := build/host/sequence-index-unit
 FUZZ_BUILD_DIR := build/fuzz
 FUZZ_TARGET := $(FUZZ_BUILD_DIR)/avifdec_fuzzer
 FUZZ_CORPUS := $(FUZZ_BUILD_DIR)/corpus
@@ -109,9 +117,15 @@ CODEC_C_SOURCES := \
 	src/codec/av1_recon.c src/codec/av1_tile_cdf.c
 DECODER_C_SOURCES := \
 	src/decoder/bmff.c src/decoder/avif.c src/decoder/avif_parse.c \
+	src/decoder/bmff_child.c src/decoder/avif_item_index.c \
+	src/decoder/avif_metadata_items.c \
 	src/decoder/avif_properties_internal.c src/decoder/avif_sequence.c \
+	src/decoder/avif_sequence_index.c src/decoder/avif_sequence_decode.c \
+	src/decoder/avif_sequence_api.c \
 	src/decoder/avif_rgb.c src/decoder/avif_sato.c src/decoder/png.c \
-	src/decoder/av1.c src/decoder/av1_bitstream.c \
+	src/decoder/avif_color.c src/decoder/avif_gain_map.c \
+	src/decoder/av1.c src/decoder/av1_avif_conformance.c \
+	src/decoder/av1_bitstream.c \
 	src/decoder/av1_frame_header.c \
 	src/decoder/av1_copy.c src/decoder/av1_metadata.c \
 	src/decoder/av1_parse.c src/decoder/av1_profile.c \
@@ -192,16 +206,33 @@ THREAD_UNIT_OBJECTS := $(BUILD_DIR)/tests/threading.o \
 	$(BUILD_DIR)/src/task_pool.o $(BUILD_DIR)/src/base.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/thread.o \
 	$(BUILD_DIR)/$(PLATFORM_DIR)/io.o $(ARCH_OBJECTS)
+FEATURES_AV1_STRICT_UNIT_OBJECTS := \
+	$(BUILD_DIR)/tests/features_av1_unit.o \
+	$(BUILD_DIR)/src/decoder/av1_avif_conformance.o \
+	$(BUILD_DIR)/src/base.o $(ARCH_OBJECTS)
+METADATA_STRICT_UNIT_OBJECTS := \
+	$(BUILD_DIR)/tests/metadata_unit.o \
+	$(BUILD_DIR)/src/decoder/avif_metadata_items.o \
+	$(BUILD_DIR)/src/decoder/avif_item_index.o \
+	$(BUILD_DIR)/src/decoder/bmff.o \
+	$(BUILD_DIR)/src/base.o $(ARCH_OBJECTS)
+GAIN_MAP_STRICT_UNIT_OBJECTS := \
+	$(BUILD_DIR)/tests/gain_map_unit.o \
+	$(BUILD_DIR)/src/decoder/avif_gain_map.o \
+	$(BUILD_DIR)/src/base.o $(ARCH_OBJECTS)
 DEPENDENCIES := $(OBJECTS:.o=.d) $(STRICT_UNIT_OBJECTS:.o=.d) \
 	$(ENCODER_STRICT_UNIT_OBJECTS:.o=.d) $(OBU_TRACE_OBJECTS:.o=.d) \
 	$(IMAGE_INPUT_STRICT_UNIT_OBJECTS:.o=.d) \
-	$(THREAD_UNIT_OBJECTS:.o=.d) $(ENCODER_OBJECTS:.o=.d)
+	$(THREAD_UNIT_OBJECTS:.o=.d) $(ENCODER_OBJECTS:.o=.d) \
+	$(FEATURES_AV1_STRICT_UNIT_OBJECTS:.o=.d) \
+	$(METADATA_STRICT_UNIT_OBJECTS:.o=.d) \
+	$(GAIN_MAP_STRICT_UNIT_OBJECTS:.o=.d)
 
 $(COLD_OBJECTS): CFLAGS += -Os
 
 -include $(DEPENDENCIES)
 
-.PHONY: clean encoder test test-encoder test-all wasm fuzz fuzz-seeds \
+.PHONY: clean encoder test test-encoder test-all private-unit wasm fuzz fuzz-seeds \
 	fuzz-smoke fuzz-campaign fuzz-differential encoder-fuzz \
 	encoder-fuzz-seeds encoder-fuzz-smoke encoder-fuzz-campaign \
 	encoder-benchmark encoder-benchmark-json encoder-scorecard
@@ -256,6 +287,24 @@ $(THREAD_UNIT): $(THREAD_UNIT_OBJECTS) $(PLATFORM_HEADERS) \
 	$(CC) $(THREAD_UNIT_OBJECTS) $(LDFLAGS) -o $@
 	$(POST_LINK)
 
+$(FEATURES_AV1_STRICT_UNIT): $(FEATURES_AV1_STRICT_UNIT_OBJECTS) \
+		$(CORE_HEADERS) $(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(FEATURES_AV1_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+$(METADATA_STRICT_UNIT): $(METADATA_STRICT_UNIT_OBJECTS) \
+		$(CORE_HEADERS) $(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(METADATA_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
+$(GAIN_MAP_STRICT_UNIT): $(GAIN_MAP_STRICT_UNIT_OBJECTS) \
+		$(CORE_HEADERS) $(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(GAIN_MAP_STRICT_UNIT_OBJECTS) $(LDFLAGS) -o $@
+	$(POST_LINK)
+
 $(MACHO_DYLIB_REMOVER): tools/macho_dylib_remover.c
 	@mkdir -p $(@D)
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 $< -o $@
@@ -263,6 +312,46 @@ $(MACHO_DYLIB_REMOVER): tools/macho_dylib_remover.c
 $(HOST_UNIT): tests/unit.c $(CORE_C_SOURCES) $(CORE_HEADERS) Makefile
 	@mkdir -p $(@D)
 	$(CC) $(HOST_TEST_CFLAGS) tests/unit.c $(CORE_C_SOURCES) -o $@
+
+$(FEATURES_AV1_HOST_UNIT): tests/features_av1_unit.c \
+		src/decoder/av1_avif_conformance.c src/base.c \
+		$(CORE_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/features_av1_unit.c \
+		src/decoder/av1_avif_conformance.c src/base.c -o $@
+
+$(METADATA_HOST_UNIT): tests/metadata_unit.c \
+		src/decoder/avif_metadata_items.c src/decoder/avif_item_index.c \
+		src/decoder/bmff.c src/base.c $(CORE_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/metadata_unit.c \
+		src/decoder/avif_metadata_items.c src/decoder/avif_item_index.c \
+		src/decoder/bmff.c src/base.c -o $@
+
+$(GAIN_MAP_HOST_UNIT): tests/gain_map_unit.c \
+		src/decoder/avif_gain_map.c src/base.c $(CORE_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) -DAVIF_GAIN_MAP_HOSTED=1 \
+		tests/gain_map_unit.c src/decoder/avif_gain_map.c src/base.c \
+		-lm -o $@
+
+$(COLOR_HOST_UNIT): tests/color_unit.c src/decoder/avif_color.c \
+		src/decoder/avif_gain_map.c src/base.c $(CORE_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/color_unit.c \
+		src/decoder/avif_color.c src/decoder/avif_gain_map.c \
+		src/base.c -lm -o $@
+
+$(SEQUENCE_INDEX_HOST_UNIT): tests/sequence_index_unit.c \
+		src/decoder/bmff_child.c src/decoder/avif_sequence_index.c \
+		src/decoder/avif_sequence_decode.c \
+		src/decoder/av1_avif_conformance.c src/base.c \
+		$(CORE_HEADERS) Makefile
+	@mkdir -p $(@D)
+	$(CC) $(HOST_TEST_CFLAGS) tests/sequence_index_unit.c \
+		src/decoder/bmff_child.c src/decoder/avif_sequence_index.c \
+		src/decoder/avif_sequence_decode.c \
+		src/decoder/av1_avif_conformance.c src/base.c -o $@
 
 $(ENCODER_HOST_UNIT): tests/encoder_unit.c $(ENCODER_TEST_C_SOURCES) \
 		$(ENCODER_TEST_HEADERS) Makefile
@@ -373,6 +462,19 @@ wasm: $(WASM_LOADER) $(addprefix $(WASM_BUILD_DIR)/,$(WASM_ASSETS))
 	@test -f $(WASM_BINARY)
 	@printf '%s\n' 'WASM viewer built in $(WASM_BUILD_DIR)'
 
+private-unit: $(FEATURES_AV1_STRICT_UNIT) $(METADATA_STRICT_UNIT) \
+		$(GAIN_MAP_STRICT_UNIT) $(FEATURES_AV1_HOST_UNIT) \
+		$(METADATA_HOST_UNIT) $(GAIN_MAP_HOST_UNIT) $(COLOR_HOST_UNIT) \
+		$(SEQUENCE_INDEX_HOST_UNIT)
+	$(FEATURES_AV1_STRICT_UNIT)
+	$(METADATA_STRICT_UNIT)
+	$(GAIN_MAP_STRICT_UNIT)
+	$(FEATURES_AV1_HOST_UNIT)
+	$(METADATA_HOST_UNIT)
+	$(GAIN_MAP_HOST_UNIT)
+	$(COLOR_HOST_UNIT)
+	$(SEQUENCE_INDEX_HOST_UNIT)
+
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -408,8 +510,8 @@ $(GENERATED_CHECK): tools/generate-av1-coeff-tables.pl \
 # Self-contained decoder and encoder suite. Uses only the compiler, coreutils,
 # and checked-in fixtures/corpus; it needs no codec, image, or other
 # third-party tools, so `make test` runs anywhere the project itself builds.
-test: test-encoder $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) $(OBU_TRACE) \
-		$(THREAD_UNIT)
+test: test-encoder private-unit $(TARGET) $(STRICT_UNIT) $(HOST_UNIT) \
+		$(OBU_TRACE) $(THREAD_UNIT)
 	$(STRICT_UNIT)
 	$(HOST_UNIT)
 	$(THREAD_UNIT)

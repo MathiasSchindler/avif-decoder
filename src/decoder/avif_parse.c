@@ -262,6 +262,30 @@ AvifdecStatus avif_parse_location(AvifContext *context,
     uint32_t item_index;
     int valid;
 
+    if (context->item_index != 0) {
+        AvifItemIndexLocation indexed_location;
+        AvifdecStatus status = avif_item_index_find_location(
+            context->item_index, primary_id,
+            &indexed_location, context->error);
+        size_t extent_index;
+
+        if (status != AVIFDEC_OK) return status;
+        avifdec_memory_fill(location, 0U, sizeof(*location));
+        location->item_id = indexed_location.item_id;
+        location->construction_method =
+            indexed_location.construction_method;
+        location->base_offset = indexed_location.base_offset;
+        location->extent_count = indexed_location.extent_count;
+        for (extent_index = 0U;
+             extent_index < indexed_location.extent_count;
+             ++extent_index) {
+            location->extents[extent_index].offset =
+                indexed_location.extents[extent_index].offset;
+            location->extents[extent_index].length =
+                indexed_location.extents[extent_index].length;
+        }
+        return AVIFDEC_OK;
+    }
     if (!avif_box_is_set(&context->iloc)) {
         return avif_fail(context, AVIFDEC_INVALID_DATA, 0U, AVIFDEC_FOURCC('i', 'l', 'o', 'c'));
     }
@@ -610,6 +634,17 @@ AvifdecStatus avif_resolve_extents(AvifContext *context,
                                    AvifdecImageInfo *info) {
     size_t extent_index;
 
+    if (context->item_index != 0) {
+        AvifItemPayload payload;
+        AvifdecStatus status = avif_item_index_resolve_item(
+            context->item_index, location->item_id, spans,
+            span_capacity, &payload, context->error);
+
+        if (status != AVIFDEC_OK) return status;
+        info->payload_size = payload.payload_size;
+        info->extent_count = payload.span_count;
+        return AVIFDEC_OK;
+    }
     for (extent_index = 0U; extent_index < location->extent_count; ++extent_index) {
         const AvifExtent *extent = &location->extents[extent_index];
         uint64_t logical_offset;
@@ -688,23 +723,7 @@ AvifdecStatus avif_resolve_extents(AvifContext *context,
 }
 
 static AvifdecLimits avif_effective_limits(const AvifdecLimits *limits) {
-    AvifdecLimits result;
-
-    result.max_width = limits == 0 || limits->max_width == 0U ? 32768U : limits->max_width;
-    result.max_height = limits == 0 || limits->max_height == 0U ? 32768U : limits->max_height;
-    result.max_pixels = limits == 0 || limits->max_pixels == 0U ? 268435456U : limits->max_pixels;
-    result.max_items = limits == 0 || limits->max_items == 0U ? AVIFDEC_DEFAULT_MAX_ITEMS : limits->max_items;
-    result.max_extents = limits == 0 || limits->max_extents == 0U ? AVIFDEC_DEFAULT_MAX_EXTENTS : limits->max_extents;
-    result.max_properties = limits == 0 || limits->max_properties == 0U ? AVIFDEC_DEFAULT_MAX_PROPERTIES : limits->max_properties;
-    result.max_obus = limits == 0 || limits->max_obus == 0U ? AVIFDEC_DEFAULT_MAX_OBUS : limits->max_obus;
-    result.max_frames = limits == 0 || limits->max_frames == 0U ? AVIFDEC_DEFAULT_MAX_FRAMES : limits->max_frames;
-    result.operating_point = limits == 0 ? 0U : limits->operating_point;
-    result.av1_framing = limits == 0
-        ? AVIFDEC_AV1_LOW_OVERHEAD : limits->av1_framing;
-    result.spatial_layer = limits == 0 ? 0U : limits->spatial_layer;
-    result.spatial_layer_set =
-        limits == 0 ? 0U : limits->spatial_layer_set;
-    return result;
+    return avifdec_limits_effective(limits);
 }
 
 AvifdecStatus avif_open_context(AvifContext *context,

@@ -1,4 +1,6 @@
 #include "av1.h"
+#include "av1_avif_conformance.h"
+#include "avif_color.h"
 #include "av1_bitstream.h"
 #include "av1_copy.h"
 #include "av1_filter.h"
@@ -2191,6 +2193,8 @@ AvifdecStatus avifdec_av1_workspace_requirement(
 
 static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                                       size_t span_count,
+                                      const Av1SpanSource *source,
+                                      int conformance_prevalidated,
                                       const AvifdecLimits *limits,
                                       AvifdecImageInfo *info,
                                       AvifdecError *error,
@@ -2230,6 +2234,20 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     if (framing > AVIFDEC_AV1_ANNEX_B) {
         return AVIFDEC_INVALID_ARGUMENT;
     }
+    if (source != 0 &&
+        (source->span_count == 0U || source->span_at == 0)) {
+        return AVIFDEC_INVALID_ARGUMENT;
+    }
+    if (!conformance_prevalidated) {
+        AvifdecStatus conformance_status =
+            av1_avif_validate_obu_stream(
+                spans, span_count, framing, error);
+
+        if (conformance_status != AVIFDEC_OK) {
+            return conformance_status;
+        }
+    }
+    if (source != 0) span_count = source->span_count;
     info->obu_count = 0U;
     info->metadata_obu_count = 0U;
     info->tile_count = 0U;
@@ -2242,11 +2260,33 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
     avifdec_memory_fill(&frame, 0U, sizeof(frame));
     avifdec_memory_fill(&selected_frame, 0U, sizeof(selected_frame));
     stream.spans = spans;
+    stream.source = source;
     stream.span_count = span_count;
     stream.status = AVIFDEC_OK;
     for (index = 0U; index < span_count; ++index) {
-        if (!avifdec_size_add(stream.size, spans[index].size, &stream.size)) {
-            return av1_fail(error, AVIFDEC_OVERFLOW, spans[index].file_offset, 0U);
+        AvifdecSpan span;
+        AvifdecStatus source_status = AVIFDEC_OK;
+
+        if (source != 0) {
+            avifdec_memory_fill(&span, 0U, sizeof(span));
+            source_status = source->span_at(
+                source->context, index, &span, error);
+        } else {
+            span = spans[index];
+        }
+        if (source_status != AVIFDEC_OK) return source_status;
+        if ((span.data == 0 && span.size != 0U) ||
+            span.size > SIZE_MAX - span.file_offset) {
+            return av1_fail(
+                error,
+                span.data == 0
+                    ? AVIFDEC_INVALID_ARGUMENT : AVIFDEC_OVERFLOW,
+                span.file_offset, 0U);
+        }
+        if (!avifdec_size_add(
+                stream.size, span.size, &stream.size)) {
+            return av1_fail(
+                error, AVIFDEC_OVERFLOW, span.file_offset, 0U);
         }
     }
     while (stream.position < stream.size) {
@@ -2623,7 +2663,9 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                     error, AVIFDEC_INVALID_DATA, header_offset, obu_type);
             }
         } else if (obu_type == AV1_OBU_TILE_LIST) {
-            return av1_fail(error, AVIFDEC_UNSUPPORTED, header_offset, obu_type);
+            status = av1_avif_validate_large_scale_tile(1);
+            return av1_fail(
+                error, status, header_offset, obu_type);
         } else if (obu_type == AV1_OBU_PADDING) {
             size_t padding_index;
 
@@ -2812,7 +2854,33 @@ static AvifdecStatus av1_parse_stream(const AvifdecSpan *spans,
                                 sizeof(*trace_state->frame_cdfs));
         }
     }
-    if (!info->has_nclx) {
+    if (info->has_nclx) {
+        AvifColorCicp nclx;
+        AvifColorAv1Cicp av1;
+        AvifdecStatus color_status;
+
+        nclx.color_primaries = info->color_primaries;
+        nclx.transfer_characteristics =
+            info->transfer_characteristics;
+        nclx.matrix_coefficients = info->matrix_coefficients;
+        nclx.color_range = info->color_range;
+        avifdec_memory_fill(&av1, 0U, sizeof(av1));
+        av1.cicp.color_primaries = sequence.color_primaries;
+        av1.cicp.transfer_characteristics =
+            sequence.transfer_characteristics;
+        av1.cicp.matrix_coefficients =
+            sequence.matrix_coefficients;
+        av1.cicp.color_range = sequence.color_range;
+        av1.bit_depth = sequence.bit_depth;
+        av1.monochrome = sequence.monochrome;
+        av1.subsampling_x = sequence.subsampling_x;
+        av1.subsampling_y = sequence.subsampling_y;
+        av1.chroma_sample_position =
+            sequence.chroma_sample_position;
+        color_status = avif_color_validate_nclx_av1(
+            &nclx, &av1, error);
+        if (color_status != AVIFDEC_OK) return color_status;
+    } else {
         info->color_range = sequence.color_range;
         info->color_primaries = sequence.color_primaries;
         info->transfer_characteristics = sequence.transfer_characteristics;
@@ -2828,7 +2896,25 @@ AvifdecStatus avifdec_av1_query_ex(const AvifdecSpan *spans,
                                    AvifdecImageInfo *info,
                                    AvifdecError *error) {
     return av1_parse_stream(
-        spans, span_count, limits, info, error, worker_count, 0);
+                                       spans, span_count, 0, 0, limits, info, error,
+                                       worker_count, 0);
+}
+
+AvifdecStatus avifdec_av1_query_source_ex(
+                                   const Av1SpanSource *source,
+                                   const AvifdecLimits *limits,
+                                   size_t worker_count,
+                                   AvifdecImageInfo *info,
+                                   AvifdecError *error) {
+                                   if (source == 0 || source->span_count == 0U ||
+                                       source->span_at == 0 || info == 0 ||
+                                       worker_count == 0U ||
+                                       worker_count > AVIFDEC_EXECUTOR_MAX_WORKERS) {
+                                       return AVIFDEC_INVALID_ARGUMENT;
+                                   }
+                                   return av1_parse_stream(
+                                       0, 0U, source, 1, limits, info, error,
+                                       worker_count, 0);
 }
 
 AvifdecStatus avifdec_av1_query(const AvifdecSpan *spans,
@@ -2889,7 +2975,7 @@ AvifdecStatus avifdec_av1_trace_ex(
     state.output_spatial_layer_set =
         limits == 0 ? 0U : limits->spatial_layer_set;
     return av1_parse_stream(
-        spans, span_count, limits, info, error,
+        spans, span_count, 0, 0, limits, info, error,
         executor == 0 ? 1U : executor->worker_count, &state);
 }
 
@@ -2961,7 +3047,7 @@ AvifdecStatus avifdec_av1_decode_ex(
     state.output_spatial_layer_set =
         limits == 0 ? 0U : limits->spatial_layer_set;
     return av1_parse_stream(
-        spans, span_count, limits, info, error,
+        spans, span_count, 0, 0, limits, info, error,
         executor == 0 ? 1U : executor->worker_count, &state);
 }
 
