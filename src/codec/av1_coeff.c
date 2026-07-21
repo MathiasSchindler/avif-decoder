@@ -404,38 +404,67 @@ unsigned int av1_coeff_q_context(uint8_t base_q_index) {
     return 3U;
 }
 
+static void av1_coeff_cdf_defaults_unpack(
+    uint16_t *destination,
+    const uint16_t *source,
+    size_t rows,
+    size_t stride) {
+    size_t row;
+    size_t value;
+
+    for (row = 0U; row < rows; ++row) {
+        for (value = 0U; value < stride - 2U; ++value) {
+            *destination++ = *source++;
+        }
+        *destination++ = 32768U;
+        *destination++ = 0U;
+    }
+}
+
 void av1_coeff_cdfs_init(Av1CoeffCdfs *cdfs, uint8_t base_q_index) {
     unsigned int context;
 
     if (cdfs == 0) return;
     context = av1_coeff_q_context(base_q_index);
-    avifdec_memory_copy(cdfs->txb_skip, av1_default_txb_skip_cdf[context],
-                        sizeof(cdfs->txb_skip));
-    avifdec_memory_copy(cdfs->eob_pt_16, av1_default_eob_pt_16_cdf[context],
-                        sizeof(cdfs->eob_pt_16));
-    avifdec_memory_copy(cdfs->eob_pt_32, av1_default_eob_pt_32_cdf[context],
-                        sizeof(cdfs->eob_pt_32));
-    avifdec_memory_copy(cdfs->eob_pt_64, av1_default_eob_pt_64_cdf[context],
-                        sizeof(cdfs->eob_pt_64));
-    avifdec_memory_copy(cdfs->eob_pt_128, av1_default_eob_pt_128_cdf[context],
-                        sizeof(cdfs->eob_pt_128));
-    avifdec_memory_copy(cdfs->eob_pt_256, av1_default_eob_pt_256_cdf[context],
-                        sizeof(cdfs->eob_pt_256));
-    avifdec_memory_copy(cdfs->eob_pt_512, av1_default_eob_pt_512_cdf[context],
-                        sizeof(cdfs->eob_pt_512));
-    avifdec_memory_copy(cdfs->eob_pt_1024, av1_default_eob_pt_1024_cdf[context],
-                        sizeof(cdfs->eob_pt_1024));
-    avifdec_memory_copy(cdfs->eob_extra, av1_default_eob_extra_cdf[context],
-                        sizeof(cdfs->eob_extra));
-    avifdec_memory_copy(cdfs->dc_sign, av1_default_dc_sign_cdf[context],
-                        sizeof(cdfs->dc_sign));
-    avifdec_memory_copy(cdfs->coeff_base_eob,
-                        av1_default_coeff_base_eob_cdf[context],
-                        sizeof(cdfs->coeff_base_eob));
-    avifdec_memory_copy(cdfs->coeff_base, av1_default_coeff_base_cdf[context],
-                        sizeof(cdfs->coeff_base));
-    avifdec_memory_copy(cdfs->coeff_br, av1_default_coeff_br_cdf[context],
-                        sizeof(cdfs->coeff_br));
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->txb_skip,
+        av1_default_txb_skip_cdf_packed + context * 65U, 65U, 3U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_16,
+        av1_default_eob_pt_16_cdf_packed + context * 16U, 4U, 6U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_32,
+        av1_default_eob_pt_32_cdf_packed + context * 20U, 4U, 7U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_64,
+        av1_default_eob_pt_64_cdf_packed + context * 24U, 4U, 8U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_128,
+        av1_default_eob_pt_128_cdf_packed + context * 28U, 4U, 9U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_256,
+        av1_default_eob_pt_256_cdf_packed + context * 32U, 4U, 10U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_512,
+        av1_default_eob_pt_512_cdf_packed + context * 18U, 2U, 11U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_pt_1024,
+        av1_default_eob_pt_1024_cdf_packed + context * 20U, 2U, 12U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->eob_extra,
+        av1_default_eob_extra_cdf_packed + context * 90U, 90U, 3U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->dc_sign,
+        av1_default_dc_sign_cdf_packed + context * 6U, 6U, 3U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->coeff_base_eob,
+        av1_default_coeff_base_eob_cdf_packed + context * 80U, 40U, 4U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->coeff_base,
+        av1_default_coeff_base_cdf_packed + context * 1260U, 420U, 5U);
+    av1_coeff_cdf_defaults_unpack(
+        (uint16_t *)cdfs->coeff_br,
+        av1_default_coeff_br_cdf_packed + context * 630U, 210U, 5U);
 }
 
 uint64_t av1_coeff_cdfs_checksum(const Av1CoeffCdfs *cdfs) {

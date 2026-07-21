@@ -1,6 +1,6 @@
 /* Generated from docs/av1.html by tools/generate-av1-warp-tables.pl. */
 
-static const int16_t av1_warped_filters[193][8] = {
+static const int8_t av1_warped_filters[193][8] = {
     { 0, 0, 127, 1, 0, 0, 0, 0 },
     { 0, -1, 127, 2, 0, 0, 0, 0 },
     { 1, -3, 127, 4, -1, 0, 0, 0 },

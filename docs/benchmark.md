@@ -304,6 +304,48 @@ normalization spans directly and specialize the exact four-symbol CDF update.
 The table is the integrated result; it is not an additive decomposition of
 the individual changes.
 
+## ARM64 binary-size pass
+
+The hotspot-optimized, dependency-free macOS ARM64 decoder was the baseline for
+a final binary-size pass. This was a same-build comparison: both executables
+used the same compiler, inputs, and optimized release configuration, and the
+saved baseline—not an executable from an earlier table—was used for every A/B.
+
+| Executable | File size | SHA-256 | Change |
+| --- | ---: | --- | ---: |
+| Hotspot baseline | 458,912 bytes | `b3374ccf5d8ee1f5a1edfb7b5ad6f15f99ba96b29033d3cac144c01f067da528` | - |
+| Size-optimized | 429,088 bytes | `c94a01b053c90164a77772b8020ba5b06f55656724a112db7ef903952515aaa5` | -29,824 bytes (-6.50%) |
+
+The retained changes are limited in scope: the release decoder-only macOS link
+uses `-Wl,-no_exported_symbols` while preserving the custom removal of dylib
+load commands; invariant coefficient-CDF suffixes are packed and expanded
+exactly during initialization without workspace; and warp constants use exact
+`int8_t` storage with integer promotion at use sites.
+
+One-worker decodes wrote to `/dev/null`, received a warm-up, and followed a
+fixed-seed interleaved schedule. The four standard corpus cases used the same
+bytes as the earlier tables. Active fixtures were generated for 1920x1080 film
+grain, palette/inter coding, and sequence frame 1 to exercise paths affected by
+compact tables; PNG output was also compared. Raw output for all seven decode
+cases and PNG output was byte-identical between executables.
+
+| Workload | Baseline median | Size-optimized median | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP lossy 4:2:0 | 70.505 ms | 70.309 ms | -0.28% |
+| 11.2 MP lossy 4:2:0 | 300.407 ms | 300.077 ms | -0.11% |
+| 4.2 MP lossless 4:4:4 | 560.065 ms | 557.789 ms | -0.41% |
+| 30.1 MP lossy 10-bit 4:2:0 | 923.175 ms | 919.117 ms | -0.44% |
+| 1920x1080 film grain | 182.864 ms | 182.268 ms | -0.33% |
+| Palette/inter | 111.402 ms | 111.162 ms | -0.22% |
+| Sequence frame 1 | 479.470 ms | 479.019 ms | -0.09% |
+
+The four-case geometric-mean reduction was 0.31%. PNG initially measured 0.51%
+slower over 11 rounds. A 61-round confirmation measured 182.593 ms for the
+baseline and 182.970 ms for the candidate (+0.21%); the paired mean was +0.28%
+with a bootstrap 95% confidence interval of -0.08% to +0.71%. Because that
+interval includes zero, the pass has no measurable slowdown. These are durable
+integrated A/B results; temporary focused harness timings are not used.
+
 ## Interpretation
 
 The original snapshot found ordinary lossy decoding approximately 8x to 12x
@@ -320,5 +362,8 @@ workers. Portable entropy normalization and CDF work also improves every
 architecture. dav1d and libaom still have much broader architecture-specific
 coverage. Further optimization should begin with a new flat profile of this
 integrated executable rather than extrapolate from the hotspots addressed
-above. Measurements should not be compared across machines or codec versions
-without recording a new environment section.
+above. The subsequent binary-size pass already evaluated global and selective
+size optimization, table compaction, Mach-O alignment, and symbol/dependency
+link options; those completed strategies should not be proposed again without
+new evidence. Measurements should not be compared across machines or codec
+versions without recording a new environment section.

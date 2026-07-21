@@ -342,7 +342,8 @@ seconds in filtering/control and 1.08 seconds copying unchanged 4x4 blocks.
 The combined 60.4% share makes these stages materially more valuable than AV1
 tile refactoring on this filter-heavy workload.
 
-The dependency audit found these safe future execution boundaries:
+The dependency audit found the safe execution boundaries listed below; the
+later decoder-parallelism work in this document subsequently implemented them:
 
 - CDEF must first copy all visible input planes to output. Its remaining work
   can be divided on two-mi-row boundaries. Each unit reads only the immutable
@@ -730,6 +731,79 @@ The four corpus cases improved by a 30.68% geometric mean. All five raw outputs
 were byte-identical between executables. The optimized ARM64 executable grew
 from 442,256 to 458,912 bytes, or 16,656 bytes (3.77%). These results are the
 combined pass and must not be added to isolated implementation-time results.
+
+## macOS ARM64 binary-size profile
+
+The optimized dependency-free decoder above was profiled as a Mach-O file, not
+by comparing source-level object totals. Its 458,912 bytes had SHA-256
+`b3374ccf5d8ee1f5a1edfb7b5ad6f15f99ba96b29033d3cac144c01f067da528`.
+Approximately 264,116 bytes (57.55%) were code, 117,617 (25.63%) constants,
+42,771 (9.32%) file/segment alignment, and 32,928 (7.18%) `LINKEDIT`. The
+largest individual constant groups were the 44,824-byte quantizer-matrix data
+and 31,992 bytes of coefficient CDFs.
+
+The accepted executable is 429,088 bytes, with SHA-256
+`c94a01b053c90164a77772b8020ba5b06f55656724a112db7ef903952515aaa5`.
+It saves 29,824 bytes (6.50%). The retained implementation consists of:
+
+- `-Wl,-no_exported_symbols` only for the release decoder macOS link, retaining
+  the custom dylib-load-command removal and therefore the dependency-free
+  design;
+- packed invariant coefficient-CDF suffixes, expanded exactly during
+  initialization with no persistent or temporary decoder workspace;
+- `int8_t` warp constants whose uses preserve the original values through exact
+  integer promotion.
+
+The following alternatives were measured and rejected:
+
+- Retaining an `LC_LOAD_DYLIB` command saved machinery but violated the
+  dependency-free goal. Reducing segment alignment to 4 KiB produced a binary
+  killed with `SIGKILL`, and `no_data_const` weakened hardening.
+- LTO, global `-Os`/`-Oz`, and global no-inline variants either grew the file or
+  slowed decoding. Selective `-Oz` on nine objects saved 16,352 bytes but
+  regressed active film grain by 6.59%, palette/inter by 2.29%, sequence replay
+  by 23.94%, and PNG by 24.55%. Applying `-Oz` to the remaining two objects did
+  not change final file size.
+- Sharing identity `mrow` storage caused matched 0.40% to 1.27% regressions and
+  no final aligned-file saving. Further quantizer-matrix or hot-table
+  compression was rejected because it adds runtime work.
+
+For a local reproduction with the recorded toolchain, build the normal release
+decoder and inspect the final file rather than summing object sections:
+
+```sh
+make clean
+make
+stat -f '%z' build/arm64/avifdec
+shasum -a 256 build/arm64/avifdec
+size -m build/arm64/avifdec
+otool -l build/arm64/avifdec
+```
+
+The final two commands inspect section allocation, segment/file alignment,
+`LINKEDIT`, export information, and the absence of `LC_LOAD_DYLIB`. Size and
+performance claims are same-build only. The timing protocol used one worker,
+`/dev/null` raw output, a warm-up of each executable, and a fixed-seed
+interleaved schedule. The four standard corpus cases were supplemented by
+generated active fixtures for 1920x1080 film grain, palette/inter coding, and
+sequence frame 1, plus PNG output. All raw outputs and PNG output matched
+exactly.
+
+| Workload | Baseline median | Accepted median | Delta |
+| --- | ---: | ---: | ---: |
+| 2.5 MP lossy 4:2:0 | 70.505 ms | 70.309 ms | -0.28% |
+| 11.2 MP lossy 4:2:0 | 300.407 ms | 300.077 ms | -0.11% |
+| 4.2 MP lossless 4:4:4 | 560.065 ms | 557.789 ms | -0.41% |
+| 30.1 MP lossy 10-bit 4:2:0 | 923.175 ms | 919.117 ms | -0.44% |
+| 1920x1080 film grain | 182.864 ms | 182.268 ms | -0.33% |
+| Palette/inter | 111.402 ms | 111.162 ms | -0.22% |
+| Sequence frame 1 | 479.470 ms | 479.019 ms | -0.09% |
+
+The corpus geometric mean was -0.31%. PNG's initial 11-round result was +0.51%.
+The 61-round confirmation was 182.593 ms versus 182.970 ms (+0.21%), with a
++0.28% paired mean and bootstrap 95% confidence interval of [-0.08%, +0.71%].
+This does not establish a measurable slowdown. Temporary focused harnesses that
+were not retained are not treated as reproducible precision evidence.
 
 ## Validation
 

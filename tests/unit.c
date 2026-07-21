@@ -2768,6 +2768,46 @@ static void force_cdf_symbol(uint16_t *cdf,
     cdf[symbols] = 0U;
 }
 
+static void test_hash_u16_array(uint64_t *checksum,
+                                const void *array,
+                                size_t size) {
+    const uint8_t *bytes = (const uint8_t *)array;
+    size_t offset;
+
+    for (offset = 0U; offset < size; offset += sizeof(uint16_t)) {
+        uint16_t value;
+        unsigned int byte;
+
+        avifdec_memory_copy(&value, bytes + offset, sizeof(value));
+        for (byte = 0U; byte < 2U; ++byte) {
+            *checksum ^= (uint8_t)(value >> (byte * 8U));
+            *checksum *= (uint64_t)1099511628211ULL;
+        }
+    }
+}
+
+static uint64_t test_av1_coeff_cdfs_checksum(const Av1CoeffCdfs *cdfs) {
+    uint64_t checksum = (uint64_t)1469598103934665603ULL;
+
+#define HASH_MEMBER(member) \
+    test_hash_u16_array(&checksum, cdfs->member, sizeof(cdfs->member))
+    HASH_MEMBER(txb_skip);
+    HASH_MEMBER(eob_pt_16);
+    HASH_MEMBER(eob_pt_32);
+    HASH_MEMBER(eob_pt_64);
+    HASH_MEMBER(eob_pt_128);
+    HASH_MEMBER(eob_pt_256);
+    HASH_MEMBER(eob_pt_512);
+    HASH_MEMBER(eob_pt_1024);
+    HASH_MEMBER(eob_extra);
+    HASH_MEMBER(dc_sign);
+    HASH_MEMBER(coeff_base_eob);
+    HASH_MEMBER(coeff_base);
+    HASH_MEMBER(coeff_br);
+#undef HASH_MEMBER
+    return checksum;
+}
+
 static int test_av1_coeff_cdfs(void) {
     Av1CoeffCdfs cdfs;
     Av1CoeffCdfs repeated;
@@ -2789,13 +2829,21 @@ static int test_av1_coeff_cdfs(void) {
     CHECK(cdfs.coeff_base_eob[0][0][0][0] == 17837U);
     CHECK(cdfs.coeff_base[0][0][0][0] == 4034U);
     CHECK(cdfs.coeff_br[0][0][0][0] == 14298U);
-    checksum = av1_coeff_cdfs_checksum(&cdfs);
+    checksum = test_av1_coeff_cdfs_checksum(&cdfs);
+    CHECK(checksum == 0x1fe84f6b92dfba55ULL);
     av1_coeff_cdfs_init(&repeated, 20U);
-    CHECK(checksum == av1_coeff_cdfs_checksum(&repeated));
+    CHECK(checksum == test_av1_coeff_cdfs_checksum(&repeated));
     repeated.coeff_base[0][0][0][0] = 0U;
-    CHECK(checksum != av1_coeff_cdfs_checksum(&repeated));
+    CHECK(checksum != test_av1_coeff_cdfs_checksum(&repeated));
+    av1_coeff_cdfs_init(&repeated, 21U);
+    CHECK(test_av1_coeff_cdfs_checksum(&repeated) ==
+          0x9c22e8a988ad6d3aULL);
+    av1_coeff_cdfs_init(&repeated, 61U);
+    CHECK(test_av1_coeff_cdfs_checksum(&repeated) ==
+          0xc5970a1d2736b10eULL);
     av1_coeff_cdfs_init(&repeated, 121U);
-    CHECK(checksum != av1_coeff_cdfs_checksum(&repeated));
+    CHECK(test_av1_coeff_cdfs_checksum(&repeated) ==
+          0x3cd935dc4297a5a4ULL);
     CHECK(repeated.eob_pt_16[0][0][0] == 6708U);
     return 0;
 }

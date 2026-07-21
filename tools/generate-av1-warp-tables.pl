@@ -44,11 +44,13 @@ sub table_values {
 
 my @filters = table_values('Warped_Filters', 193 * 8);
 my @divisors = table_values('Div_Lut', 257);
+die "Warped_Filters contains a value outside int8_t range\n"
+    if grep { $_ < -128 || $_ > 127 } @filters;
 
 open my $output, '>', $output_path or die "open $output_path: $!\n";
 print {$output} "/* Generated from docs/av1.html by ",
                 "tools/generate-av1-warp-tables.pl. */\n\n";
-print {$output} "static const int16_t av1_warped_filters[193][8] = {\n";
+print {$output} "static const int8_t av1_warped_filters[193][8] = {\n";
 for my $row (0 .. 192) {
     my @values = @filters[$row * 8 .. $row * 8 + 7];
     print {$output} "    { ", join(', ', @values), " }",

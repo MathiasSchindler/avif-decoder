@@ -5,6 +5,7 @@ MACHO_DYLIB_REMOVER := build/host/macho-dylib-remover
 LINK_TOOLS :=
 POST_LINK :=
 TARGET_CFLAGS :=
+RELEASE_DECODER_LDFLAGS :=
 OS := $(shell uname -s)
 ARCH := $(shell uname -m)
 BUILD_DIR := build/$(ARCH)
@@ -33,6 +34,8 @@ WASM_ASSETS := index.html app.js decoder-worker.js styles.css
 .DEFAULT_GOAL := $(TARGET)
 COEFF_TABLES := src/codec/av1_coeff_tables.inc
 COEFF_TABLES_CHECK := build/generated-check/av1_coeff_tables.inc
+COEFF_DEFAULTS := src/codec/av1_coeff_defaults.inc
+COEFF_DEFAULTS_CHECK := build/generated-check/av1_coeff_defaults.inc
 PALETTE_TABLES := src/codec/av1_palette_tables.inc
 PALETTE_TABLES_CHECK := build/generated-check/av1_palette_tables.inc
 QUANT_TABLES := src/codec/av1_quant_tables.inc
@@ -69,6 +72,7 @@ LINK_TOOLS := $(MACHO_DYLIB_REMOVER)
 POST_LINK = $(MACHO_DYLIB_REMOVER) $@ && codesign --force --sign - $@
 TARGET_CFLAGS := -target arm64-apple-macos11 -isysroot $(MACOS_SDKROOT) \
 	-DAVIFDEC_AARCH64_NEON=1
+RELEASE_DECODER_LDFLAGS := -Wl,-no_exported_symbols
 LDFLAGS := \
 	$(TARGET_CFLAGS) -nostdlib -lSystem -Wl,-no_fixup_chains \
 	-Wl,-platform_version,macos,11.0,11.0 \
@@ -206,7 +210,7 @@ $(COLD_OBJECTS): CFLAGS += -Os
 # the custom static-pie startup only needs the dynamic relocation section,
 # not the symbol table, and this leaves the debug-oriented test binaries
 # below (unit, obu-trace, thread-unit) unstripped for debuggability.
-$(TARGET): LDFLAGS += -Wl,-s
+$(TARGET): LDFLAGS += $(RELEASE_DECODER_LDFLAGS) -Wl,-s
 
 $(TARGET): $(OBJECTS) $(CORE_HEADERS) $(PLATFORM_HEADERS) \
 		$(FREESTANDING_HEADERS) $(LINK_TOOLS) Makefile
@@ -378,15 +382,18 @@ $(BUILD_DIR)/%.o: %.S
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(GENERATED_CHECK): tools/generate-av1-coeff-tables.pl \
+		tools/generate-av1-coeff-cdfs.pl \
 		tools/generate-av1-palette-tables.pl \
 		tools/generate-av1-quant-tables.pl \
 		tools/generate-av1-warp-tables.pl \
 		tools/generate-av1-film-grain-table.pl $(AV1_SPEC) \
-		$(COEFF_TABLES) $(PALETTE_TABLES) $(QUANT_TABLES) $(WARP_TABLES) \
-		$(FILM_GRAIN_TABLE)
+		$(COEFF_TABLES) $(COEFF_DEFAULTS) $(PALETTE_TABLES) \
+		$(QUANT_TABLES) $(WARP_TABLES) $(FILM_GRAIN_TABLE)
 	@mkdir -p build/generated-check
 	perl tools/generate-av1-coeff-tables.pl $(AV1_SPEC) $(COEFF_TABLES_CHECK)
 	cmp $(COEFF_TABLES) $(COEFF_TABLES_CHECK)
+	perl tools/generate-av1-coeff-cdfs.pl $(AV1_SPEC) $(COEFF_DEFAULTS_CHECK)
+	cmp $(COEFF_DEFAULTS) $(COEFF_DEFAULTS_CHECK)
 	perl tools/generate-av1-palette-tables.pl $(AV1_SPEC) $(PALETTE_TABLES_CHECK)
 	cmp $(PALETTE_TABLES) $(PALETTE_TABLES_CHECK)
 	perl tools/generate-av1-quant-tables.pl $(AV1_SPEC) $(QUANT_TABLES_CHECK)
